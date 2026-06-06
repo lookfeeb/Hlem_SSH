@@ -95,8 +95,13 @@ impl KdfParams {
     }
 
     fn argon2(&self) -> AppResult<Argon2<'static>> {
-        let params = Params::new(self.m_cost_kib, self.t_cost, self.parallelism, Some(KEY_LEN))
-            .map_err(|error| AppError::Crypto(format!("Argon2 参数无效: {error}")))?;
+        let params = Params::new(
+            self.m_cost_kib,
+            self.t_cost,
+            self.parallelism,
+            Some(KEY_LEN),
+        )
+        .map_err(|error| AppError::Crypto(format!("Argon2 参数无效: {error}")))?;
         Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
     }
 }

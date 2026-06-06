@@ -247,6 +247,18 @@
 
 .statusSummaryTile:hover::before { opacity: 1; }
 
+.statusSummaryTileButton {
+  width: 100%;
+  border: 1px solid rgba(232, 238, 246, .9);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.statusSummaryTileButton:disabled {
+  cursor: default;
+}
+
 .statusSummaryTileLabel {
   display: inline-flex;
   align-items: center;
@@ -477,6 +489,81 @@
 .networkStats .anticon {
   flex: 0 0 auto;
   color: var(--accent);
+}
+
+.networkInterfacesPanel {
+  display: grid;
+  gap: 6px;
+  width: 320px;
+  max-width: min(320px, calc(100vw - 48px));
+}
+
+.networkInterfacesPopover .ant-popover-inner {
+  overflow: hidden;
+  border: 1px solid rgba(191, 219, 254, .9);
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+}
+
+.networkInterfacesPopover .ant-popover-title {
+  margin: -12px -12px 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(191, 219, 254, .76);
+  background: linear-gradient(135deg, rgba(37, 99, 235, .12) 0%, rgba(20, 184, 166, .1) 100%);
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .2px;
+}
+
+.networkInterfaceRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(232, 238, 246, .9);
+  border-radius: 8px;
+  background: rgba(248, 251, 255, .86);
+}
+
+.networkInterfaceName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.networkInterfaceSpeed {
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.networkInterfaceRate {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.networkInterfaceRate .anticon {
+  color: var(--accent);
+}
+
+.networkInterfacesEmpty {
+  width: 180px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .networkPanel {

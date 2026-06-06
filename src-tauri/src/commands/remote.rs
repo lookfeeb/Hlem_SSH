@@ -1,6 +1,6 @@
 use tauri::{AppHandle, State};
 
-use super::{ensure_vault_unlocked, connect_session, AppState, AppResult};
+use super::{connect_session, ensure_vault_unlocked, AppResult, AppState};
 use crate::remote::{ForwardInfo, ServerTelemetry, TelemetryJobInfo};
 
 #[tauri::command]

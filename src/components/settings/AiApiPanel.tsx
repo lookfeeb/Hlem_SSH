@@ -171,7 +171,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
     void navigator.clipboard.writeText(text).then(() => {
       setAiApiCopied(true);
       setSafeTimeout(() => setAiApiCopied(false), 2000);
-      message.success("已复制 API 使用说明（含 HTTP + WebSocket 协议）");
+      message.success("已复制 API 使用说明（HTTP REST）");
     });
   }
 
@@ -245,10 +245,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
               <div className="aiApiEndpointItem">
                 <code>备份</code>
                 <span>settings · records · run</span>
-              </div>
-              <div className="aiApiEndpointItem">
-                <code>WS</code>
-                <span>exec(流式) · cancel · ping（高级，可选）</span>
               </div>
             </div>
           </div>

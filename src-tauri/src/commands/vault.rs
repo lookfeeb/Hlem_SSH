@@ -43,10 +43,7 @@ pub fn settings_update(
 }
 
 #[tauri::command]
-pub fn tunnel_create(
-    state: State<'_, AppState>,
-    input: TunnelInput,
-) -> AppResult<ConfigSnapshot> {
+pub fn tunnel_create(state: State<'_, AppState>, input: TunnelInput) -> AppResult<ConfigSnapshot> {
     with_store(&state, |store| store.create_tunnel(input))
 }
 
@@ -60,10 +57,7 @@ pub fn tunnel_update(
 }
 
 #[tauri::command]
-pub fn tunnel_delete(
-    state: State<'_, AppState>,
-    tunnel_id: String,
-) -> AppResult<ConfigSnapshot> {
+pub fn tunnel_delete(state: State<'_, AppState>, tunnel_id: String) -> AppResult<ConfigSnapshot> {
     with_store(&state, |store| store.delete_tunnel(&tunnel_id))
 }
 
@@ -73,10 +67,7 @@ pub fn tunnel_list(state: State<'_, AppState>) -> AppResult<Vec<TunnelConfig>> {
 }
 
 #[tauri::command]
-pub async fn vault_backup_export(
-    state: State<'_, AppState>,
-    path: String,
-) -> AppResult<()> {
+pub async fn vault_backup_export(state: State<'_, AppState>, path: String) -> AppResult<()> {
     let vault_path = with_store(&state, |store| {
         store.ensure_unlocked()?;
         Ok(store.vault_file_path())

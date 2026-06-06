@@ -13,6 +13,7 @@ export function createEmptyTelemetry(ip: string): ServerTelemetry {
       uploadKbps: 0,
       downloadKbps: 0,
       latencyMs: 0,
+      interfaces: [],
     },
     disks: [],
   };

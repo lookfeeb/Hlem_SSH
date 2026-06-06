@@ -262,7 +262,6 @@ function normalizeBrowserSettings(settings?: AppSettings | null): AppSettings {
     proxy: settings?.proxy ?? null,
     backup: normalizeBackupSettings(settings?.backup),
     quickCommands: settings?.quickCommands ?? [],
-    terminalInputHistory: settings?.terminalInputHistory ?? [],
     ignoredUpdateVersions: settings?.ignoredUpdateVersions ?? [],
     aiApiKey: settings?.aiApiKey ?? null,
     aiApiSessionId: settings?.aiApiSessionId ?? null,

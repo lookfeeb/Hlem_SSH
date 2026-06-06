@@ -53,6 +53,14 @@ export interface NetworkMetric {
   uploadKbps: number;
   downloadKbps: number;
   latencyMs: number;
+  interfaces: NetworkInterfaceMetric[];
+}
+
+export interface NetworkInterfaceMetric {
+  interfaceName: string;
+  uploadKbps: number;
+  downloadKbps: number;
+  linkSpeedMbps?: number | null;
 }
 
 export interface DiskMetric {
@@ -93,17 +101,11 @@ export interface AppSettings {
   proxy?: AppProxyOptions | null;
   backup: BackupSettings;
   quickCommands?: QuickCommand[];
-  terminalInputHistory?: TerminalInputHistoryEntry[];
   ignoredUpdateVersions?: string[];
   aiApiKey?: string | null;
   aiApiSessionId?: string | null;
   aiApiPort?: number | null;
   aiApiAutoStart?: boolean;
-}
-
-export interface TerminalInputHistoryEntry {
-  command: string;
-  timestamp: number;
 }
 
 export interface QuickCommand {

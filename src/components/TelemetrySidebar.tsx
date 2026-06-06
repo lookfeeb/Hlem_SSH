@@ -6,11 +6,11 @@ import {
   HddOutlined,
   WifiOutlined,
 } from "@ant-design/icons";
-import { Progress, Table } from "antd";
+import { Popover, Progress, Table } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { formatBytes, formatUsage, percent } from "../lib/format";
 import { createEmptyTelemetry } from "../lib/remoteDefaults";
-import type { DiskMetric, ProcessInfo, RemoteSession } from "../types";
+import type { DiskMetric, NetworkInterfaceMetric, ProcessInfo, RemoteSession } from "../types";
 import { useState } from "react";
 import { useTimeoutRegistry } from "../lib/reactLifecycle";
 
@@ -58,6 +58,15 @@ function formatNetworkRate(value: number) {
   return `${scaled.toFixed(digits)} ${units[unitIndex]}`;
 }
 
+function formatLinkSpeed(value?: number | null) {
+  if (!value || !Number.isFinite(value) || value <= 0) return "";
+  if (value >= 1000) {
+    const gbps = value / 1000;
+    return `${Number.isInteger(gbps) ? gbps.toFixed(0) : gbps.toFixed(1)} Gbps`;
+  }
+  return `${value} Mbps`;
+}
+
 export function TelemetrySidebar({
   session,
 }: TelemetrySidebarProps) {
@@ -69,6 +78,9 @@ export function TelemetrySidebar({
   const uptimeText = isConnected ? telemetry.uptime : "";
   const interfaceText = isConnected ? telemetry.network.interfaceName : "网络";
   const latencyText = isConnected ? `${telemetry.network.latencyMs} ms` : "";
+  const networkInterfaces = isConnected
+    ? normalizedNetworkInterfaces(telemetry.network.interfaces, telemetry.network)
+    : [];
 
   return (
     <aside className="telemetrySidebar">
@@ -101,13 +113,21 @@ export function TelemetrySidebar({
             </span>
             <strong title={uptimeText || undefined}>{uptimeText}</strong>
           </span>
-          <span className="statusSummaryTile">
-            <span className="statusSummaryTileLabel" title={interfaceText}>
-              <WifiOutlined />
-              <span>{interfaceText}</span>
-            </span>
-            <strong title={latencyText || undefined}>{latencyText}</strong>
-          </span>
+          <Popover
+            trigger="click"
+            placement="bottomRight"
+            classNames={{ root: "networkInterfacesPopover" }}
+            title={`网卡接口 · ${networkInterfaces.length} 个`}
+            content={<NetworkInterfacesPanel interfaces={networkInterfaces} />}
+          >
+            <button type="button" className="statusSummaryTile statusSummaryTileButton" disabled={!isConnected}>
+              <span className="statusSummaryTileLabel" title={interfaceText}>
+                <WifiOutlined />
+                <span>{interfaceText}</span>
+              </span>
+              <strong title={latencyText || undefined}>{latencyText}</strong>
+            </button>
+          </Popover>
         </div>
         <div className="networkStats">
           <span>
@@ -176,6 +196,55 @@ export function TelemetrySidebar({
         </section>
       )}
     </aside>
+  );
+}
+
+function normalizedNetworkInterfaces(
+  interfaces: NetworkInterfaceMetric[] | undefined,
+  primary: {
+    interfaceName: string;
+    uploadKbps: number;
+    downloadKbps: number;
+  },
+) {
+  if (interfaces && interfaces.length > 0) return interfaces;
+  if (!primary.interfaceName || primary.interfaceName === "-") return [];
+  return [
+    {
+      interfaceName: primary.interfaceName,
+      uploadKbps: primary.uploadKbps,
+      downloadKbps: primary.downloadKbps,
+      linkSpeedMbps: null,
+    },
+  ];
+}
+
+function NetworkInterfacesPanel({ interfaces }: { interfaces: NetworkInterfaceMetric[] }) {
+  if (interfaces.length === 0) {
+    return <div className="networkInterfacesEmpty">暂无网卡数据</div>;
+  }
+  return (
+    <div className="networkInterfacesPanel">
+      {interfaces.map((item) => {
+        const linkSpeed = formatLinkSpeed(item.linkSpeedMbps);
+        return (
+          <div className="networkInterfaceRow" key={item.interfaceName}>
+            <span className="networkInterfaceName" title={item.interfaceName}>{item.interfaceName}</span>
+            {linkSpeed ? (
+              <span className="networkInterfaceSpeed" title="接口链路速率">
+                {linkSpeed}
+              </span>
+            ) : null}
+            <span className="networkInterfaceRate">
+              <ArrowUpOutlined /> {formatNetworkRate(item.uploadKbps)}
+            </span>
+            <span className="networkInterfaceRate">
+              <ArrowDownOutlined /> {formatNetworkRate(item.downloadKbps)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

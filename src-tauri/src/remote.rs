@@ -69,7 +69,7 @@ const TELEMETRY_IP_MIN_INTERVAL_MS: u64 = 600_000;
 const TELEMETRY_FAST_TIMEOUT_MS: u64 = 8_000;
 const TELEMETRY_SLOW_TIMEOUT_MS: u64 = 12_000;
 const MAX_SFTP_TRANSFER_CONCURRENCY: usize = 4;
-const SFTP_TRANSFER_POOL_SIZE: usize = 2;
+const SFTP_TRANSFER_POOL_SIZE: usize = 4;
 const SFTP_OWNER_LOOKUP_TIMEOUT_MS: u64 = 1_500;
 const MAX_SFTP_SEARCH_CONCURRENCY: usize = 12;
 const MAX_SFTP_SEARCH_DIRS: usize = 800;
@@ -80,6 +80,8 @@ pub(crate) const TRANSFER_BUFFER_BYTES: usize = 1024 * 1024;
 const TRANSFER_ACCELERATED_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 const TRANSFER_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
 const TRANSFER_PROGRESS_MIN_BYTES: u64 = 1024 * 1024;
+const TRANSFER_PROGRESS_MAX_SILENCE: Duration = Duration::from_secs(2);
+const TRANSFER_SPEED_SMOOTHING_ALPHA: f64 = 0.35;
 /// 文件大于此阈值且非续传时，下载切换到多 File handle 并行模式，
 /// 用以绕开 russh-sftp 单 File 串行 read 的瓶颈（每个 handle 自带 in-flight READ）。
 /// UI 拖拽下载和 AI API 下载共用同一阈值。
@@ -87,6 +89,11 @@ pub(crate) const PARALLEL_DOWNLOAD_THRESHOLD: u64 = 32 * 1024 * 1024;
 /// 并行下载并发度。保守取 2，尽量兼顾吞吐与常见 VPS 的 MaxSessions 限制。
 /// UI 拖拽下载和 AI API 下载共用。
 pub(crate) const PARALLEL_DOWNLOAD_PARTS: u64 = 2;
+/// 文件大于此阈值且非续传时，上传切换到多 File handle 分片写入。
+/// 单 handle 写入本身已有 pipeline；并行上传主要用于高延迟链路继续撑满 SSH/SFTP 窗口。
+pub(crate) const PARALLEL_UPLOAD_THRESHOLD: u64 = 32 * 1024 * 1024;
+/// 并行上传并发度。先保守取 2，降低远端 SFTP server 对同一文件并发写的兼容风险。
+pub(crate) const PARALLEL_UPLOAD_PARTS: u64 = 2;
 const TELEMETRY_BASE_COMMAND: &str = r#"sh -lc 'export LC_ALL=C;
 if read -r up _ < /proc/uptime 2>/dev/null; then printf "UPTIME %.0f\n" "$up"; fi;
 mem_total=0; mem_free=0; buffers=0; cached=0; sreclaimable=0; shmem=0; swap_total=0; swap_free=0;
@@ -121,26 +128,42 @@ if [ -r /proc/net/route ]; then
     [ "$dest" = "00000000" ] && { default_iface="$iface"; break; }
   done < /proc/net/route;
 fi;
-best_iface=""; best_rx=0; best_tx=0; best_total=0;
-while IFS=: read -r iface data; do
-  set -- $data;
-  [ $# -ge 16 ] || continue;
-  iface=$(printf "%s" "$iface" | tr -d " ");
-  [ "$iface" = "lo" ] && continue;
-  rx=$1; tx=$9;
-  [ "$rx" -ge 0 ] 2>/dev/null || continue;
-  [ "$tx" -ge 0 ] 2>/dev/null || continue;
-  if [ "$iface" = "$default_iface" ]; then
-    printf "NET %s %s %s\n" "$iface" "$rx" "$tx";
-    best_iface="";
-    break;
+if [ -r /proc/net/dev ]; then
+  if [ -n "$default_iface" ]; then
+    while IFS=: read -r iface data; do
+      set -- $data;
+      [ $# -ge 16 ] || continue;
+      iface=$(printf "%s" "$iface" | tr -d " ");
+      [ "$iface" = "$default_iface" ] || continue;
+      rx=$1; tx=$9;
+      [ "$rx" -ge 0 ] 2>/dev/null || continue;
+      [ "$tx" -ge 0 ] 2>/dev/null || continue;
+      speed=0;
+      if [ -r "/sys/class/net/$iface/speed" ]; then
+        read -r speed < "/sys/class/net/$iface/speed" 2>/dev/null || speed=0;
+      fi;
+      case "$speed" in *[!0-9]*|"") speed=0;; esac;
+      printf "NET %s %s %s %s\n" "$iface" "$rx" "$tx" "$speed";
+      break;
+    done < /proc/net/dev;
   fi;
-  total=$((rx + tx));
-  if [ "$total" -gt "$best_total" ]; then
-    best_iface="$iface"; best_rx=$rx; best_tx=$tx; best_total=$total;
-  fi;
-done < /proc/net/dev 2>/dev/null;
-[ -n "$best_iface" ] && printf "NET %s %s %s\n" "$best_iface" "$best_rx" "$best_tx";
+  while IFS=: read -r iface data; do
+    set -- $data;
+    [ $# -ge 16 ] || continue;
+    iface=$(printf "%s" "$iface" | tr -d " ");
+    [ "$iface" = "lo" ] && continue;
+    [ "$iface" = "$default_iface" ] && continue;
+    rx=$1; tx=$9;
+    [ "$rx" -ge 0 ] 2>/dev/null || continue;
+    [ "$tx" -ge 0 ] 2>/dev/null || continue;
+    speed=0;
+    if [ -r "/sys/class/net/$iface/speed" ]; then
+      read -r speed < "/sys/class/net/$iface/speed" 2>/dev/null || speed=0;
+    fi;
+    case "$speed" in *[!0-9]*|"") speed=0;; esac;
+    printf "NET %s %s %s %s\n" "$iface" "$rx" "$tx" "$speed";
+  done < /proc/net/dev;
+fi;
 '"#;
 const TELEMETRY_IP_COMMAND: &str = r#"sh -lc 'export LC_ALL=C;
 public_ip="";
@@ -214,26 +237,42 @@ helm_tm_base() {
       [ "$dest" = "00000000" ] && { default_iface="$iface"; break; }
     done < /proc/net/route;
   fi;
-  best_iface=""; best_rx=0; best_tx=0; best_total=0;
-  while IFS=: read -r iface data; do
-    set -- $data;
-    [ $# -ge 16 ] || continue;
-    iface=$(printf "%s" "$iface" | tr -d " ");
-    [ "$iface" = "lo" ] && continue;
-    rx=$1; tx=$9;
-    [ "$rx" -ge 0 ] 2>/dev/null || continue;
-    [ "$tx" -ge 0 ] 2>/dev/null || continue;
-    if [ "$iface" = "$default_iface" ]; then
-      printf "NET %s %s %s\n" "$iface" "$rx" "$tx";
-      best_iface="";
-      break;
+  if [ -r /proc/net/dev ]; then
+    if [ -n "$default_iface" ]; then
+      while IFS=: read -r iface data; do
+        set -- $data;
+        [ $# -ge 16 ] || continue;
+        iface=$(printf "%s" "$iface" | tr -d " ");
+        [ "$iface" = "$default_iface" ] || continue;
+        rx=$1; tx=$9;
+        [ "$rx" -ge 0 ] 2>/dev/null || continue;
+        [ "$tx" -ge 0 ] 2>/dev/null || continue;
+        speed=0;
+        if [ -r "/sys/class/net/$iface/speed" ]; then
+          read -r speed < "/sys/class/net/$iface/speed" 2>/dev/null || speed=0;
+        fi;
+        case "$speed" in *[!0-9]*|"") speed=0;; esac;
+        printf "NET %s %s %s %s\n" "$iface" "$rx" "$tx" "$speed";
+        break;
+      done < /proc/net/dev;
     fi;
-    total=$((rx + tx));
-    if [ "$total" -gt "$best_total" ]; then
-      best_iface="$iface"; best_rx=$rx; best_tx=$tx; best_total=$total;
-    fi;
-  done < /proc/net/dev 2>/dev/null;
-  [ -n "$best_iface" ] && printf "NET %s %s %s\n" "$best_iface" "$best_rx" "$best_tx";
+    while IFS=: read -r iface data; do
+      set -- $data;
+      [ $# -ge 16 ] || continue;
+      iface=$(printf "%s" "$iface" | tr -d " ");
+      [ "$iface" = "lo" ] && continue;
+      [ "$iface" = "$default_iface" ] && continue;
+      rx=$1; tx=$9;
+      [ "$rx" -ge 0 ] 2>/dev/null || continue;
+      [ "$tx" -ge 0 ] 2>/dev/null || continue;
+      speed=0;
+      if [ -r "/sys/class/net/$iface/speed" ]; then
+        read -r speed < "/sys/class/net/$iface/speed" 2>/dev/null || speed=0;
+      fi;
+      case "$speed" in *[!0-9]*|"") speed=0;; esac;
+      printf "NET %s %s %s %s\n" "$iface" "$rx" "$tx" "$speed";
+    done < /proc/net/dev;
+  fi;
 };
 helm_tm_ip() {
   public_ip="";
@@ -352,21 +391,6 @@ pub struct ExecResult {
     pub timed_out: bool,
 }
 
-/// 单次流式 exec 推给上游的一个增量帧。WS `/api/ws` 的 `exec` 类型请求边收边推。
-#[derive(Debug, Clone)]
-pub enum ExecStreamChunk {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-}
-
-/// 流式 exec 收尾时的摘要信息。
-#[derive(Debug, Clone)]
-pub struct ExecStreamSummary {
-    pub exit_status: Option<u32>,
-    pub duration_ms: u64,
-    pub timed_out: bool,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferInfo {
@@ -430,6 +454,16 @@ pub struct NetworkMetric {
     pub upload_kbps: f64,
     pub download_kbps: f64,
     pub latency_ms: u128,
+    pub interfaces: Vec<NetworkInterfaceMetric>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkInterfaceMetric {
+    pub interface_name: String,
+    pub upload_kbps: f64,
+    pub download_kbps: f64,
+    pub link_speed_mbps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -540,7 +574,7 @@ struct TelemetryJobRecord {
 struct ParsedTelemetry {
     output: String,
     snapshot: ServerTelemetry,
-    network_bytes: Option<NetworkBytes>,
+    network_bytes: Vec<NetworkBytes>,
 }
 
 #[derive(Clone)]
@@ -548,6 +582,7 @@ struct NetworkBytes {
     interface_name: String,
     rx_bytes: u64,
     tx_bytes: u64,
+    link_speed_mbps: Option<u64>,
 }
 
 struct ForwardRecord {

@@ -167,7 +167,7 @@ export function useSftpFiles({
     if (!session?.sftpId) throw new Error("当前 SFTP 不可用");
     const expanded = await appApi.expandLocalPaths(localPaths);
     if (expanded.length === 0) return;
-    const accelerated = expanded.length === 1;
+    const queueConcurrency = expanded.length === 1 ? 1 : uploadConcurrency(expanded.length);
     const dirsToCreate = new Set<string>();
     for (const entry of expanded) {
       const parts = entry.relativePath.replace(/\\/g, "/").split("/");
@@ -185,10 +185,10 @@ export function useSftpFiles({
     }
     const queuedTransfers = await runUploadQueue(
       expanded,
-      accelerated ? 1 : uploadConcurrency(expanded.length),
+      queueConcurrency,
       (entry) => {
         const remotePath = joinRemotePath(targetDirectory, entry.relativePath.replace(/\\/g, "/"));
-        return remoteApi.upload(session.sftpId!, entry.localPath, remotePath, true, accelerated);
+        return remoteApi.upload(session.sftpId!, entry.localPath, remotePath, true, true);
       },
     );
     queuedTransfers.filter(Boolean).forEach((transfer) => upsertTransfer(transfer as TransferInfo));

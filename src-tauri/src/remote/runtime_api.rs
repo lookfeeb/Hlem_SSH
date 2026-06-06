@@ -104,12 +104,7 @@ impl RemoteRuntime {
                     .any(|sftp| sftp.info.connection_id == record.info.connection_id);
                 SessionItem {
                     session_id: record.info.session_id.clone(),
-                    name: record
-                        .info
-                        .username
-                        .clone()
-                        + "@"
-                        + &record.info.host,
+                    name: record.info.username.clone() + "@" + &record.info.host,
                     host: format!("{}:{}", record.info.host, record.info.port),
                     connected: true,
                     sftp_available: has_sftp,
@@ -127,29 +122,6 @@ impl RemoteRuntime {
     ) -> Result<ExecResult, String> {
         let connection_id = self.find_connection_for_session(session_id).await?;
         self.exec_on_connection(&connection_id, command.to_string(), Some(timeout_ms))
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    /// 流式执行命令：边跑边把 stdout / stderr chunk 推到 `chunks` 通道。
-    /// 用于 WebSocket `/api/ws` 的 `exec` 请求 —— AI 客户端可以实时看到长命令的输出。
-    pub async fn api_exec_stream(
-        &self,
-        session_id: &str,
-        command: String,
-        timeout_ms: u64,
-        chunks: tokio::sync::mpsc::Sender<ExecStreamChunk>,
-    ) -> Result<ExecStreamSummary, String> {
-        let connection_id = self.find_connection_for_session(session_id).await?;
-        let connection = self
-            .connection(&connection_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let channel = self
-            .open_session_channel_for_connection(&connection, true)
-            .await
-            .map_err(|e| e.to_string())?;
-        super::ssh::exec_stream_with_channel(channel, command, timeout_ms, chunks)
             .await
             .map_err(|e| e.to_string())
     }
@@ -429,14 +401,20 @@ impl RemoteRuntime {
         tunnel: &crate::config::TunnelConfig,
     ) -> Result<(String, u16, String), String> {
         let connection_id = self.find_connection_for_session(&tunnel.session_id).await?;
-        let connection = self.connection(&connection_id).await.map_err(|e| e.to_string())?;
+        let connection = self
+            .connection(&connection_id)
+            .await
+            .map_err(|e| e.to_string())?;
 
         match tunnel.forward_type.as_str() {
             "local" => {
                 let listener = TcpListener::bind((tunnel.bind_host.as_str(), tunnel.bind_port))
                     .await
                     .map_err(|e| format!("绑定端口失败: {}", e))?;
-                let actual_port = listener.local_addr().map_err(|e| format!("获取端口失败: {}", e))?.port();
+                let actual_port = listener
+                    .local_addr()
+                    .map_err(|e| format!("获取端口失败: {}", e))?
+                    .port();
                 let forward_id = Uuid::new_v4().to_string();
                 let info = ForwardInfo {
                     forward_id: forward_id.clone(),
@@ -460,7 +438,8 @@ impl RemoteRuntime {
                                 let handle = handle.clone();
                                 let host = remote_host.clone();
                                 tokio::spawn(async move {
-                                    let _ = pipe_local_to_ssh(stream, handle, host, remote_port).await;
+                                    let _ =
+                                        pipe_local_to_ssh(stream, handle, host, remote_port).await;
                                 });
                             }
                             Err(_) => break,
@@ -469,7 +448,10 @@ impl RemoteRuntime {
                 });
                 self.forwards.write().await.insert(
                     forward_id.clone(),
-                    ForwardRecord { info, handle: Some(task) },
+                    ForwardRecord {
+                        info,
+                        handle: Some(task),
+                    },
                 );
                 Ok((tunnel.bind_host.clone(), actual_port, forward_id))
             }
@@ -477,7 +459,10 @@ impl RemoteRuntime {
                 let listener = TcpListener::bind((tunnel.bind_host.as_str(), tunnel.bind_port))
                     .await
                     .map_err(|e| format!("绑定端口失败: {}", e))?;
-                let actual_port = listener.local_addr().map_err(|e| format!("获取端口失败: {}", e))?.port();
+                let actual_port = listener
+                    .local_addr()
+                    .map_err(|e| format!("获取端口失败: {}", e))?
+                    .port();
                 let forward_id = Uuid::new_v4().to_string();
                 let info = ForwardInfo {
                     forward_id: forward_id.clone(),
@@ -507,7 +492,10 @@ impl RemoteRuntime {
                 });
                 self.forwards.write().await.insert(
                     forward_id.clone(),
-                    ForwardRecord { info, handle: Some(task) },
+                    ForwardRecord {
+                        info,
+                        handle: Some(task),
+                    },
                 );
                 Ok((tunnel.bind_host.clone(), actual_port, forward_id))
             }
@@ -516,10 +504,11 @@ impl RemoteRuntime {
                     local_host: tunnel.target_host.clone(),
                     local_port: tunnel.target_port,
                 };
-                connection.remote_forwards.write().await.insert(
-                    forward_key(&tunnel.bind_host, tunnel.bind_port),
-                    target,
-                );
+                connection
+                    .remote_forwards
+                    .write()
+                    .await
+                    .insert(forward_key(&tunnel.bind_host, tunnel.bind_port), target);
                 let assigned_port = {
                     let handle = connection.handle.lock().await;
                     handle
@@ -540,10 +529,10 @@ impl RemoteRuntime {
                     started_at: now(),
                     error: None,
                 };
-                self.forwards.write().await.insert(
-                    forward_id.clone(),
-                    ForwardRecord { info, handle: None },
-                );
+                self.forwards
+                    .write()
+                    .await
+                    .insert(forward_id.clone(), ForwardRecord { info, handle: None });
                 Ok((tunnel.bind_host.clone(), assigned_port, forward_id))
             }
             other => Err(format!("不支持的隧道类型: {}", other)),
@@ -568,7 +557,10 @@ impl RemoteRuntime {
             {
                 let handle = connection.handle.lock().await;
                 let _ = handle
-                    .cancel_tcpip_forward(record.info.bind_host.clone(), record.info.bind_port as u32)
+                    .cancel_tcpip_forward(
+                        record.info.bind_host.clone(),
+                        record.info.bind_port as u32,
+                    )
                     .await;
                 connection
                     .remote_forwards

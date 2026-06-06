@@ -19,9 +19,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::{
     api_server::ApiServerHandle,
-    config::{
-        AppSettings, KnownHostEntry, SessionConfig, SshProxyOptions,
-    },
+    config::{AppSettings, KnownHostEntry, SessionConfig, SshProxyOptions},
     errors::{AppError, AppResult},
     remote::{ConnectionInfo, RemoteRuntime},
     vault::{VaultStore, VAULT_FILE_NAME},
@@ -33,7 +31,9 @@ pub use api_server_cmd::{
     api_server_logs, api_server_regenerate_key, api_server_start, api_server_status,
     api_server_stop,
 };
-pub use backup::{backup_record_delete, backup_record_restore, backup_records_clear, backup_run_now};
+pub use backup::{
+    backup_record_delete, backup_record_restore, backup_records_clear, backup_run_now,
+};
 pub use desktop::{
     download_update, fetch_text_url, install_update, local_expand_paths, open_database_dir,
     open_external_url, open_log_dir, open_path_dir,
@@ -51,7 +51,10 @@ pub use sftp::{
     sftp_rename, sftp_search, sftp_write_text, transfer_cancel, transfer_download, transfer_pause,
     transfer_remove, transfer_resume, transfer_retry, transfer_upload,
 };
-pub use terminal::{ssh_exec, ssh_exec_on_connection, terminal_close, terminal_open, terminal_resize, terminal_write};
+pub use terminal::{
+    ssh_exec, ssh_exec_on_connection, terminal_close, terminal_open, terminal_resize,
+    terminal_write,
+};
 pub use vault::{
     config_snapshot, settings_update, tunnel_create, tunnel_delete, tunnel_list, tunnel_update,
     vault_backup_export, vault_backup_import, vault_migrate, vault_needs_migration,
@@ -84,10 +87,15 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(vault_path: PathBuf) -> Self {
-        let data_dir = vault_path.parent().unwrap_or(vault_path.as_path()).to_path_buf();
+        let data_dir = vault_path
+            .parent()
+            .unwrap_or(vault_path.as_path())
+            .to_path_buf();
         let (vault, needs_migration) = {
             let mut store = VaultStore::new(vault_path);
-            let result = store.auto_open().unwrap_or(crate::vault::AutoOpenResult::NeedsMigration);
+            let result = store
+                .auto_open()
+                .unwrap_or(crate::vault::AutoOpenResult::NeedsMigration);
             let needs_migration = result == crate::vault::AutoOpenResult::NeedsMigration;
             (Arc::new(Mutex::new(store)), needs_migration)
         };
@@ -239,7 +247,10 @@ mod tests {
     fn runtime_command_guard_rejects_a_locked_vault() {
         let (state, _guard) = fresh_state();
         state.vault.lock().expect("vault mutex").lock();
-        assert!(matches!(state.ensure_vault_unlocked(), Err(AppError::VaultLocked)));
+        assert!(matches!(
+            state.ensure_vault_unlocked(),
+            Err(AppError::VaultLocked)
+        ));
     }
 
     #[test]

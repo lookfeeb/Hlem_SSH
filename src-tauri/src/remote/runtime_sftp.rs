@@ -24,7 +24,10 @@ impl RemoteRuntime {
             transfer_cursor: Arc::new(Mutex::new(0)),
             transfer_slots: Arc::new(Semaphore::new(MAX_SFTP_TRANSFER_CONCURRENCY)),
         };
-        self.sftp_sessions.write().await.insert(info.sftp_id.clone(), record);
+        self.sftp_sessions
+            .write()
+            .await
+            .insert(info.sftp_id.clone(), record);
 
         // Expand the transfer pool in the background (non-blocking)
         let conn = connection.clone();

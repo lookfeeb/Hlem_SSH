@@ -13,7 +13,8 @@ pub async fn backup_run_now(state: State<'_, AppState>) -> AppResult<ConfigSnaps
     let plan = with_store(&state, |store| prepare_backup_run(store))?;
     let outcomes = run_configured_backup(&plan).await?;
     let records = merge_configured_backup_records(&plan.settings, outcomes).await;
-    let (snapshot, delete_paths) = with_store(&state, |store| store.replace_backup_records(records))?;
+    let (snapshot, delete_paths) =
+        with_store(&state, |store| store.replace_backup_records(records))?;
     for path in delete_paths {
         let _ = tokio::fs::remove_file(path).await;
     }
@@ -58,8 +59,9 @@ pub async fn backup_record_delete(
     record_id: String,
     delete_file: bool,
 ) -> AppResult<ConfigSnapshot> {
-    let (snapshot, delete_path) =
-        with_store(&state, |store| store.delete_backup_record(&record_id, delete_file))?;
+    let (snapshot, delete_path) = with_store(&state, |store| {
+        store.delete_backup_record(&record_id, delete_file)
+    })?;
     if let Some(path) = delete_path {
         let _ = tokio::fs::remove_file(path).await;
     }

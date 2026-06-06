@@ -109,7 +109,6 @@ function App() {
     sendTerminalCommand,
     resizeTerminal,
     clearTerminal,
-    reopenTerminal,
   } = useTerminalRuntime({
     sessionsRef,
     setSessions,
@@ -137,10 +136,8 @@ function App() {
   const {
     saveSettings,
     saveQuickCommands,
-    saveTerminalInputHistory,
   } = useSettingsPersistence({
     configSnapshot,
-    configSnapshotRef,
     applyConfigSnapshot,
     onSettingsSaved: () => setSettingsOpen(false),
   });
@@ -472,12 +469,9 @@ function App() {
                               >
                                 <TerminalPanel
                                   session={sess}
-                                  inputHistory={currentSettings.terminalInputHistory ?? []}
                                   onSendData={(data) => void sendTerminalData(sess.id, sess.terminalId, data)}
                                   onResize={(cols, rows) => void resizeTerminal(sess.terminalId, cols, rows)}
                                   onClear={() => clearTerminal(sess.id)}
-                                  onReopenTerminal={() => void reopenTerminal(sess)}
-                                  onInputHistoryChange={saveTerminalInputHistory}
                                 />
                               </div>
                             ))}

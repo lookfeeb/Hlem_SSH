@@ -3,7 +3,7 @@ use tauri::{AppHandle, State};
 use crate::api_server::{self, ApiLogEntry, ApiServerInfo};
 use crate::errors::{AppError, AppResult};
 
-use super::{with_store, ensure_vault_unlocked, AppState};
+use super::{ensure_vault_unlocked, with_store, AppState};
 
 #[tauri::command]
 pub async fn api_server_start(
@@ -14,7 +14,11 @@ pub async fn api_server_start(
 ) -> AppResult<ApiServerInfo> {
     ensure_vault_unlocked(&state)?;
     let mut handle_guard = state.api_server.lock().await;
-    if handle_guard.as_ref().map(|handle| handle.is_finished()).unwrap_or(false) {
+    if handle_guard
+        .as_ref()
+        .map(|handle| handle.is_finished())
+        .unwrap_or(false)
+    {
         if let Some(handle) = handle_guard.take() {
             drop(handle_guard);
             handle.shutdown().await;
@@ -92,7 +96,11 @@ pub async fn api_server_stop(state: State<'_, AppState>) -> AppResult<()> {
 #[tauri::command]
 pub async fn api_server_status(state: State<'_, AppState>) -> AppResult<ApiServerInfo> {
     let mut handle_guard = state.api_server.lock().await;
-    if handle_guard.as_ref().map(|handle| handle.is_finished()).unwrap_or(false) {
+    if handle_guard
+        .as_ref()
+        .map(|handle| handle.is_finished())
+        .unwrap_or(false)
+    {
         if let Some(handle) = handle_guard.take() {
             drop(handle_guard);
             handle.shutdown().await;

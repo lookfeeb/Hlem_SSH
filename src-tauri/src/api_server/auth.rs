@@ -1,6 +1,6 @@
 //! Bearer 鉴权与会话访问校验。
 //!
-//! 整个 API（HTTP + WS）统一只认一种凭据：`Authorization: Bearer <api_key>`。
+//! 整个 HTTP API 只认一种凭据：`Authorization: Bearer <api_key>`。
 //! 没有 ticket、没有 nonce、没有 session-side 状态——单租户本地服务，
 //! API key 本身就是全权令牌。
 

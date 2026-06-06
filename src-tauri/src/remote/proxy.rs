@@ -34,9 +34,13 @@ pub(super) async fn connect_tcp_for_ssh(
     proxy: Option<&SshProxyOptions>,
 ) -> AppResult<TcpStream> {
     let stream = match proxy {
-        None => TcpStream::connect((host, port)).await.map_err(remote_error)?,
+        None => TcpStream::connect((host, port))
+            .await
+            .map_err(remote_error)?,
         Some(p) => match p.kind.as_str() {
-            "direct" => TcpStream::connect((host, port)).await.map_err(remote_error)?,
+            "direct" => TcpStream::connect((host, port))
+                .await
+                .map_err(remote_error)?,
             "socks5" => connect_via_socks5(p, host, port).await?,
             "httpConnect" => connect_via_http_connect(p, host, port).await?,
             _ => return Err(AppError::InvalidInput("代理类型无效".to_string())),
@@ -98,7 +102,7 @@ pub(super) async fn connect_via_socks5(
         _ => {
             return Err(AppError::Remote(
                 "SOCKS5 代理返回了不支持的地址类型".to_string(),
-            ))
+            ));
         }
     }
     let mut bound_port = [0u8; 2];

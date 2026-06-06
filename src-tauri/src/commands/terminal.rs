@@ -1,7 +1,7 @@
 use tauri::{AppHandle, State};
 
-use super::{ensure_vault_unlocked, connect_session, AppState, AppResult};
-use crate::remote::{TerminalInfo, ExecResult};
+use super::{connect_session, ensure_vault_unlocked, AppResult, AppState};
+use crate::remote::{ExecResult, TerminalInfo};
 
 #[tauri::command]
 pub async fn terminal_open(
@@ -12,7 +12,10 @@ pub async fn terminal_open(
     rows: u16,
 ) -> AppResult<TerminalInfo> {
     ensure_vault_unlocked(&state)?;
-    state.remote.open_terminal(&app, &connection_id, cols, rows).await
+    state
+        .remote
+        .open_terminal(&app, &connection_id, cols, rows)
+        .await
 }
 
 #[tauri::command]
@@ -55,7 +58,10 @@ pub async fn ssh_exec(
     timeout_ms: Option<u64>,
 ) -> AppResult<ExecResult> {
     let connection = connect_session(&app, &state, &session_id).await?;
-    state.remote.exec_on_connection(&connection.connection_id, command, timeout_ms).await
+    state
+        .remote
+        .exec_on_connection(&connection.connection_id, command, timeout_ms)
+        .await
 }
 
 #[tauri::command]
@@ -66,5 +72,8 @@ pub async fn ssh_exec_on_connection(
     timeout_ms: Option<u64>,
 ) -> AppResult<ExecResult> {
     ensure_vault_unlocked(&state)?;
-    state.remote.exec_on_connection(&connection_id, command, timeout_ms).await
+    state
+        .remote
+        .exec_on_connection(&connection_id, command, timeout_ms)
+        .await
 }

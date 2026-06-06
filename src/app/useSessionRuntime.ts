@@ -8,8 +8,8 @@ import { createTerminalEntry } from "../lib/session";
 import {
   formatSessionError,
   getHostKeyPayload,
-  hasTelemetryData,
   notifyEditorSessionDisconnected,
+  shouldSkipTerminalEntry,
   sftpUnavailableMessage,
 } from "./appHelpers";
 import type { ConfigSnapshot, RemoteSession } from "../types";
@@ -110,6 +110,7 @@ export function useSessionRuntime({
     } else if (session?.connectionId) {
       await teardownSession(session);
     }
+    resetClosedSessionState(id);
     closeSessionTab(id);
   }
 
@@ -139,12 +140,26 @@ export function useSessionRuntime({
         telemetryJobId: null,
         telemetry: createEmptyTelemetry(item.host),
         files: [],
-        terminal: [...item.terminal, createTerminalEntry("system", "连接已断开")],
+        terminal: appendDisconnectedTerminalEntry(item.terminal),
       }));
       notifyEditorSessionDisconnected(session.id);
     } catch (error) {
       appendTerminal(session.id, "error", formatSessionError(error, session));
     }
+  }
+
+  function resetClosedSessionState(id: string) {
+    updateSession(id, (item) => ({
+      ...item,
+      state: "disconnected",
+      connectionId: null,
+      terminalId: null,
+      sftpId: null,
+      telemetryJobId: null,
+      files: [],
+      terminal: [],
+      telemetry: createEmptyTelemetry(item.host),
+    }));
   }
 
   function handleSshStatus(payload: Awaited<ReturnType<typeof remoteApi.connect>>) {
@@ -162,6 +177,10 @@ export function useSessionRuntime({
             telemetryJobId: null,
             files: [],
             telemetry: createEmptyTelemetry(session.host),
+            terminal:
+              session.state === "disconnected"
+                ? session.terminal
+                : appendDisconnectedTerminalEntry(session.terminal),
           };
         }
         if (
@@ -218,7 +237,15 @@ export function useSessionRuntime({
     abortedConnectSessionsRef.current.delete(session.id);
     uiInitiatedConnectsRef.current.add(session.id);
     setConnectingSessionId(session.id);
-    updateSession(session.id, (item) => ({ ...item, state: "connecting" }));
+    updateSession(session.id, (item) => ({
+      ...item,
+      state: "connecting",
+      connectionId: null,
+      terminalId: null,
+      sftpId: null,
+      telemetryJobId: null,
+      files: [],
+    }));
     let connection: Awaited<ReturnType<typeof remoteApi.connect>> | null = null;
     try {
       connection = await remoteApi.connect(session.id);
@@ -326,21 +353,25 @@ export function useSessionRuntime({
   }
 
   function startTelemetry(connectionId: string, sessionId: string) {
-    Promise.all([
-      remoteApi.startTelemetry(connectionId, sessionId, 5000).catch(() => null),
-      remoteApi.telemetrySnapshot(connectionId).catch(() => null),
-    ]).then(([telemetryJob, initialTelemetry]) => {
-      if (abortedConnectSessionsRef.current.has(sessionId)) return;
-      updateSession(sessionId, (item) =>
-        item.connectionId === connectionId
-          ? {
-              ...item,
-              telemetryJobId: telemetryJob?.jobId ?? item.telemetryJobId,
-              telemetry: initialTelemetry && hasTelemetryData(initialTelemetry) ? initialTelemetry : item.telemetry,
-            }
-          : item,
-      );
-    });
+    remoteApi
+      .startTelemetry(connectionId, sessionId, 5000)
+      .then((telemetryJob) => {
+        if (abortedConnectSessionsRef.current.has(sessionId)) return;
+        updateSession(sessionId, (item) =>
+          item.connectionId === connectionId
+            ? {
+                ...item,
+                telemetryJobId: telemetryJob?.jobId ?? item.telemetryJobId,
+              }
+            : item,
+        );
+      })
+      .catch(() => null);
+  }
+
+  function appendDisconnectedTerminalEntry(entries: RemoteSession["terminal"]) {
+    const entry = createTerminalEntry("system", "连接已断开");
+    return shouldSkipTerminalEntry(entries, entry) ? entries : [...entries, entry];
   }
 
   return {

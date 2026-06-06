@@ -208,14 +208,14 @@ function BaseFields({
           optionType="button"
           buttonStyle="solid"
           options={[
-            { label: "跟随全局", value: "global" },
+            { label: "跟随系统", value: "global" },
             { label: "单独指定", value: "custom" },
           ]}
         />
       </Form.Item>
       {proxyMode === "custom" && (
-        <>
-          <Form.Item label="代理类型" name="proxyKind">
+        <div className="sessionProxyInline sessionFormWide">
+          <Form.Item label="代理类型" name="proxyKind" className="sessionProxyKind">
             <Select
               options={[
                 { label: "SOCKS5", value: "socks5" },
@@ -223,13 +223,13 @@ function BaseFields({
               ]}
             />
           </Form.Item>
-          <Form.Item label="代理主机" name="proxyHost" rules={[{ required: true, message: "请输入代理主机" }]}>
+          <Form.Item label="代理主机" name="proxyHost" className="sessionProxyHost" rules={[{ required: true, message: "请输入代理主机" }]}>
             <Input placeholder="127.0.0.1" autoComplete="off" />
           </Form.Item>
-          <Form.Item label="代理端口" name="proxyPort" rules={[{ required: true, message: "请输入代理端口" }]}>
+          <Form.Item label="代理端口" name="proxyPort" className="sessionProxyPort" rules={[{ required: true, message: "请输入代理端口" }]}>
             <InputNumber min={1} max={65535} precision={0} className="fullControl" autoComplete="off" />
           </Form.Item>
-        </>
+        </div>
       )}
     </div>
   );

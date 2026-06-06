@@ -1,6 +1,6 @@
 [package]
 name = "helm"
-version = "0.0.34"
+version = "0.0.35"
 description = "A Tauri SSH and SFTP desktop workbench prototype"
 authors = ["HelM"]
 edition = "2021"
@@ -23,7 +23,6 @@ hmac = "0.12"
 rand = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 axum = { version = "0.8" }
-yawc = { version = "0.3", features = ["axum"] }
 tower-http = { version = "0.6", features = ["cors"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 russh = "0.60.2"

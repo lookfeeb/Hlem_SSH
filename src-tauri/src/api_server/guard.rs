@@ -38,22 +38,10 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
         // 精确匹配的危险目标：只拦截这些目录本身或其通配符展开。
         // 例如 `rm -rf /usr` 被拦，但 `rm -rf /tmp/mydir` 放行（非系统目录 + 精确路径）。
         let dangerous_exact = [
-            "/", "/*", "/.", "/..",
-            "~", "~/",
-            "$home", "${home}",
-            "/home", "/home/*",
-            "/root", "/root/*",
-            "/usr", "/usr/*",
-            "/etc", "/etc/*",
-            "/var", "/var/*",
-            "/boot", "/boot/*",
-            "/sys", "/sys/*",
-            "/proc", "/proc/*",
-            "/lib", "/lib/*",
-            "/lib64", "/lib64/*",
-            "/opt", "/opt/*",
-            "/sbin", "/sbin/*",
-            "/bin", "/bin/*",
+            "/", "/*", "/.", "/..", "~", "~/", "$home", "${home}", "/home", "/home/*", "/root",
+            "/root/*", "/usr", "/usr/*", "/etc", "/etc/*", "/var", "/var/*", "/boot", "/boot/*",
+            "/sys", "/sys/*", "/proc", "/proc/*", "/lib", "/lib/*", "/lib64", "/lib64/*", "/opt",
+            "/opt/*", "/sbin", "/sbin/*", "/bin", "/bin/*",
         ];
         // 提取 rm -rf 后面的目标参数（可能有多个），逐个检查是否命中危险目录。
         for alias in rm_rf_aliases {
@@ -61,9 +49,15 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
                 // after 形如 " /tmp/foo" 或 " /usr /etc" 等
                 for arg in after.split_whitespace() {
                     // 跳过 flag（如 --verbose）
-                    if arg.starts_with('-') { continue; }
+                    if arg.starts_with('-') {
+                        continue;
+                    }
                     let normalized_arg = arg.trim_end_matches('/');
-                    let check = if normalized_arg.is_empty() { "/" } else { normalized_arg };
+                    let check = if normalized_arg.is_empty() {
+                        "/"
+                    } else {
+                        normalized_arg
+                    };
                     if dangerous_exact.iter().any(|d| {
                         let d_trimmed = d.trim_end_matches('/');
                         let d_check = if d_trimmed.is_empty() { "/" } else { d_trimmed };
@@ -146,8 +140,8 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
         || squeezed.ends_with(" -r");
     if touches_perm && recursive_flag {
         let system_dirs = [
-            " /", " /*", " /etc", " /usr", " /var", " /bin", " /sbin", " /lib",
-            " /lib64", " /boot", " /home", " /root", " ~",
+            " /", " /*", " /etc", " /usr", " /var", " /bin", " /sbin", " /lib", " /lib64",
+            " /boot", " /home", " /root", " ~",
         ];
         if system_dirs.iter().any(|d| {
             squeezed.contains(&format!("{d} "))
@@ -220,7 +214,8 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
         let single_nospace = format!(">{cf}");
         let append_space = format!(">> {cf}");
         let append_nospace = format!(">>{cf}");
-        let has_truncate = (normalized.contains(&single_space) && !normalized.contains(&append_space))
+        let has_truncate = (normalized.contains(&single_space)
+            && !normalized.contains(&append_space))
             || (normalized.contains(&single_nospace) && !normalized.contains(&append_nospace));
         if has_truncate {
             return Some("禁止覆盖关键系统文件");

@@ -1,10 +1,6 @@
 use super::*;
 
-use tokio::{
-    io::AsyncWriteExt,
-    sync::mpsc,
-    task::JoinHandle,
-};
+use tokio::{io::AsyncWriteExt, sync::mpsc, task::JoinHandle};
 
 const TELEMETRY_FRAME_CHANNEL_CAPACITY: usize = 4;
 const TELEMETRY_STREAM_INIT_TIMEOUT_MS: u64 = 5_000;
@@ -191,7 +187,7 @@ impl RemoteRuntime {
                 &fallback_ip,
             )
             .await?;
-        let mut last_network = None;
+        let mut last_network: Option<(Vec<NetworkBytes>, Instant)> = None;
         merge_telemetry(&mut snapshot, base, true, &mut last_network);
 
         for (command, timeout_ms) in [
@@ -266,18 +262,14 @@ impl RemoteRuntime {
                     return;
                 }
                 Err(_) => {
-                    emit_telemetry_error(
-                        &app_handle,
-                        &job_info,
-                        "遥测通道初始化超时".to_string(),
-                    );
+                    emit_telemetry_error(&app_handle, &job_info, "遥测通道初始化超时".to_string());
                     telemetry_jobs_ref.write().await.remove(&job_info.job_id);
                     return;
                 }
             };
 
             let mut snapshot = empty_telemetry(&fallback_ip, 0);
-            let mut last_network: Option<(NetworkBytes, Instant)> = None;
+            let mut last_network: Option<(Vec<NetworkBytes>, Instant)> = None;
             let mut base_interval =
                 tokio::time::interval(Duration::from_millis(job_info.interval_ms));
             let mut process_interval = tokio::time::interval(Duration::from_millis(

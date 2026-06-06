@@ -324,6 +324,43 @@
   grid-column: 1 / -1;
 }
 
+.sessionProxyInline {
+  display: grid;
+  grid-template-columns: 132px minmax(180px, 1fr) 116px;
+  gap: 12px;
+  align-items: start;
+}
+
+.sessionProxyInline .ant-form-item {
+  margin-bottom: 14px !important;
+  min-width: 0;
+}
+
+.sessionProxyKind .ant-select,
+.sessionProxyHost .ant-input,
+.sessionProxyPort .ant-input-number {
+  width: 100%;
+}
+
+.sessionProxyInline .ant-input,
+.sessionProxyInline .ant-input-number,
+.sessionProxyInline .ant-select,
+.sessionProxyInline .ant-select-selector {
+  height: 38px !important;
+  min-height: 38px !important;
+  box-sizing: border-box;
+}
+
+.sessionProxyInline .ant-input {
+  display: block;
+  line-height: 36px;
+}
+
+.sessionProxyInline .ant-input-number-input {
+  height: 36px !important;
+  line-height: 36px !important;
+}
+
 .fullControl {
   width: 100%;
 }

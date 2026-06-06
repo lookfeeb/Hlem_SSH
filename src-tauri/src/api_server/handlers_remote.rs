@@ -14,8 +14,8 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use super::auth::{verify_auth, verify_session_access};
 use super::guard::check_dangerous_command;
 use super::{
-    friendly_error_detail, map_remote_error, push_log, push_log_with_response, take_chars, truncate_for_log, ApiError,
-    ApiServerState,
+    friendly_error_detail, map_remote_error, push_log, push_log_with_response, take_chars,
+    truncate_for_log, ApiError, ApiServerState,
 };
 
 // ─── Public types (re-exported from mod.rs) ────────────────────────────────────
@@ -88,7 +88,10 @@ pub(super) struct FilesQuery {
     path: String,
 }
 
-async fn require_auth(state: &ApiServerState, headers: &HeaderMap) -> Result<(), (StatusCode, Json<ApiError>)> {
+async fn require_auth(
+    state: &ApiServerState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
     let key = state.api_key.read().await;
     verify_auth(headers, &key)
 }
@@ -145,8 +148,7 @@ pub async fn auth_check(
             "GET /api/backup/records": "list backup records",
             "POST /api/backup/run": "run backup now → result array",
             "DELETE /api/backup/records/{id}?deleteFile=true": "delete record, return list"
-        },
-        "ws": "/api/ws — exec(streaming) / cancel / ping only",
+        }
     })))
 }
 
@@ -193,7 +195,8 @@ pub async fn rest_connect(
             .vault
             .lock()
             .map_err(|_| internal_error("内部锁错误"))?;
-        crate::commands::build_session_for_connect(&store, &body.session_id).map_err(internal_error)?
+        crate::commands::build_session_for_connect(&store, &body.session_id)
+            .map_err(internal_error)?
     };
     let (session, known_host) = bundle;
 
@@ -262,9 +265,7 @@ pub async fn rest_disconnect(
     }
 }
 
-/// `POST /api/exec` — 阻塞式运行命令并一次性返回 stdout/stderr/exitCode。
-///
-/// 长流式输出请改用 WS `exec`（带 `cancel` 能力）。
+/// `POST /api/exec` — 运行命令并一次性返回 stdout/stderr/exitCode。
 pub async fn rest_exec(
     headers: HeaderMap,
     AxumState(state): AxumState<ApiServerState>,
@@ -302,12 +303,7 @@ pub async fn rest_exec(
                 let mut buf = String::new();
                 buf.push_str(&result.stdout);
                 buf = take_chars(&buf, 2000);
-                if buf.is_empty() {
-                    None
-                } else {
-                    Some(buf)
-                }
-                .unwrap_or_default()
+                if buf.is_empty() { None } else { Some(buf) }.unwrap_or_default()
             };
             push_log_with_response(
                 &state,
@@ -315,7 +311,11 @@ pub async fn rest_exec(
                 &detail,
                 success,
                 elapsed,
-                if preview.is_empty() { None } else { Some(preview) },
+                if preview.is_empty() {
+                    None
+                } else {
+                    Some(preview)
+                },
             )
             .await;
             Ok(Json(serde_json::to_value(result).unwrap_or_default()))
@@ -465,8 +465,20 @@ pub async fn download_file(
         Ok(m) => m,
         Err(e) => {
             let elapsed = elapsed_ms(start);
-            push_log(&state, "download", &friendly_error_detail(&format!("{} → {}", query.path, e), &state), false, elapsed).await;
-            return Err((StatusCode::NOT_FOUND, Json(ApiError { error: format!("无法读取远程文件: {}", e) })));
+            push_log(
+                &state,
+                "download",
+                &friendly_error_detail(&format!("{} → {}", query.path, e), &state),
+                false,
+                elapsed,
+            )
+            .await;
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: format!("无法读取远程文件: {}", e),
+                }),
+            ));
         }
     };
     let total_size = metadata.len();
@@ -478,12 +490,18 @@ pub async fn download_file(
         ParsedRange::Unsatisfiable => {
             return Err((
                 StatusCode::RANGE_NOT_SATISFIABLE,
-                Json(ApiError { error: format!("Range 越界：文件大小 {} 字节", total_size) }),
+                Json(ApiError {
+                    error: format!("Range 越界：文件大小 {} 字节", total_size),
+                }),
             ));
         }
         ParsedRange::Invalid => (StatusCode::OK, 0u64, total_size.saturating_sub(1)),
     };
-    let send_len = if total_size == 0 { 0 } else { end_offset - start_offset + 1 };
+    let send_len = if total_size == 0 {
+        0
+    } else {
+        end_offset - start_offset + 1
+    };
 
     // 大段范围（≥ 32MB）走并行多 File handle，与 UI 下载共用阈值和缓冲常量。
     let body = if send_len >= crate::remote::PARALLEL_DOWNLOAD_THRESHOLD
@@ -523,15 +541,35 @@ pub async fn download_file(
             Ok(f) => f,
             Err(e) => {
                 let elapsed = elapsed_ms(start);
-                push_log(&state, "download", &friendly_error_detail(&format!("{} → {}", query.path, e), &state), false, elapsed).await;
+                push_log(
+                    &state,
+                    "download",
+                    &friendly_error_detail(&format!("{} → {}", query.path, e), &state),
+                    false,
+                    elapsed,
+                )
+                .await;
                 return Err(internal_error(format!("打开远程文件失败: {}", e)));
             }
         };
 
         if start_offset > 0 {
-            if let Err(e) = remote_file.seek(std::io::SeekFrom::Start(start_offset)).await {
+            if let Err(e) = remote_file
+                .seek(std::io::SeekFrom::Start(start_offset))
+                .await
+            {
                 let elapsed = elapsed_ms(start);
-                push_log(&state, "download", &friendly_error_detail(&format!("{} → seek {}: {}", query.path, start_offset, e), &state), false, elapsed).await;
+                push_log(
+                    &state,
+                    "download",
+                    &friendly_error_detail(
+                        &format!("{} → seek {}: {}", query.path, start_offset, e),
+                        &state,
+                    ),
+                    false,
+                    elapsed,
+                )
+                .await;
                 return Err(internal_error(format!("seek 远程文件失败: {}", e)));
             }
         }
@@ -562,7 +600,10 @@ pub async fn download_file(
     push_log(&state, "download", &log_detail, true, elapsed).await;
 
     let file_name = query.path.rsplit('/').next().unwrap_or("file");
-    let safe_name: String = file_name.chars().filter(|c| !c.is_control() && *c != '"' && *c != '\\').collect();
+    let safe_name: String = file_name
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"' && *c != '\\')
+        .collect();
     let disposition = format!("attachment; filename=\"{}\"", safe_name);
 
     let mut builder = Response::builder()
@@ -576,9 +617,13 @@ pub async fn download_file(
             format!("bytes {}-{}/{}", start_offset, end_offset, total_size),
         );
     }
-    let mut response = builder.body(body).map_err(|e| internal_error(format!("构建响应失败: {}", e)))?;
+    let mut response = builder
+        .body(body)
+        .map_err(|e| internal_error(format!("构建响应失败: {}", e)))?;
     if let Ok(value) = HeaderValue::from_str(&disposition) {
-        response.headers_mut().insert(header::CONTENT_DISPOSITION, value);
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, value);
     }
     Ok(response)
 }

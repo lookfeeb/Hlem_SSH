@@ -1,7 +1,7 @@
 //! Tunnel 与 Backup 的 REST 端点。
 //!
 //! 这些命令本质上都是 vault CRUD（list / create / update / delete / start / stop /
-//! get / put settings / run），不需要流式传输，REST 比 WS 更直白。
+//! get / put settings / run），统一通过 HTTP REST 提供。
 
 use axum::{
     extract::{Path, Query, State as AxumState},
@@ -16,7 +16,10 @@ use super::{push_log, ApiError, ApiServerState};
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-async fn require_auth(state: &ApiServerState, headers: &HeaderMap) -> Result<(), (StatusCode, Json<ApiError>)> {
+async fn require_auth(
+    state: &ApiServerState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
     let key = state.api_key.read().await;
     verify_auth(headers, &key)
 }
@@ -24,14 +27,18 @@ async fn require_auth(state: &ApiServerState, headers: &HeaderMap) -> Result<(),
 fn map_err_500(e: impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError { error: e.to_string() }),
+        Json(ApiError {
+            error: e.to_string(),
+        }),
     )
 }
 
 fn lock_poisoned() -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiError { error: "内部锁错误".into() }),
+        Json(ApiError {
+            error: "内部锁错误".into(),
+        }),
     )
 }
 
@@ -57,7 +64,14 @@ pub async fn rest_tunnels_list(
         store.tunnels().map_err(map_err_500)?
     };
     let count = tunnels.len();
-    push_log(&state, "rest/tunnels.list", &format!("{} 项", count), true, elapsed_ms(start)).await;
+    push_log(
+        &state,
+        "rest/tunnels.list",
+        &format!("{} 项", count),
+        true,
+        elapsed_ms(start),
+    )
+    .await;
     Ok(json_value(tunnels))
 }
 
@@ -88,9 +102,18 @@ pub async fn rest_tunnels_update(
     let start = std::time::Instant::now();
     let snapshot = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
-        store.update_tunnel(&tunnel_id, input).map_err(map_err_500)?
+        store
+            .update_tunnel(&tunnel_id, input)
+            .map_err(map_err_500)?
     };
-    push_log(&state, "rest/tunnels.update", &tunnel_id, true, elapsed_ms(start)).await;
+    push_log(
+        &state,
+        "rest/tunnels.update",
+        &tunnel_id,
+        true,
+        elapsed_ms(start),
+    )
+    .await;
     Ok(json_value(snapshot.data.tunnels))
 }
 
@@ -106,7 +129,14 @@ pub async fn rest_tunnels_delete(
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
         store.delete_tunnel(&tunnel_id).map_err(map_err_500)?
     };
-    push_log(&state, "rest/tunnels.delete", &tunnel_id, true, elapsed_ms(start)).await;
+    push_log(
+        &state,
+        "rest/tunnels.delete",
+        &tunnel_id,
+        true,
+        elapsed_ms(start),
+    )
+    .await;
     Ok(json_value(snapshot.data.tunnels))
 }
 
@@ -127,7 +157,9 @@ pub async fn rest_tunnels_start(
             .ok_or_else(|| {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(ApiError { error: format!("隧道 {} 不存在", tunnel_id) }),
+                    Json(ApiError {
+                        error: format!("隧道 {} 不存在", tunnel_id),
+                    }),
                 )
             })?
     };
@@ -136,7 +168,14 @@ pub async fn rest_tunnels_start(
         .api_start_tunnel(&tunnel)
         .await
         .map_err(map_err_500)?;
-    push_log(&state, "rest/tunnels.start", &tunnel_id, true, elapsed_ms(start)).await;
+    push_log(
+        &state,
+        "rest/tunnels.start",
+        &tunnel_id,
+        true,
+        elapsed_ms(start),
+    )
+    .await;
     Ok(Json(serde_json::json!({
         "forwardId": forward_id,
         "bindHost": bind_host,
@@ -157,7 +196,14 @@ pub async fn rest_tunnels_stop(
         .api_stop_tunnel(&tunnel_id)
         .await
         .map_err(map_err_500)?;
-    push_log(&state, "rest/tunnels.stop", &tunnel_id, true, elapsed_ms(start)).await;
+    push_log(
+        &state,
+        "rest/tunnels.stop",
+        &tunnel_id,
+        true,
+        elapsed_ms(start),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
@@ -189,7 +235,14 @@ pub async fn rest_backup_settings_update(
         settings.backup = backup.clone();
         store.settings_update(settings).map_err(map_err_500)?;
     }
-    push_log(&state, "rest/backup.settings.update", "OK", true, elapsed_ms(start)).await;
+    push_log(
+        &state,
+        "rest/backup.settings.update",
+        "OK",
+        true,
+        elapsed_ms(start),
+    )
+    .await;
     Ok(json_value(backup))
 }
 
@@ -221,7 +274,8 @@ pub async fn rest_backup_run(
     let outcomes = crate::backup::run_configured_backup(&plan)
         .await
         .map_err(map_err_500)?;
-    let records = crate::backup::merge_configured_backup_records(&plan.settings, outcomes.clone()).await;
+    let records =
+        crate::backup::merge_configured_backup_records(&plan.settings, outcomes.clone()).await;
     let delete_paths = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
         let (_, delete_paths) = store.replace_backup_records(records).map_err(map_err_500)?;
@@ -259,6 +313,13 @@ pub async fn rest_backup_record_delete(
     if let Some(path) = delete_path {
         let _ = tokio::fs::remove_file(path).await;
     }
-    push_log(&state, "rest/backup.record.delete", &record_id, true, elapsed_ms(start)).await;
+    push_log(
+        &state,
+        "rest/backup.record.delete",
+        &record_id,
+        true,
+        elapsed_ms(start),
+    )
+    .await;
     Ok(json_value(snap.data.backup_records))
 }

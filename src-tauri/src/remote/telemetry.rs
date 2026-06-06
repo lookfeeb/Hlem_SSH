@@ -32,25 +32,57 @@ pub(super) fn merge_telemetry(
     target: &mut ServerTelemetry,
     sample: ParsedTelemetry,
     update_latency: bool,
-    last_network: &mut Option<(NetworkBytes, Instant)>,
+    last_network: &mut Option<(Vec<NetworkBytes>, Instant)>,
 ) {
     let sampled_at = Instant::now();
-    if let Some(current) = sample.network_bytes.clone() {
-        target.network.interface_name = current.interface_name.clone();
-        if let Some((previous, previous_at)) = last_network.as_ref() {
+    if !sample.network_bytes.is_empty() {
+        let current_interfaces = sample.network_bytes.clone();
+        target.network.interface_name = current_interfaces[0].interface_name.clone();
+        let mut next_interfaces = current_interfaces
+            .iter()
+            .map(|item| NetworkInterfaceMetric {
+                interface_name: item.interface_name.clone(),
+                upload_kbps: 0.0,
+                download_kbps: 0.0,
+                link_speed_mbps: item.link_speed_mbps,
+            })
+            .collect::<Vec<_>>();
+        target.network.upload_kbps = 0.0;
+        target.network.download_kbps = 0.0;
+
+        if let Some((previous_interfaces, previous_at)) = last_network.as_ref() {
             let elapsed = sampled_at.duration_since(*previous_at).as_secs_f64();
-            if elapsed > 0.0 && previous.interface_name == current.interface_name {
-                target.network.download_kbps = bytes_per_second_to_kib(
-                    current.rx_bytes.saturating_sub(previous.rx_bytes),
-                    elapsed,
-                );
-                target.network.upload_kbps = bytes_per_second_to_kib(
-                    current.tx_bytes.saturating_sub(previous.tx_bytes),
-                    elapsed,
-                );
+            if elapsed > 0.0 {
+                for metric in &mut next_interfaces {
+                    let Some(current) = current_interfaces
+                        .iter()
+                        .find(|item| item.interface_name == metric.interface_name)
+                    else {
+                        continue;
+                    };
+                    let Some(previous) = previous_interfaces
+                        .iter()
+                        .find(|item| item.interface_name == metric.interface_name)
+                    else {
+                        continue;
+                    };
+                    metric.download_kbps = bytes_per_second_to_kib(
+                        current.rx_bytes.saturating_sub(previous.rx_bytes),
+                        elapsed,
+                    );
+                    metric.upload_kbps = bytes_per_second_to_kib(
+                        current.tx_bytes.saturating_sub(previous.tx_bytes),
+                        elapsed,
+                    );
+                }
+                if let Some(primary) = next_interfaces.first() {
+                    target.network.download_kbps = primary.download_kbps;
+                    target.network.upload_kbps = primary.upload_kbps;
+                }
             }
         }
-        *last_network = Some((current, sampled_at));
+        target.network.interfaces = next_interfaces;
+        *last_network = Some((current_interfaces, sampled_at));
     }
 
     let source = sample.snapshot;
@@ -122,7 +154,18 @@ pub(super) fn parse_linux_telemetry(
             Some("CPU") => telemetry.cpu = parse_f64(parts.next()).clamp(0.0, 100.0),
             Some("IP") => telemetry.ip = parts.next().unwrap_or(fallback_ip).to_string(),
             Some("NET") => {
-                telemetry.network.interface_name = parts.next().unwrap_or("ssh").to_string();
+                let interface_name = parts.next().unwrap_or("ssh").to_string();
+                let _rx_bytes = parts.next();
+                let _tx_bytes = parts.next();
+                if telemetry.network.interface_name == "ssh" {
+                    telemetry.network.interface_name = interface_name.clone();
+                }
+                telemetry.network.interfaces.push(NetworkInterfaceMetric {
+                    interface_name,
+                    upload_kbps: 0.0,
+                    download_kbps: 0.0,
+                    link_speed_mbps: parse_link_speed_mbps(parts.next()),
+                });
             }
             Some("DISK") => {
                 let mount = parts.next().unwrap_or("").to_string();
@@ -161,21 +204,31 @@ pub(super) fn parse_linux_telemetry(
     telemetry
 }
 
-pub(super) fn parse_network_bytes(output: &str) -> Option<NetworkBytes> {
-    output.lines().find_map(|line| {
-        let mut parts = line.split_whitespace();
-        if parts.next() != Some("NET") {
-            return None;
-        }
-        let interface_name = parts.next()?.to_string();
-        let rx_bytes = parts.next()?.parse::<u64>().ok()?;
-        let tx_bytes = parts.next()?.parse::<u64>().ok()?;
-        Some(NetworkBytes {
-            interface_name,
-            rx_bytes,
-            tx_bytes,
+pub(super) fn parse_network_bytes(output: &str) -> Vec<NetworkBytes> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            if parts.next() != Some("NET") {
+                return None;
+            }
+            let interface_name = parts.next()?.to_string();
+            let rx_bytes = parts.next()?.parse::<u64>().ok()?;
+            let tx_bytes = parts.next()?.parse::<u64>().ok()?;
+            let link_speed_mbps = parse_link_speed_mbps(parts.next());
+            Some(NetworkBytes {
+                interface_name,
+                rx_bytes,
+                tx_bytes,
+                link_speed_mbps,
+            })
         })
-    })
+        .collect()
+}
+
+fn parse_link_speed_mbps(value: Option<&str>) -> Option<u64> {
+    let speed = value.and_then(|item| item.parse::<u64>().ok())?;
+    (speed > 0).then_some(speed)
 }
 
 pub(super) fn empty_telemetry(ip: &str, latency_ms: u128) -> ServerTelemetry {
@@ -191,6 +244,7 @@ pub(super) fn empty_telemetry(ip: &str, latency_ms: u128) -> ServerTelemetry {
             upload_kbps: 0.0,
             download_kbps: 0.0,
             latency_ms,
+            interfaces: Vec::new(),
         },
         disks: Vec::new(),
     }

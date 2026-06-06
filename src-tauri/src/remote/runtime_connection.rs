@@ -6,7 +6,8 @@ impl RemoteRuntime {
         app: &AppHandle,
         session: SessionConfig,
         trusted: Option<KnownHostEntry>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<ConnectionInfo>> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<ConnectionInfo>> + Send + '_>>
+    {
         let app = app.clone();
         let this = self.clone();
         Box::pin(async move { this.connect_inner(&app, session, trusted).await })
@@ -227,8 +228,8 @@ impl RemoteRuntime {
         for id in dead_ids {
             let removed = self.connections.write().await.remove(&id);
             if let Some(record) = removed {
-                let label = crate::errors::resource_label(&id)
-                    .unwrap_or_else(|| record.info.host.clone());
+                let label =
+                    crate::errors::resource_label(&id).unwrap_or_else(|| record.info.host.clone());
                 log::warn!("连接已断开，正在清理: {label} ({})", record.info.host);
                 self.close_children_for_connection(app, &record).await;
                 let mut info = record.info;

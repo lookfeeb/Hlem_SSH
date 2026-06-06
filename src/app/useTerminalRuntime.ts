@@ -1,16 +1,17 @@
-import { useEffect, useRef, type MutableRefObject } from "react";
+import { useRef, type MutableRefObject } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { remoteApi } from "../api/remoteApi";
-import {
-  appendTerminalStreamEntries,
-  extractPromptCwd,
-  shouldSkipTerminalEntry,
-  stripCwdMarkers,
-} from "./appHelpers";
+import { extractPromptCwd, shouldSkipTerminalEntry, stripCwdMarkers } from "./appHelpers";
 import { getErrorMessage } from "../lib/configMapping";
 import { normalizePath as normalizeRemotePath } from "../lib/path";
 import { useMountedRef } from "../lib/reactLifecycle";
 import { createTerminalEntry } from "../lib/session";
+import {
+  clearAllTerminalDirect,
+  clearTerminalDirect,
+  forgetTerminalDirect,
+  writeTerminalEntryDirect,
+} from "../lib/terminalRegistry";
 import type { RemoteSession, TerminalClosedEvent, TerminalEntry, TerminalOutputEvent } from "../types";
 
 type UseTerminalRuntimeOptions = {
@@ -29,23 +30,15 @@ export function useTerminalRuntime({
   formatSessionError,
 }: UseTerminalRuntimeOptions) {
   const terminalSessionMapRef = useRef<Map<string, string>>(new Map());
-  const pendingTerminalEntriesRef = useRef<Map<string, TerminalEntry[]>>(new Map());
-  const terminalOutputBuffersRef = useRef<Map<string, TerminalEntry[]>>(new Map());
-  const terminalOutputFlushRef = useRef<number | null>(null);
   const mountedRef = useMountedRef();
-
-  useEffect(() => {
-    return () => clearTerminalOutputBuffers();
-  }, []);
 
   function registerTerminal(terminalId: string, sessionId: string) {
     terminalSessionMapRef.current.set(terminalId, sessionId);
   }
 
-  function consumePendingTerminalEntries(terminalId: string) {
-    const entries = pendingTerminalEntriesRef.current.get(terminalId) ?? [];
-    if (entries.length) pendingTerminalEntriesRef.current.delete(terminalId);
-    return entries;
+  function consumePendingTerminalEntries(terminalId: string): TerminalEntry[] {
+    void terminalId;
+    return [];
   }
 
   function appendTerminal(sessionId: string, kind: TerminalOutputEvent["kind"] | "input", content: string) {
@@ -58,11 +51,11 @@ export function useTerminalRuntime({
   }
 
   function handleTerminalOutput(payload: TerminalOutputEvent) {
-    const { data, cwd } = stripCwdMarkers(payload.data);
-    const promptCwd = extractTerminalPromptCwd(payload.terminalId, data);
+    const { data: dataForPath, cwd } = stripCwdMarkers(payload.data);
+    const promptCwd = extractTerminalPromptCwd(payload.terminalId, dataForPath);
     if (cwd || promptCwd) updateTerminalCwd(payload.terminalId, cwd ?? promptCwd ?? "");
-    if (!data) return;
-    enqueueTerminalOutput(payload.terminalId, createTerminalOutputEntry(payload, data));
+    if (!payload.data) return;
+    writeTerminalEntryDirect(payload.terminalId, createTerminalOutputEntry(payload, payload.data));
   }
 
   function createTerminalOutputEntry(payload: TerminalOutputEvent, content: string): TerminalEntry {
@@ -78,84 +71,23 @@ export function useTerminalRuntime({
     return extractPromptCwd(data, session.username);
   }
 
-  function enqueueTerminalOutput(terminalId: string, entry: TerminalEntry) {
-    const buffer = terminalOutputBuffersRef.current.get(terminalId);
-    if (buffer) {
-      buffer.push(entry);
-    } else {
-      terminalOutputBuffersRef.current.set(terminalId, [entry]);
-    }
-    if (terminalOutputFlushRef.current !== null) return;
-    terminalOutputFlushRef.current = window.requestAnimationFrame(flushTerminalOutput);
-  }
-
-  function flushTerminalOutput() {
-    terminalOutputFlushRef.current = null;
-    if (terminalOutputBuffersRef.current.size === 0) return;
-    const batch = terminalOutputBuffersRef.current;
-    terminalOutputBuffersRef.current = new Map();
-    const matchedTerminalIds = new Set<string>();
-    setSessions((current) =>
-      current.map((session) => {
-        let nextEntries = session.terminal;
-        for (const [terminalId, entries] of batch) {
-          const mappedSessionId = terminalSessionMapRef.current.get(terminalId);
-          if (session.terminalId !== terminalId && session.id !== mappedSessionId) continue;
-          matchedTerminalIds.add(terminalId);
-          nextEntries = appendTerminalStreamEntries(nextEntries, entries);
-        }
-        return nextEntries === session.terminal ? session : { ...session, terminal: nextEntries };
-      }),
-    );
-    for (const [terminalId, entries] of batch) {
-      if (matchedTerminalIds.has(terminalId)) continue;
-      const pending = pendingTerminalEntriesRef.current.get(terminalId) ?? [];
-      pendingTerminalEntriesRef.current.set(terminalId, appendTerminalStreamEntries(pending, entries));
-    }
-    pruneStalePendingTerminals();
-  }
-
-  function pruneStalePendingTerminals() {
-    if (pendingTerminalEntriesRef.current.size === 0) return;
-    const live = new Set<string>(terminalSessionMapRef.current.keys());
-    for (const terminalId of pendingTerminalEntriesRef.current.keys()) {
-      if (!live.has(terminalId)) {
-        pendingTerminalEntriesRef.current.delete(terminalId);
-      }
-    }
-  }
-
-  function clearTerminalOutputBuffers() {
-    if (terminalOutputFlushRef.current !== null) {
-      window.cancelAnimationFrame(terminalOutputFlushRef.current);
-      terminalOutputFlushRef.current = null;
-    }
-    terminalOutputBuffersRef.current.clear();
-  }
-
   function resetTerminalRuntime() {
     terminalSessionMapRef.current.clear();
-    pendingTerminalEntriesRef.current.clear();
-    clearTerminalOutputBuffers();
+    clearAllTerminalDirect();
   }
 
   function handleTerminalClosed(payload: TerminalClosedEvent) {
     terminalSessionMapRef.current.delete(payload.terminalId);
-    pendingTerminalEntriesRef.current.delete(payload.terminalId);
-    setSessions((current) =>
-      current.map((session) =>
-        session.terminalId === payload.terminalId
-          ? {
-              ...session,
-              terminalId: null,
-              terminal: [
-                ...session.terminal,
-                createTerminalEntry("system", "终端通道已关闭"),
-              ],
-            }
-          : session,
-      ),
-    );
+    forgetTerminalDirect(payload.terminalId);
+    setSessions((current) => {
+      let changed = false;
+      const next = current.map((session) => {
+        if (session.terminalId !== payload.terminalId) return session;
+        changed = true;
+        return { ...session, terminalId: null };
+      });
+      return changed ? next : current;
+    });
   }
 
   function updateTerminalCwd(terminalId: string, cwd: string) {
@@ -209,32 +141,9 @@ export function useTerminalRuntime({
   }
 
   function clearTerminal(sessionId: string) {
+    const terminalId = sessionsRef.current.find((session) => session.id === sessionId)?.terminalId;
+    if (terminalId) clearTerminalDirect(terminalId);
     updateSession(sessionId, (session) => ({ ...session, terminal: [] }));
-  }
-
-  async function reopenTerminal(session: RemoteSession) {
-    if (!session.connectionId) {
-      appendTerminal(session.id, "error", "无法重新打开终端：会话尚未连接");
-      return;
-    }
-    if (session.terminalId) return;
-    appendTerminal(session.id, "system", "正在重新打开终端通道...");
-    try {
-      const terminal = await remoteApi.openTerminal(session.connectionId, 100, 30);
-      registerTerminal(terminal.terminalId, session.id);
-      const pendingTerminalEntries = consumePendingTerminalEntries(terminal.terminalId);
-      updateSession(session.id, (item) => ({
-        ...item,
-        terminalId: terminal.terminalId,
-        terminal: [
-          ...item.terminal,
-          ...pendingTerminalEntries,
-          createTerminalEntry("system", "终端已重新打开"),
-        ],
-      }));
-    } catch (error) {
-      appendTerminal(session.id, "error", `终端重新打开失败：${getErrorMessage(error)}`);
-    }
   }
 
   return {
@@ -248,6 +157,5 @@ export function useTerminalRuntime({
     sendTerminalCommand,
     resizeTerminal,
     clearTerminal,
-    reopenTerminal,
   };
 }

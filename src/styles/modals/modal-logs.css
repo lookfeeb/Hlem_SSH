@@ -73,7 +73,6 @@
 .aiApiLogAction-upload { background: #dcfce7; color: #166534; }
 .aiApiLogAction-files { background: #fef3c7; color: #92400e; }
 .aiApiLogAction-download { background: #e0e7ff; color: #3730a3; }
-.aiApiLogAction-ws { background: #f3e8ff; color: #7c3aed; }
 
 .aiApiLogDetail {
   overflow: hidden;

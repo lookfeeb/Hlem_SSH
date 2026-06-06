@@ -5,10 +5,7 @@ use crate::config::{ConfigSnapshot, GroupInput, SessionInput};
 use crate::remote::ConnectionInfo;
 
 #[tauri::command]
-pub fn group_create(
-    state: State<'_, AppState>,
-    input: GroupInput,
-) -> AppResult<ConfigSnapshot> {
+pub fn group_create(state: State<'_, AppState>, input: GroupInput) -> AppResult<ConfigSnapshot> {
     with_store(&state, |store| store.create_group(input))
 }
 
@@ -22,10 +19,7 @@ pub fn group_update(
 }
 
 #[tauri::command]
-pub fn group_delete(
-    state: State<'_, AppState>,
-    group_id: String,
-) -> AppResult<ConfigSnapshot> {
+pub fn group_delete(state: State<'_, AppState>, group_id: String) -> AppResult<ConfigSnapshot> {
     with_store(&state, |store| store.delete_group(&group_id))
 }
 
@@ -47,10 +41,7 @@ pub fn session_update(
 }
 
 #[tauri::command]
-pub fn session_delete(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> AppResult<ConfigSnapshot> {
+pub fn session_delete(state: State<'_, AppState>, session_id: String) -> AppResult<ConfigSnapshot> {
     with_store(&state, |store| store.delete_session(&session_id))
 }
 

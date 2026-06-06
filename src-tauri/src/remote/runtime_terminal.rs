@@ -1,17 +1,5 @@
 use super::*;
 
-const CWD_TRACKING_HOOK: &str = concat!(
-    "export HELM_CWD_HOOK=1; ",
-    "__helm_emit_cwd() { printf '\\033]777;cwd=%s\\a' \"$PWD\"; }; ",
-    "if [ -n \"${BASH_VERSION:-}\" ]; then ",
-    "case \";${PROMPT_COMMAND:-};\" in *\";__helm_emit_cwd;\"*) : ;; ",
-    "*) PROMPT_COMMAND=\"__helm_emit_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}\" ;; esac; ",
-    "elif [ -n \"${ZSH_VERSION:-}\" ]; then ",
-    "autoload -Uz add-zsh-hook >/dev/null 2>&1; ",
-    "add-zsh-hook precmd __helm_emit_cwd >/dev/null 2>&1; ",
-    "fi; __helm_emit_cwd # HELM_CWD_HOOK\n",
-);
-
 impl RemoteRuntime {
     pub async fn open_terminal(
         &self,
@@ -60,7 +48,10 @@ impl RemoteRuntime {
             let writer = writer.lock().await;
             writer.request_shell(true).await.map_err(remote_error)?;
         }
-        install_cwd_tracking_hook(writer.clone()).await;
+        // Do not inject prompt hooks into the interactive PTY. Even invisible
+        // OSC markers can be split across SSH output chunks; filtering those
+        // chunks on the frontend risks desynchronizing xterm's parser/cursor
+        // state. Keep terminal output as the remote shell actually produced it.
 
         self.terminals.write().await.insert(
             terminal_id.clone(),
@@ -204,11 +195,4 @@ impl RemoteRuntime {
         )
         .await
     }
-}
-
-async fn install_cwd_tracking_hook(writer: Arc<Mutex<TerminalWriter>>) {
-    let writer = writer.lock().await;
-    let mut stream = writer.make_writer();
-    let _ = stream.write_all(CWD_TRACKING_HOOK.as_bytes()).await;
-    let _ = stream.flush().await;
 }
