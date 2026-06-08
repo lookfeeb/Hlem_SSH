@@ -11,6 +11,7 @@ pub async fn api_server_start(
     state: State<'_, AppState>,
     port: u16,
     allowed_session_id: Option<String>,
+    allowed_session_ids: Option<Vec<String>>,
 ) -> AppResult<ApiServerInfo> {
     ensure_vault_unlocked(&state)?;
     let mut handle_guard = state.api_server.lock().await;
@@ -45,20 +46,8 @@ pub async fn api_server_start(
         store.settings_update(settings)?;
         Ok(new_key)
     })?;
-    let allowed_session_name = allowed_session_id.as_ref().and_then(|sid| {
-        with_store(&state, |store| {
-            let snapshot = store.snapshot()?;
-            let name = snapshot
-                .data
-                .sessions
-                .iter()
-                .find(|s| s.id == *sid)
-                .map(|s| format!("{} ({})", s.name, s.host));
-            Ok(name)
-        })
-        .ok()
-        .flatten()
-    });
+    let allowed_session_ids = normalize_allowed_session_ids(allowed_session_ids, allowed_session_id);
+    let allowed_session_names = allowed_session_names_for_ids(&state, &allowed_session_ids)?;
     let log_file = state.data_dir.join("api_logs.json");
     let server_handle = api_server::start_server(
         app,
@@ -66,8 +55,8 @@ pub async fn api_server_start(
         state.vault.clone(),
         port,
         api_key.clone(),
-        allowed_session_id.clone(),
-        allowed_session_name,
+        allowed_session_ids.clone(),
+        allowed_session_names,
         log_file,
     )
     .await
@@ -91,6 +80,50 @@ pub async fn api_server_stop(state: State<'_, AppState>) -> AppResult<()> {
         handle.shutdown().await;
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn api_server_update_sessions(
+    state: State<'_, AppState>,
+    allowed_session_id: Option<String>,
+    allowed_session_ids: Option<Vec<String>>,
+) -> AppResult<ApiServerInfo> {
+    ensure_vault_unlocked(&state)?;
+    let allowed_session_ids = normalize_allowed_session_ids(allowed_session_ids, allowed_session_id);
+    let allowed_session_names = allowed_session_names_for_ids(&state, &allowed_session_ids)?;
+    let mut handle_guard = state.api_server.lock().await;
+    if handle_guard
+        .as_ref()
+        .map(|handle| handle.is_finished())
+        .unwrap_or(false)
+    {
+        if let Some(handle) = handle_guard.take() {
+            drop(handle_guard);
+            handle.shutdown().await;
+            return Ok(ApiServerInfo {
+                running: false,
+                port: 0,
+                api_key: String::new(),
+            });
+        }
+    }
+    match handle_guard.as_ref() {
+        Some(handle) => {
+            handle
+                .update_allowed_sessions(allowed_session_ids, allowed_session_names)
+                .map_err(AppError::Remote)?;
+            Ok(ApiServerInfo {
+                running: true,
+                port: handle.port,
+                api_key: handle.api_key.clone(),
+            })
+        }
+        None => Ok(ApiServerInfo {
+            running: false,
+            port: 0,
+            api_key: String::new(),
+        }),
+    }
 }
 
 #[tauri::command]
@@ -145,8 +178,8 @@ pub async fn api_server_regenerate_key(
     };
     if let Some(handle) = handle {
         let port = handle.port;
-        let allowed = handle.allowed_session_id.clone();
-        let allowed_name = handle.allowed_session_name.clone();
+        let allowed = handle.allowed_session_ids_snapshot();
+        let allowed_names = handle.allowed_session_names_snapshot();
         let log_file = handle.log_file.clone();
         handle.shutdown().await;
         let server_handle = api_server::start_server(
@@ -156,7 +189,7 @@ pub async fn api_server_regenerate_key(
             port,
             new_key.clone(),
             allowed,
-            allowed_name,
+            allowed_names,
             log_file,
         )
         .await
@@ -201,4 +234,47 @@ fn generate_api_key() -> String {
     let mut rng = rand::thread_rng();
     let bytes: [u8; 32] = rng.gen();
     format!("helm_{}", hex::encode(bytes))
+}
+
+fn normalize_allowed_session_ids(
+    allowed_session_ids: Option<Vec<String>>,
+    allowed_session_id: Option<String>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    for id in allowed_session_ids
+        .unwrap_or_default()
+        .into_iter()
+        .chain(allowed_session_id)
+    {
+        let value = id.trim().to_string();
+        if value.is_empty() || ids.contains(&value) {
+            continue;
+        }
+        ids.push(value);
+        if ids.len() >= 3 {
+            break;
+        }
+    }
+    ids
+}
+
+fn allowed_session_names_for_ids(
+    state: &State<'_, AppState>,
+    allowed_session_ids: &[String],
+) -> AppResult<Vec<(String, String)>> {
+    with_store(state, |store| {
+        let snapshot = store.snapshot()?;
+        let names = allowed_session_ids
+            .iter()
+            .filter_map(|sid| {
+                snapshot
+                    .data
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == *sid)
+                    .map(|s| (sid.clone(), format!("{} ({})", s.name, s.host)))
+            })
+            .collect::<Vec<_>>();
+        Ok(names)
+    })
 }

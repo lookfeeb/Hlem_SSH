@@ -15,10 +15,13 @@ export function useApiServerRuntime(configSnapshotRef: MutableRefObject<ConfigSn
       if (status.running) return;
 
       const settings = configSnapshotRef.current?.data.settings;
-      if (!settings?.aiApiAutoStart || !settings.aiApiSessionId || !settings.aiApiPort) return;
+      const sessionIds = settings
+        ? [...(settings.aiApiSessionIds ?? []), settings.aiApiSessionId ?? ""].filter(Boolean).slice(0, 3)
+        : [];
+      if (!settings?.aiApiAutoStart || sessionIds.length === 0 || !settings.aiApiPort) return;
 
       try {
-        const info = await appApi.apiServerStart(settings.aiApiPort, settings.aiApiSessionId);
+        const info = await appApi.apiServerStart(settings.aiApiPort, sessionIds);
         if (!mountedRef.current) return;
         setApiServerRunning(info.running);
       } catch {

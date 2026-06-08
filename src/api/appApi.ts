@@ -73,10 +73,31 @@ export const appApi = {
   openExternalUrl: (url: string) => call<void>("open_external_url", () => browserOpenUrl(url), { url }),
   expandLocalPaths: (paths: string[]) =>
     call<LocalExpandedEntry[]>("local_expand_paths", () => browserUnavailable("本地目录展开"), { paths }),
-  apiServerStart: (port: number, allowedSessionId?: string | null) =>
-    call<ApiServerInfo>("api_server_start", () => browserUnavailable("API 服务"), { port, allowedSessionId: allowedSessionId ?? null }),
+  apiServerStart: (port: number, allowedSessionIds?: string[] | string | null) => {
+    const ids = Array.isArray(allowedSessionIds)
+      ? allowedSessionIds
+      : allowedSessionIds
+        ? [allowedSessionIds]
+        : [];
+    return call<ApiServerInfo>("api_server_start", () => browserUnavailable("API 服务"), {
+      port,
+      allowedSessionId: ids[0] ?? null,
+      allowedSessionIds: ids,
+    });
+  },
   apiServerStop: () =>
     call<void>("api_server_stop", () => browserUnavailable("API 服务"), undefined),
+  apiServerUpdateSessions: (allowedSessionIds?: string[] | string | null) => {
+    const ids = Array.isArray(allowedSessionIds)
+      ? allowedSessionIds
+      : allowedSessionIds
+        ? [allowedSessionIds]
+        : [];
+    return call<ApiServerInfo>("api_server_update_sessions", () => browserUnavailable("API 服务"), {
+      allowedSessionId: ids[0] ?? null,
+      allowedSessionIds: ids,
+    });
+  },
   apiServerStatus: () =>
     call<ApiServerInfo>("api_server_status", () => ({ running: false, port: 0, apiKey: "" }), undefined),
   apiServerRegenerateKey: () =>

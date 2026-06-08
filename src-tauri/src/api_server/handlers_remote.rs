@@ -14,8 +14,8 @@ use tokio_util::io::{ReaderStream, StreamReader};
 use super::auth::{verify_auth, verify_session_access};
 use super::guard::check_dangerous_command;
 use super::{
-    friendly_error_detail, map_remote_error, push_log, push_log_with_response, take_chars,
-    truncate_for_log, ApiError, ApiServerState,
+    allowed_session_ids_snapshot, friendly_error_detail, map_remote_error, push_log,
+    push_log_with_response, take_chars, truncate_for_log, ApiError, ApiServerState,
 };
 
 // ─── Public types (re-exported from mod.rs) ────────────────────────────────────
@@ -162,7 +162,11 @@ pub async fn rest_sessions(
     require_auth(&state, &headers).await?;
 
     let start = std::time::Instant::now();
-    let sessions = state.remote.list_connected_sessions().await;
+    let mut sessions = state.remote.list_connected_sessions().await;
+    let allowed_session_ids = allowed_session_ids_snapshot(&state);
+    if !allowed_session_ids.is_empty() {
+        sessions.retain(|session| allowed_session_ids.contains(&session.session_id));
+    }
     let elapsed = elapsed_ms(start);
     push_log(
         &state,

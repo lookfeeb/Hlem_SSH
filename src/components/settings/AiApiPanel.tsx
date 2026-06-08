@@ -1,6 +1,6 @@
-import { CheckOutlined, CopyOutlined, FundProjectionScreenOutlined, ReloadOutlined } from "@ant-design/icons";
+import { CheckOutlined, CopyOutlined, FundProjectionScreenOutlined, MinusOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { Button, Input, InputNumber, Modal, Select, Switch, Tooltip, message } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AppSettings, ConfigSnapshot } from "../../types";
 import { appApi, type ApiServerInfo, type ApiLogEntry } from "../../api/appApi";
 import { appEvents } from "../../api/appEvents";
@@ -17,27 +17,58 @@ interface AiApiPanelProps {
   onSettingsChange: (snapshot: ConfigSnapshot) => void;
 }
 
+const MAX_AI_API_SESSIONS = 3;
+
+function compactAiApiSessionRows(rows: Array<string | null | undefined>) {
+  const ids: string[] = [];
+  for (const row of rows) {
+    if (!row || ids.includes(row)) continue;
+    ids.push(row);
+    if (ids.length >= MAX_AI_API_SESSIONS) break;
+  }
+  return ids;
+}
+
+function initialAiApiSessionRows(settings: AppSettings, sessions: { id: string }[]) {
+  const availableIds = new Set(sessions.map((session) => session.id));
+  const ids = compactAiApiSessionRows([...(settings.aiApiSessionIds ?? []), settings.aiApiSessionId])
+    .filter((id) => availableIds.has(id));
+  return ids.length > 0 ? ids : [null];
+}
+
+function normalizeAiApiSessionRows(rows: Array<string | null>) {
+  const seen = new Set<string>();
+  return rows.slice(0, MAX_AI_API_SESSIONS).map((row) => {
+    if (!row || seen.has(row)) return null;
+    seen.add(row);
+    return row;
+  });
+}
+
+function sameSessionIds(left: string[], right: string[]) {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
 export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerChange, onSettingsChange }: AiApiPanelProps) {
   const [aiApiInfo, setAiApiInfo] = useState<ApiServerInfo | null>(null);
   const [aiApiLoading, setAiApiLoading] = useState(false);
   const [aiApiPort, setAiApiPort] = useState(() => initialValue.aiApiPort ?? 19880);
-  const [aiApiCopied, setAiApiCopied] = useState(false);
   const [aiApiAutoStart, setAiApiAutoStart] = useState(() => initialValue.aiApiAutoStart ?? false);
   const mountedRef = useMountedRef();
   const setSafeTimeout = useTimeoutRegistry();
-  const [aiApiSessionId, setAiApiSessionId] = useState<string | null>(() => {
-    const saved = initialValue.aiApiSessionId ?? null;
-    if (saved && sessions.some((s) => s.id === saved)) return saved;
-    return null;
-  });
+  const autoStartPendingRef = useRef(false);
+  const [aiApiSessionRows, setAiApiSessionRows] = useState<Array<string | null>>(() => initialAiApiSessionRows(initialValue, sessions));
   const [aiApiLogs, setAiApiLogs] = useState<ApiLogEntry[]>([]);
+  const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null);
+  const availableAiApiSessionIdsKey = sessions.map((session) => session.id).join("|");
+  const selectedAiApiSessionIds = compactAiApiSessionRows(aiApiSessionRows);
 
   useEffect(() => {
     if (!open) return;
-    setAiApiSessionId(initialValue.aiApiSessionId ?? null);
+    setAiApiSessionRows(initialAiApiSessionRows(initialValue, sessions));
     setAiApiPort(initialValue.aiApiPort ?? 19880);
     setAiApiAutoStart(initialValue.aiApiAutoStart ?? false);
-  }, [initialValue, open]);
+  }, [availableAiApiSessionIdsKey, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -60,6 +91,14 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
     return () => { mounted = false; if (unlisten) unlisten(); };
   }, [open]);
 
+  useEffect(() => {
+    if (!open || autoStartPendingRef.current || aiApiLoading || aiApiInfo?.running || selectedAiApiSessionIds.length === 0) return;
+    autoStartPendingRef.current = true;
+    void startAiApi().finally(() => {
+      autoStartPendingRef.current = false;
+    });
+  }, [aiApiInfo?.running, aiApiLoading, open, selectedAiApiSessionIds.join("|")]);
+
   async function refreshAiApiStatus() {
     try {
       const info = await appApi.apiServerStatus();
@@ -73,23 +112,18 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
   async function startAiApi() {
     setAiApiLoading(true);
     try {
-      const info = await appApi.apiServerStart(aiApiPort, aiApiSessionId);
+      const info = await appApi.apiServerStart(aiApiPort, selectedAiApiSessionIds);
       if (!mountedRef.current) return;
       setAiApiInfo(info);
       onApiServerChange(true);
-      await persistAiApiSettings({ aiApiKey: info.apiKey, aiApiPort: info.port || aiApiPort, aiApiSessionId, aiApiAutoStart }).catch(() => undefined);
+      await persistAiApiSettings({
+        aiApiKey: info.apiKey,
+        aiApiPort: info.port || aiApiPort,
+        aiApiSessionId: selectedAiApiSessionIds[0] ?? null,
+        aiApiSessionIds: selectedAiApiSessionIds,
+        aiApiAutoStart,
+      }).catch(() => undefined);
     } catch (error) { Modal.error({ title: "启动 API 服务失败", content: String(error) }); }
-    finally { if (mountedRef.current) setAiApiLoading(false); }
-  }
-
-  async function stopAiApi() {
-    setAiApiLoading(true);
-    try {
-      await appApi.apiServerStop();
-      if (!mountedRef.current) return;
-      setAiApiInfo({ running: false, port: 0, apiKey: "" });
-      onApiServerChange(false);
-    } catch (error) { Modal.error({ title: "停止 API 服务失败", content: String(error) }); }
     finally { if (mountedRef.current) setAiApiLoading(false); }
   }
 
@@ -102,31 +136,82 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
     } catch (error) { Modal.error({ title: "重新生成密钥失败", content: String(error) }); }
   }
 
-  async function changeAiApiSession(sessionId: string | null) {
-    setAiApiSessionId(sessionId);
-    const nextAutoStart = sessionId ? aiApiAutoStart : false;
-    if (!sessionId) setAiApiAutoStart(false);
-    try { await persistAiApiSettings({ aiApiSessionId: sessionId, aiApiPort, aiApiAutoStart: nextAutoStart }); }
-    catch { message.error("保存失败"); return; }
+  function addAiApiSessionRow() {
+    setAiApiSessionRows((prev) => {
+      if (prev.length >= MAX_AI_API_SESSIONS || prev.length >= sessions.length || !prev[prev.length - 1]) return prev;
+      return [...prev, null];
+    });
+  }
+
+  function addAiApiSessionTooltip(sessionId: string | null, isLastRow: boolean) {
+    if (!isLastRow) return "";
+    if (aiApiSessionRows.length >= MAX_AI_API_SESSIONS) return "最多指定 3 个会话";
+    if (aiApiSessionRows.length >= sessions.length) return "没有更多可选会话";
+    if (!sessionId) return "请先选择当前会话";
+    return "添加指定会话";
+  }
+
+  async function changeAiApiSession(index: number, sessionId: string | null) {
+    const previousRows = aiApiSessionRows;
+    const nextRows = previousRows.map((row, rowIndex) => (rowIndex === index ? sessionId : row));
+    await saveAiApiSessionRows(nextRows, previousRows);
+  }
+
+  async function removeAiApiSessionRow(index: number) {
+    const previousRows = aiApiSessionRows;
+    const nextRows = previousRows.length > 1 ? previousRows.filter((_, rowIndex) => rowIndex !== index) : [null];
+    await saveAiApiSessionRows(nextRows, previousRows);
+  }
+
+  async function saveAiApiSessionRows(nextRowsInput: Array<string | null>, previousRows: Array<string | null>) {
+    const nextRows = normalizeAiApiSessionRows(nextRowsInput);
+    const previousSessionIds = compactAiApiSessionRows(previousRows);
+    const nextSessionIds = compactAiApiSessionRows(nextRows);
+    const previousAutoStart = aiApiAutoStart;
+    const nextAutoStart = nextSessionIds.length > 0 ? aiApiAutoStart : false;
+
+    setAiApiSessionRows(nextRows);
+    if (!nextAutoStart) setAiApiAutoStart(false);
+    try {
+      await persistAiApiSettings({
+        aiApiSessionId: nextSessionIds[0] ?? null,
+        aiApiSessionIds: nextSessionIds,
+        aiApiPort,
+        aiApiAutoStart: nextAutoStart,
+      });
+    } catch {
+      message.error("保存失败");
+      setAiApiSessionRows(previousRows);
+      setAiApiAutoStart(previousAutoStart);
+      return;
+    }
+    if (sameSessionIds(previousSessionIds, nextSessionIds)) return;
     if (aiApiInfo?.running) {
       try {
-        await appApi.apiServerStop();
-        const info = await appApi.apiServerStart(aiApiPort, sessionId);
+        const info = await appApi.apiServerUpdateSessions(nextSessionIds);
         if (!mountedRef.current) return;
         setAiApiInfo(info);
-        const sessionName = sessions.find((s) => s.id === sessionId)?.name;
-        message.success(sessionId ? `已切换至「${sessionName}」，API 已重启` : "已清除会话限制，API 已重启");
-      } catch (error) { message.error(`重启 API 服务失败: ${String(error)}`); }
+        onApiServerChange(info.running);
+        if (info.running) {
+          message.success(nextSessionIds.length > 0 ? "已更新指定会话，API 已热更新" : "已清除会话限制，API 已热更新");
+        } else {
+          message.warning("API 服务已停止，仅保存会话配置");
+        }
+      } catch (error) { message.error(`热更新 API 会话失败: ${String(error)}`); }
     } else {
-      const sessionName = sessions.find((s) => s.id === sessionId)?.name;
-      message.success(sessionId ? `已切换至「${sessionName}」` : "已清除会话限制");
+      message.success(nextSessionIds.length > 0 ? "已更新指定会话" : "已清除会话限制");
     }
   }
 
   async function changeAiApiAutoStart(checked: boolean) {
     setAiApiAutoStart(checked);
     try {
-      await persistAiApiSettings({ aiApiAutoStart: checked, aiApiSessionId, aiApiPort });
+      await persistAiApiSettings({
+        aiApiAutoStart: checked,
+        aiApiSessionId: selectedAiApiSessionIds[0] ?? null,
+        aiApiSessionIds: selectedAiApiSessionIds,
+        aiApiPort,
+      });
       message.success(checked ? "已开启随应用自动启动" : "已关闭自动启动");
     } catch { message.error("保存失败"); setAiApiAutoStart(!checked); }
   }
@@ -135,7 +220,10 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
     const nextSettings: AppSettings = {
       ...initialValue,
       aiApiKey: (aiApiInfo?.apiKey || initialValue.aiApiKey) ?? null,
-      aiApiSessionId, aiApiPort, aiApiAutoStart,
+      aiApiSessionId: selectedAiApiSessionIds[0] ?? null,
+      aiApiSessionIds: selectedAiApiSessionIds,
+      aiApiPort,
+      aiApiAutoStart,
       ...overrides,
     };
     const snapshot = await vaultApi.settingsUpdate(nextSettings);
@@ -158,20 +246,40 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
     } catch (error) { message.error(String(error)); }
   }
 
-  function copyApiInfo() {
-    if (!aiApiInfo?.running) return;
-    const selectedSession = aiApiSessionId ? sessions.find((s) => s.id === aiApiSessionId) : null;
-    const text = buildApiDoc({
-      port: aiApiInfo.port,
-      apiKey: aiApiInfo.apiKey,
-      sessionId: selectedSession?.id ?? "<sessionId>",
-      sessionName: selectedSession?.name,
-      sessionHost: selectedSession?.host,
+  function findAiApiSession(sessionId: string | null) {
+    if (!sessionId) return null;
+    return sessions.find((session) => session.id === sessionId) ?? null;
+  }
+
+  function aiApiSessionCopyLabel(sessionId: string | null) {
+    const sessionName = findAiApiSession(sessionId)?.name;
+    return sessionName ? `「${sessionName}」` : "该会话";
+  }
+
+  function aiApiSessionCopyTooltip(sessionId: string | null, copied: boolean) {
+    if (!sessionId) return "请选择会话后复制";
+    return copied ? `已复制${aiApiSessionCopyLabel(sessionId)}API 使用说明` : `复制${aiApiSessionCopyLabel(sessionId)}API 使用说明`;
+  }
+
+  function buildApiInfoText(targetSessionId: string) {
+    const targetSession = findAiApiSession(targetSessionId);
+    return buildApiDoc({
+      port: aiApiInfo?.port ?? aiApiPort,
+      apiKey: aiApiInfo?.apiKey ?? "",
+      sessionId: targetSession?.id ?? targetSessionId,
+      sessionName: targetSession?.name,
+      sessionHost: targetSession?.host,
     });
-    void navigator.clipboard.writeText(text).then(() => {
-      setAiApiCopied(true);
-      setSafeTimeout(() => setAiApiCopied(false), 2000);
-      message.success("已复制 API 使用说明（HTTP REST）");
+  }
+
+  function copyApiInfoForSession(targetSessionId: string | null) {
+    if (!targetSessionId || !aiApiInfo?.running || !aiApiInfo.apiKey) return;
+    void navigator.clipboard.writeText(buildApiInfoText(targetSessionId)).then(() => {
+      setCopiedSessionId(targetSessionId);
+      setSafeTimeout(() => setCopiedSessionId(null), 2000);
+      message.success(`已复制${aiApiSessionCopyLabel(targetSessionId)}API 使用说明`);
+    }).catch(() => {
+      message.error("复制失败");
     });
   }
 
@@ -180,28 +288,90 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
       <div className="aiApiContent">
         <div className="aiApiPanel">
           <div className="aiApiStatusRow">
-            <span className="aiApiStatusLabel">服务状态</span>
-            <span className={`aiApiStatusBadge aiApiStatusBadge-${aiApiInfo?.running ? "running" : "stopped"}`}>
-              {aiApiInfo?.running ? "运行中" : "已停止"}
-            </span>
-            {aiApiLogs.length > 0 && (
-              <Tooltip title="查看日志">
-                <Button size="small" type="link" icon={<FundProjectionScreenOutlined />} onClick={() => void openLogWindow()} />
+            <div className="aiApiStatusGroup">
+              <span className="aiApiStatusLabel">服务状态</span>
+              <span className={`aiApiStatusBadge aiApiStatusBadge-${aiApiInfo?.running ? "running" : "stopped"}`}>
+                {aiApiInfo?.running ? "运行中" : "已停止"}
+              </span>
+              {aiApiLogs.length > 0 && (
+                <Tooltip title="查看日志">
+                  <Button size="small" type="link" icon={<FundProjectionScreenOutlined />} onClick={() => void openLogWindow()} />
+                </Tooltip>
+              )}
+              <Tooltip title={aiApiAutoStart ? "已开启随应用自动启动" : "随应用自动启动"}>
+                <Switch
+                  checked={aiApiAutoStart}
+                  disabled={selectedAiApiSessionIds.length === 0}
+                  onChange={(c) => void changeAiApiAutoStart(c)}
+                />
               </Tooltip>
-            )}
+            </div>
           </div>
           <div className="aiApiFormRow">
             <span className="aiApiFormLabel">监听端口</span>
             <InputNumber min={1024} max={65535} precision={0} value={aiApiPort} disabled={aiApiInfo?.running} onChange={(v) => v && setAiApiPort(v)} style={{ width: 120 }} />
           </div>
-          <div className="aiApiFormRow">
+          <div className="aiApiFormRow aiApiSessionFormRow">
             <span className="aiApiFormLabel">指定会话</span>
-            <Select style={{ flex: 1 }} placeholder="全部会话（AI 可访问所有已连接终端）" allowClear value={aiApiSessionId} onChange={(v) => void changeAiApiSession(v ?? null)} options={sessions.map((s) => ({ label: s.name, value: s.id }))} />
-          </div>
-          <div className="aiApiFormRow">
-            <span className="aiApiFormLabel">自动启动</span>
-            <Switch checked={aiApiAutoStart} disabled={!aiApiSessionId} onChange={(c) => void changeAiApiAutoStart(c)} />
-            {!aiApiSessionId && <span style={{ fontSize: 12, color: "var(--text-tertiary, #999)" }}>需先指定会话</span>}
+            <div className="aiApiSessionRows">
+              {aiApiSessionRows.map((sessionId, index) => {
+                const isLastRow = index === aiApiSessionRows.length - 1;
+                const canShowAdd = isLastRow && aiApiSessionRows.length < MAX_AI_API_SESSIONS && aiApiSessionRows.length < sessions.length;
+                const canAdd = canShowAdd && Boolean(sessionId);
+                const isSessionCopied = Boolean(sessionId) && copiedSessionId === sessionId;
+                return (
+                  <div className="aiApiSessionSelectRow" key={index}>
+                    <Select
+                      style={{ flex: 1 }}
+                      placeholder="请选择允许访问的会话"
+                      allowClear
+                      value={sessionId}
+                      onChange={(v) => void changeAiApiSession(index, v ?? null)}
+                      options={sessions.map((session) => ({
+                        label: session.name,
+                        value: session.id,
+                        disabled: aiApiSessionRows.some((row, rowIndex) => rowIndex !== index && row === session.id),
+                      }))}
+                    />
+                    {aiApiSessionRows.length > 1 ? (
+                      <Tooltip title="移除指定会话">
+                        <Button
+                          className="aiApiSessionAction"
+                          size="small"
+                          icon={<MinusOutlined />}
+                          onClick={() => void removeAiApiSessionRow(index)}
+                        />
+                      </Tooltip>
+                    ) : (
+                      <span className="aiApiSessionActionSpacer" aria-hidden="true" />
+                    )}
+                    {canShowAdd ? (
+                      <Tooltip title={addAiApiSessionTooltip(sessionId, isLastRow)}>
+                        <Button
+                          className="aiApiSessionAction"
+                          size="small"
+                          icon={<PlusOutlined />}
+                          disabled={!canAdd}
+                          onClick={addAiApiSessionRow}
+                        />
+                      </Tooltip>
+                    ) : (
+                      <span className="aiApiSessionActionSpacer" aria-hidden="true" />
+                    )}
+                    <Tooltip title={aiApiSessionCopyTooltip(sessionId, isSessionCopied)}>
+                      <Button
+                        className="aiApiSessionAction"
+                        size="small"
+                        type="text"
+                        icon={isSessionCopied ? <CheckOutlined style={{ color: "#10b981" }} /> : <CopyOutlined />}
+                        disabled={!sessionId || !aiApiInfo?.running || !aiApiInfo.apiKey}
+                        onClick={() => copyApiInfoForSession(sessionId)}
+                      />
+                    </Tooltip>
+                  </div>
+                );
+              })}
+            </div>
           </div>
           {aiApiInfo?.running && aiApiInfo.apiKey && (
             <>
@@ -215,45 +385,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
                 <Tooltip title="重新生成密钥"><Button icon={<ReloadOutlined />} size="small" onClick={() => void regenerateKey()} /></Tooltip>
               </div>
             </>
-          )}
-        </div>
-        {aiApiInfo?.running && aiApiInfo.apiKey && (
-          <div className="aiApiPanel aiApiPanel-endpoints">
-            <div className="aiApiEndpointHeader">
-              <div className="aiApiEndpointTitle">可用接口</div>
-              <Tooltip title={aiApiCopied ? "已复制" : "复制 API 使用说明"}>
-                <Button icon={aiApiCopied ? <CheckOutlined style={{ color: "#10b981" }} /> : <CopyOutlined />} size="small" type="text" onClick={copyApiInfo} />
-              </Tooltip>
-            </div>
-            <div className="aiApiEndpointScroll">
-              <div className="aiApiEndpointItem">
-                <code>会话</code>
-                <span>sessions · connect · disconnect</span>
-              </div>
-              <div className="aiApiEndpointItem">
-                <code>操作</code>
-                <span>exec · files</span>
-              </div>
-              <div className="aiApiEndpointItem">
-                <code>文件传输</code>
-                <span>upload · download (Range)</span>
-              </div>
-              <div className="aiApiEndpointItem">
-                <code>隧道</code>
-                <span>tunnels CRUD · start · stop</span>
-              </div>
-              <div className="aiApiEndpointItem">
-                <code>备份</code>
-                <span>settings · records · run</span>
-              </div>
-            </div>
-          </div>
-        )}
-        <div className="aiApiActions">
-          {aiApiInfo?.running ? (
-            <Button danger loading={aiApiLoading} onClick={() => void stopAiApi()}>停止服务</Button>
-          ) : (
-            <Button type="primary" loading={aiApiLoading} disabled={!aiApiSessionId} onClick={() => void startAiApi()}>启动服务</Button>
           )}
         </div>
       </div>

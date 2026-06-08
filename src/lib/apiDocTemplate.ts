@@ -4,14 +4,17 @@ export interface ApiDocParams {
   sessionId: string;
   sessionName?: string;
   sessionHost?: string;
+  sessions?: Array<{ id: string; name: string; host: string }>;
 }
 
 export function buildApiDoc(params: ApiDocParams): string {
-  const { port, apiKey, sessionId, sessionName, sessionHost } = params;
+  const { port, apiKey, sessionId, sessionName, sessionHost, sessions = [] } = params;
   const sid = sessionId || "<sessionId>";
-  const sessionLine = sessionName
-    ? `会话: ${sessionName}${sessionHost ? ` (${sessionHost})` : ""} | ID: ${sid} （下文 \`<sid>\` 替换为此 ID）`
-    : "模式: 全部会话（下文 `<sid>` 为占位，先用 GET /api/sessions 获取实际值）";
+  const sessionLine = sessions.length > 1
+    ? `会话: ${sessions.map((session) => `${session.name} (${session.host}) | ID: ${session.id}`).join("; ")} （下文 \`<sid>\` 替换为其中一个 ID）`
+    : sessionName
+      ? `会话: ${sessionName}${sessionHost ? ` (${sessionHost})` : ""} | ID: ${sid} （下文 \`<sid>\` 替换为此 ID）`
+      : "模式: 全部会话（下文 `<sid>` 为占位，先用 GET /api/sessions 获取实际值）";
 
   return `# HelM AI API
 

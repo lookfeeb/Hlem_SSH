@@ -32,13 +32,6 @@
   border-bottom: none;
 }
 
-.aiApiPanel .aiApiEndpoints {
-  padding: 0;
-  background: transparent;
-  border: none;
-  max-height: none;
-}
-
 .aiApiDescription {
   margin: 0;
   padding: 12px 14px;
@@ -53,7 +46,16 @@
 .aiApiStatusRow {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.aiApiStatusGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 }
 
 .aiApiStatusLabel {
@@ -122,149 +124,33 @@
   color: #334155;
 }
 
-.aiApiEndpoints {
-  padding: 14px 16px;
-  border-radius: 10px;
-  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
-  border: 1px solid #e2e8f0;
-  position: relative;
-  max-height: 200px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, .3) transparent;
+.aiApiSessionFormRow {
+  align-items: flex-start;
 }
 
-.aiApiEndpoints::-webkit-scrollbar {
-  width: 4px;
-}
-
-.aiApiEndpoints::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, .3);
-  border-radius: 2px;
-}
-
-.aiApiEndpoints::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, .5);
-}
-
-.aiApiEndpoints::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.aiApiEndpointTitle {
-  font-size: 12px;
-  font-weight: 600;
-  color: #475569;
-  text-transform: uppercase;
-  letter-spacing: .5px;
-  margin-bottom: 0;
-}
-
-.aiApiEndpointHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.aiApiPanel-endpoints {
-  gap: 0;
-}
-
-.aiApiPanel-endpoints .aiApiEndpointHeader {
-  padding: 12px 18px;
-  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.aiApiPanel-endpoints .aiApiEndpointScroll {
-  padding: 10px 18px;
-}
-
-.aiApiPanel-endpoints .aiApiEndpointNote {
-  padding: 8px 18px;
-  margin: 0;
-  border-top: 1px solid #f1f5f9;
-}
-
-.aiApiEndpointScroll {
+.aiApiSessionRows {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 140px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, .3) transparent;
-  padding-right: 4px;
 }
 
-.aiApiEndpointScroll::-webkit-scrollbar {
-  width: 4px;
-}
-
-.aiApiEndpointScroll::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, .3);
-  border-radius: 2px;
-}
-
-.aiApiEndpointItem {
-  font-size: 11.5px;
-  color: #475569;
-  line-height: 1.4;
+.aiApiSessionSelectRow {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 5px 10px;
-  border-radius: 6px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
   min-width: 0;
 }
 
-.aiApiEndpointItem > code {
-  flex-shrink: 0;
+.aiApiSessionAction {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
 }
 
-.aiApiEndpointItem > span {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.aiApiSessionActionSpacer {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
 }
-
-.aiApiEndpointItem code {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 11px;
-  padding: 2px 7px;
-  border-radius: 5px;
-  background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
-  color: #4338ca;
-  font-weight: 500;
-  border: 1px solid rgba(99, 102, 241, .15);
-  white-space: nowrap;
-}
-
-.aiApiEndpointNote {
-  margin: 6px 0 0;
-  padding-top: 6px;
-  border-top: 1px dashed #e2e8f0;
-  font-size: 11.5px;
-  color: #64748b;
-}
-
-.aiApiEndpointNote code {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 10.5px;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: #f1f5f9;
-  color: #475569;
-  border: 1px solid #e2e8f0;
-}
-
-.aiApiActions {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 4px;
-}
-

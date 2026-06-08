@@ -29,7 +29,7 @@ use crate::{
 
 pub use api_server_cmd::{
     api_server_logs, api_server_regenerate_key, api_server_start, api_server_status,
-    api_server_stop,
+    api_server_stop, api_server_update_sessions,
 };
 pub use backup::{
     backup_record_delete, backup_record_restore, backup_records_clear, backup_run_now,

@@ -11,8 +11,8 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
-use super::auth::verify_auth;
-use super::{push_log, ApiError, ApiServerState};
+use super::auth::{verify_auth, verify_session_access};
+use super::{allowed_session_ids_snapshot, push_log, ApiError, ApiServerState};
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -50,6 +50,13 @@ fn elapsed_ms(start: std::time::Instant) -> u64 {
     start.elapsed().as_millis() as u64
 }
 
+fn tunnel_allowed(allowed_session_ids: &[String], tunnel: &crate::config::TunnelConfig) -> bool {
+    allowed_session_ids.is_empty()
+        || allowed_session_ids
+            .iter()
+            .any(|session_id| session_id == &tunnel.session_id)
+}
+
 // ─── Tunnels ───────────────────────────────────────────────────────────────────
 
 /// `GET /api/tunnels` — 列出全部隧道配置。
@@ -59,10 +66,14 @@ pub async fn rest_tunnels_list(
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
     let start = std::time::Instant::now();
-    let tunnels = {
+    let mut tunnels = {
         let store = state.vault.lock().map_err(|_| lock_poisoned())?;
         store.tunnels().map_err(map_err_500)?
     };
+    let allowed_session_ids = allowed_session_ids_snapshot(&state);
+    if !allowed_session_ids.is_empty() {
+        tunnels.retain(|tunnel| tunnel_allowed(&allowed_session_ids, tunnel));
+    }
     let count = tunnels.len();
     push_log(
         &state,
@@ -82,6 +93,7 @@ pub async fn rest_tunnels_create(
     Json(input): Json<crate::config::TunnelInput>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
+    verify_session_access(&state, &input.session_id)?;
     let start = std::time::Instant::now();
     let snapshot = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
@@ -99,6 +111,7 @@ pub async fn rest_tunnels_update(
     Json(input): Json<crate::config::TunnelInput>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
+    verify_session_access(&state, &input.session_id)?;
     let start = std::time::Instant::now();
     let snapshot = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
@@ -125,6 +138,22 @@ pub async fn rest_tunnels_delete(
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
     let start = std::time::Instant::now();
+    {
+        let store = state.vault.lock().map_err(|_| lock_poisoned())?;
+        let tunnels = store.tunnels().map_err(map_err_500)?;
+        let tunnel = tunnels
+            .iter()
+            .find(|t| t.id == tunnel_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: format!("隧道 {} 不存在", tunnel_id),
+                    }),
+                )
+            })?;
+        verify_session_access(&state, &tunnel.session_id)?;
+    }
     let snapshot = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
         store.delete_tunnel(&tunnel_id).map_err(map_err_500)?
@@ -163,6 +192,7 @@ pub async fn rest_tunnels_start(
                 )
             })?
     };
+    verify_session_access(&state, &tunnel.session_id)?;
     let (bind_host, bind_port, forward_id) = state
         .remote
         .api_start_tunnel(&tunnel)
@@ -191,6 +221,21 @@ pub async fn rest_tunnels_stop(
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
     let start = std::time::Instant::now();
+    let forward = state
+        .remote
+        .forward_list()
+        .await
+        .into_iter()
+        .find(|forward| forward.forward_id == tunnel_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: format!("转发 {} 不存在或已停止", tunnel_id),
+                }),
+            )
+        })?;
+    verify_session_access(&state, &forward.session_id)?;
     state
         .remote
         .api_stop_tunnel(&tunnel_id)

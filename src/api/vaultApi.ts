@@ -258,13 +258,17 @@ function normalizeBrowserSnapshot(snapshot: ConfigSnapshot) {
 }
 
 function normalizeBrowserSettings(settings?: AppSettings | null): AppSettings {
+  const aiApiSessionIds = Array.from(
+    new Set([...(settings?.aiApiSessionIds ?? []), settings?.aiApiSessionId ?? ""].filter(Boolean)),
+  ).slice(0, 3);
   return {
     proxy: settings?.proxy ?? null,
     backup: normalizeBackupSettings(settings?.backup),
     quickCommands: settings?.quickCommands ?? [],
     ignoredUpdateVersions: settings?.ignoredUpdateVersions ?? [],
     aiApiKey: settings?.aiApiKey ?? null,
-    aiApiSessionId: settings?.aiApiSessionId ?? null,
+    aiApiSessionId: aiApiSessionIds[0] ?? null,
+    aiApiSessionIds,
     aiApiPort: settings?.aiApiPort ?? null,
     aiApiAutoStart: settings?.aiApiAutoStart ?? false,
   };

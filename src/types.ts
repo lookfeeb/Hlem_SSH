@@ -104,6 +104,7 @@ export interface AppSettings {
   ignoredUpdateVersions?: string[];
   aiApiKey?: string | null;
   aiApiSessionId?: string | null;
+  aiApiSessionIds?: string[];
   aiApiPort?: number | null;
   aiApiAutoStart?: boolean;
 }

@@ -117,7 +117,15 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: thin
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
           CARGO_PROFILE_RELEASE_STRIP: symbols
-        run: npm run tauri -- build --target ${{ matrix.rust_target }} --bundles nsis
+        run: |
+          $maxAttempts = 3
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            npm run tauri -- build --target ${{ matrix.rust_target }} --bundles nsis
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq $maxAttempts) { exit $LASTEXITCODE }
+            Write-Warning "Tauri bundle failed on attempt $attempt. Retrying in 20 seconds..."
+            Start-Sleep -Seconds 20
+          }
 
       - name: Collect exe installer
         shell: pwsh

@@ -4,7 +4,7 @@ mod handlers_admin;
 mod handlers_remote;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -46,8 +46,8 @@ pub struct ApiServerState {
     pub app: AppHandle,
     pub remote: RemoteRuntime,
     pub vault: Arc<Mutex<VaultStore>>,
-    pub allowed_session_id: Option<String>,
-    pub allowed_session_name: Option<String>,
+    pub allowed_session_ids: Arc<StdRwLock<Vec<String>>>,
+    pub allowed_session_names: Arc<StdRwLock<Vec<(String, String)>>>,
     pub logs: Arc<RwLock<Vec<ApiLogEntry>>>,
     #[allow(dead_code)]
     pub log_file: PathBuf,
@@ -79,8 +79,8 @@ pub struct ApiServerHandle {
     server_task: JoinHandle<()>,
     pub port: u16,
     pub api_key: String,
-    pub allowed_session_id: Option<String>,
-    pub allowed_session_name: Option<String>,
+    pub allowed_session_ids: Arc<StdRwLock<Vec<String>>>,
+    pub allowed_session_names: Arc<StdRwLock<Vec<(String, String)>>>,
     pub log_file: PathBuf,
     pub logs: Arc<RwLock<Vec<ApiLogEntry>>>,
 }
@@ -100,6 +100,36 @@ impl ApiServerHandle {
             server_task.abort();
             let _ = server_task.await;
         }
+    }
+
+    pub fn update_allowed_sessions(
+        &self,
+        allowed_session_ids: Vec<String>,
+        allowed_session_names: Vec<(String, String)>,
+    ) -> Result<(), String> {
+        *self
+            .allowed_session_ids
+            .write()
+            .map_err(|_| "更新 API 会话限制失败：内部锁错误".to_string())? = allowed_session_ids;
+        *self
+            .allowed_session_names
+            .write()
+            .map_err(|_| "更新 API 会话名称失败：内部锁错误".to_string())? = allowed_session_names;
+        Ok(())
+    }
+
+    pub fn allowed_session_ids_snapshot(&self) -> Vec<String> {
+        self.allowed_session_ids
+            .read()
+            .map(|items| items.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn allowed_session_names_snapshot(&self) -> Vec<(String, String)> {
+        self.allowed_session_names
+            .read()
+            .map(|items| items.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -157,7 +187,16 @@ fn load_logs_from_file(path: &PathBuf) -> Vec<ApiLogEntry> {
 
 pub(self) fn map_remote_error(e: String, state: &ApiServerState) -> (StatusCode, Json<ApiError>) {
     if e.contains("未连接") {
-        let display_name = state.allowed_session_name.as_deref().unwrap_or("目标会话");
+        let allowed_session_names = allowed_session_names_snapshot(state);
+        let display_name = if allowed_session_names.is_empty() {
+            "目标会话".to_string()
+        } else {
+            allowed_session_names
+                .iter()
+                .map(|(_, name)| name.as_str())
+                .collect::<Vec<_>>()
+                .join("、")
+        };
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ApiError {
@@ -176,11 +215,27 @@ pub(self) fn map_remote_error(e: String, state: &ApiServerState) -> (StatusCode,
 }
 
 pub(self) fn friendly_error_detail(detail: &str, state: &ApiServerState) -> String {
-    if let (Some(sid), Some(name)) = (&state.allowed_session_id, &state.allowed_session_name) {
-        detail.replace(sid.as_str(), name.as_str())
-    } else {
-        detail.to_string()
+    let mut output = detail.to_string();
+    for (sid, name) in allowed_session_names_snapshot(state) {
+        output = output.replace(sid.as_str(), name.as_str());
     }
+    output
+}
+
+pub(self) fn allowed_session_ids_snapshot(state: &ApiServerState) -> Vec<String> {
+    state
+        .allowed_session_ids
+        .read()
+        .map(|items| items.clone())
+        .unwrap_or_default()
+}
+
+pub(self) fn allowed_session_names_snapshot(state: &ApiServerState) -> Vec<(String, String)> {
+    state
+        .allowed_session_names
+        .read()
+        .map(|items| items.clone())
+        .unwrap_or_default()
 }
 
 pub(self) fn truncate_for_log(value: &str, max_chars: usize) -> String {
@@ -207,20 +262,22 @@ pub async fn start_server(
     vault: Arc<Mutex<VaultStore>>,
     port: u16,
     api_key: String,
-    allowed_session_id: Option<String>,
-    allowed_session_name: Option<String>,
+    allowed_session_ids: Vec<String>,
+    allowed_session_names: Vec<(String, String)>,
     log_file: PathBuf,
 ) -> Result<ApiServerHandle, String> {
     let existing_logs = load_logs_from_file(&log_file);
     let logs = Arc::new(RwLock::new(existing_logs));
     let log_dirty = Arc::new(Notify::new());
+    let allowed_session_ids = Arc::new(StdRwLock::new(allowed_session_ids));
+    let allowed_session_names = Arc::new(StdRwLock::new(allowed_session_names));
     let state = ApiServerState {
         api_key: Arc::new(RwLock::new(api_key.clone())),
         app: app.clone(),
         remote,
         vault,
-        allowed_session_id: allowed_session_id.clone(),
-        allowed_session_name: allowed_session_name.clone(),
+        allowed_session_ids: allowed_session_ids.clone(),
+        allowed_session_names: allowed_session_names.clone(),
         logs: logs.clone(),
         log_file: log_file.clone(),
         log_dirty: log_dirty.clone(),
@@ -364,8 +421,8 @@ pub async fn start_server(
         server_task,
         port: actual_port,
         api_key,
-        allowed_session_id,
-        allowed_session_name,
+        allowed_session_ids,
+        allowed_session_names,
         log_file,
         logs,
     })
