@@ -390,6 +390,10 @@ impl VaultStore {
 
     pub fn delete_group(&mut self, group_id: &str) -> AppResult<ConfigSnapshot> {
         self.mutate(|data| {
+            if data.is_default_group_id(group_id) {
+                return Err(AppError::InvalidInput("默认分组不允许删除".to_string()));
+            }
+            let default_group_id = data.default_group_id().map(str::to_string);
             let before_len = data.groups.len();
             data.groups.retain(|group| group.id != group_id);
             if before_len == data.groups.len() {
@@ -402,7 +406,7 @@ impl VaultStore {
             }
             for session in &mut data.sessions {
                 if session.group_id.as_deref() == Some(group_id) {
-                    session.group_id = None;
+                    session.group_id = default_group_id.clone();
                 }
             }
             Ok(())

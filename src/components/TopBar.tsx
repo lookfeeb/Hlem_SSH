@@ -4,22 +4,23 @@ import {
   DeleteOutlined,
   DisconnectOutlined,
   EditOutlined,
-  LeftOutlined,
   LoadingOutlined,
   PlusOutlined,
   ProfileOutlined,
-  RightOutlined,
   RobotOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import { Badge, Button, Modal, Space, Tabs, Tooltip } from "antd";
 import { useEffect, useMemo, useState } from "react";
-import type { ConnectionState, RemoteSession, TransferInfo } from "../types";
+import type { ConnectionState, RemoteSession, SessionGroup, TransferInfo } from "../types";
+import { SessionListModalInner } from "./SessionListModalInner";
 
-const SESSIONS_PER_PAGE = 5;
+const SESSION_LIST_MODAL_Z_INDEX = 1000;
+const DELETE_CONFIRM_MODAL_Z_INDEX = 1100;
 
 interface TopBarProps {
   sessions: RemoteSession[];
+  groups: SessionGroup[];
   tabSessions: RemoteSession[];
   activeSessionId: string;
   onActivate: (id: string) => void;
@@ -43,6 +44,7 @@ interface TopBarProps {
 
 export function TopBar({
   sessions,
+  groups,
   tabSessions,
   activeSessionId,
   onActivate,
@@ -63,27 +65,46 @@ export function TopBar({
   apiConfigured,
   onApiServerStart,
 }: TopBarProps) {
-  const [sessionListPage, setSessionListPage] = useState(1);
-  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null);
 
-  const sessionListPageCount = Math.max(1, Math.ceil(sessions.length / SESSIONS_PER_PAGE));
+  const [sessionListGroupId, setSessionListGroupId] = useState<string>("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null);
+  const activeSessionListGroupId = sessionListGroupId || "all";
+
+  const filteredSessions = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (q) {
+      return sessions.filter(
+        (session) =>
+          session.name.toLowerCase().includes(q) ||
+          session.host.toLowerCase().includes(q) ||
+          session.username.toLowerCase().includes(q),
+      );
+    }
+
+    if (activeSessionListGroupId !== "all") {
+      return sessions.filter((session) => session.groupId === activeSessionListGroupId);
+    }
+
+    return sessions;
+  }, [sessions, activeSessionListGroupId, searchQuery]);
+
   const activeTransferTotal = activeTransferCount(transfers);
 
-  useEffect(() => {
-    if (sessionListPage > sessionListPageCount) setSessionListPage(sessionListPageCount);
-  }, [sessionListPage, sessionListPageCount]);
+
 
   useEffect(() => {
-    if (!sessionListOpen) return;
-    const activeIndex = sessions.findIndex((session) => session.id === activeSessionId);
-    if (activeIndex >= 0) setSessionListPage(Math.floor(activeIndex / SESSIONS_PER_PAGE) + 1);
-    else setSessionListPage(1);
-  }, [sessionListOpen, sessions, activeSessionId]);
+    if (!groups.length) {
+      if (sessionListGroupId) setSessionListGroupId("");
+      return;
+    }
+    if (sessionListGroupId === "all") return;
+    if (!sessionListGroupId || !groups.some((group) => group.id === sessionListGroupId)) {
+      setSessionListGroupId("all");
+    }
+  }, [groups, sessionListGroupId]);
 
-  const pagedSessions = useMemo(() => {
-    const start = (sessionListPage - 1) * SESSIONS_PER_PAGE;
-    return sessions.slice(start, start + SESSIONS_PER_PAGE);
-  }, [sessions, sessionListPage]);
+
 
   function openCreateSession() {
     onAdd();
@@ -193,145 +214,35 @@ export function TopBar({
       </Space>
 
       <Modal
-        title={
-          <div className="sessionListModalTitleBar">
-            <div className="sessionListModalTitle">
-              <span>SSH 列表</span>
-              <small>{sessions.length} 个连接</small>
-            </div>
-            <Tooltip title="新建 SSH 连接">
-              <Button
-                type="primary"
-                icon={<PlusOutlined />}
-                aria-label="新建 SSH 连接"
-                className="sessionListModalAdd"
-                onClick={openCreateSession}
-              />
-            </Tooltip>
-          </div>
-        }
+        title={null}
         open={sessionListOpen}
         footer={null}
         centered
-        width={560}
+        width={780}
         className="sessionListModal"
+        zIndex={SESSION_LIST_MODAL_Z_INDEX}
         transitionName=""
         maskTransitionName=""
         destroyOnHidden
         onCancel={() => onSessionListOpenChange(false)}
       >
-        <div className="sessionListModalBody">
-          {pagedSessions.map((session) => {
-            const active = session.id === activeSessionId;
-            const state = sessionState(session, connectingSessionId);
-            const connected = state === "connected";
-            const connecting = connectingSessionId === session.id;
-
-            return (
-              <div
-                key={session.id}
-                className={`sessionListModalItem${active ? " sessionListModalItem-active" : ""}`}
-                role="button"
-                tabIndex={0}
-                onClick={() => openSessionFromList(session)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    openSessionFromList(session);
-                  }
-                }}
-              >
-                <span className={`stateDot stateDot-${state}`} />
-                <span className="sessionListModalText">
-                  <strong>{session.name}</strong>
-                  <span>
-                    {session.username}@{session.host}
-                  </span>
-                </span>
-                <span className="sessionListModalActions">
-                  <Tooltip title={connected ? "断开连接" : connecting ? "取消连接" : "连接"}>
-                    <Button
-                      aria-label={
-                        connected
-                          ? `断开 ${session.name}`
-                          : connecting
-                          ? `取消连接 ${session.name}`
-                          : `连接 ${session.name}`
-                      }
-                      icon={
-                        connected ? (
-                          <DisconnectOutlined />
-                        ) : connecting ? (
-                          <LoadingOutlined />
-                        ) : (
-                          <ApiOutlined />
-                        )
-                      }
-                      size="small"
-                      danger={connected || connecting}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (connected) {
-                          onDisconnect(session);
-                        } else if (connecting) {
-                          onCancelConnect(session.id);
-                        } else {
-                          openSessionFromList(session);
-                        }
-                      }}
-                    />
-                  </Tooltip>
-                  <Tooltip title="编辑">
-                    <Button
-                      aria-label={`编辑 ${session.name}`}
-                      icon={<EditOutlined />}
-                      size="small"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onEdit(session.id);
-                      }}
-                    />
-                  </Tooltip>
-                  <Tooltip title="删除">
-                    <Button
-                      aria-label={`删除 ${session.name}`}
-                      icon={<DeleteOutlined />}
-                      size="small"
-                      danger
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setDeleteConfirm({ id: session.id, name: session.name });
-                      }}
-                    />
-                  </Tooltip>
-                </span>
-              </div>
-            );
-          })}
-        </div>
-        {sessionListPageCount > 1 && (
-          <div className="sessionListModalPager">
-            <Button
-              aria-label="上一页"
-              size="small"
-              icon={<LeftOutlined />}
-              disabled={sessionListPage <= 1}
-              onClick={() => setSessionListPage((page) => Math.max(1, page - 1))}
-            />
-            <span className="sessionListModalPagerInfo">
-              <strong>{sessionListPage}</strong>
-              <em>/</em>
-              <span>{sessionListPageCount}</span>
-            </span>
-            <Button
-              aria-label="下一页"
-              size="small"
-              icon={<RightOutlined />}
-              disabled={sessionListPage >= sessionListPageCount}
-              onClick={() => setSessionListPage((page) => Math.min(sessionListPageCount, page + 1))}
-            />
-          </div>
-        )}
+        <SessionListModalInner
+          sessions={sessions}
+          groups={groups}
+          activeSessionId={activeSessionId}
+          connectingSessionId={connectingSessionId}
+          sessionListGroupId={sessionListGroupId}
+          setSessionListGroupId={setSessionListGroupId}
+          searchQuery={searchQuery}
+          setSearchQuery={setSearchQuery}
+          openCreateSession={openCreateSession}
+          openSessionFromList={openSessionFromList}
+          onDisconnect={onDisconnect}
+          onCancelConnect={onCancelConnect}
+          onEdit={onEdit}
+          onDeleteConfirm={setDeleteConfirm}
+          filteredSessions={filteredSessions}
+        />
       </Modal>
       <Modal
         open={!!deleteConfirm}
@@ -341,6 +252,7 @@ export function TopBar({
         centered
         width={360}
         className="deleteConfirmModal"
+        zIndex={DELETE_CONFIRM_MODAL_Z_INDEX}
         onCancel={() => setDeleteConfirm(null)}
       >
         <div className="deleteConfirmContent">

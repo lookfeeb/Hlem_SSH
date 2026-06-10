@@ -5,6 +5,8 @@ use crate::errors::{AppError, AppResult};
 
 use super::{ensure_vault_unlocked, with_store, AppState};
 
+const MAX_ALLOWED_API_SESSIONS: usize = 5;
+
 #[tauri::command]
 pub async fn api_server_start(
     app: AppHandle,
@@ -46,7 +48,8 @@ pub async fn api_server_start(
         store.settings_update(settings)?;
         Ok(new_key)
     })?;
-    let allowed_session_ids = normalize_allowed_session_ids(allowed_session_ids, allowed_session_id);
+    let allowed_session_ids =
+        normalize_allowed_session_ids(allowed_session_ids, allowed_session_id);
     let allowed_session_names = allowed_session_names_for_ids(&state, &allowed_session_ids)?;
     let log_file = state.data_dir.join("api_logs.json");
     let server_handle = api_server::start_server(
@@ -89,7 +92,8 @@ pub async fn api_server_update_sessions(
     allowed_session_ids: Option<Vec<String>>,
 ) -> AppResult<ApiServerInfo> {
     ensure_vault_unlocked(&state)?;
-    let allowed_session_ids = normalize_allowed_session_ids(allowed_session_ids, allowed_session_id);
+    let allowed_session_ids =
+        normalize_allowed_session_ids(allowed_session_ids, allowed_session_id);
     let allowed_session_names = allowed_session_names_for_ids(&state, &allowed_session_ids)?;
     let mut handle_guard = state.api_server.lock().await;
     if handle_guard
@@ -251,7 +255,7 @@ fn normalize_allowed_session_ids(
             continue;
         }
         ids.push(value);
-        if ids.len() >= 3 {
+        if ids.len() >= MAX_ALLOWED_API_SESSIONS {
             break;
         }
     }

@@ -9,6 +9,8 @@
 @import "./styles/modals/modal-backup.css";
 @import "./styles/modals/modal-ai.css";
 @import "./styles/modals/modal-logs.css";
+@import "./styles/modals/modal-session-list.css";
+
 
 @import "./styles/workspace.css";
 @import "./styles/terminal.css";

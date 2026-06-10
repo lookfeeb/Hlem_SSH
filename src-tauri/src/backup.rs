@@ -72,6 +72,21 @@ pub async fn build_backup_package(vault_bytes: Vec<u8>) -> AppResult<Vec<u8>> {
 }
 
 pub async fn run_configured_backup(plan: &BackupRunPlan) -> AppResult<Vec<BackupRecord>> {
+    run_backup(plan, None, false).await
+}
+
+pub async fn run_auto_backup(
+    plan: &BackupRunPlan,
+    target_kinds: &[String],
+) -> AppResult<Vec<BackupRecord>> {
+    run_backup(plan, Some(target_kinds), true).await
+}
+
+async fn run_backup(
+    plan: &BackupRunPlan,
+    target_kinds: Option<&[String]>,
+    automatic: bool,
+) -> AppResult<Vec<BackupRecord>> {
     let bytes = tokio::fs::read(&plan.vault_path)
         .await
         .map_err(|e| AppError::Io(e.to_string()))?;
@@ -79,17 +94,22 @@ pub async fn run_configured_backup(plan: &BackupRunPlan) -> AppResult<Vec<Backup
     let size = package.len() as u64;
     let mut outcomes = Vec::new();
 
-    if let Some(directory) = configured_local_backup_directory(&plan.settings) {
-        outcomes.push(write_local_backup(&directory, &plan.file_name, &package, size).await);
+    if (!automatic || plan.settings.auto_enabled) && target_selected(target_kinds, "local") {
+        if let Some(directory) = configured_local_backup_directory(&plan.settings) {
+            outcomes.push(write_local_backup(&directory, &plan.file_name, &package, size).await);
+        }
     }
-    if plan.settings.cloud.enabled {
+    if (!automatic || plan.settings.cloud.auto_enabled)
+        && target_selected(target_kinds, &plan.settings.cloud.kind)
+        && configured_cloud_backup(&plan.settings.cloud)
+    {
         outcomes.push(
             upload_cloud_backup(&plan.settings.cloud, &plan.file_name, package.clone()).await,
         );
     }
     if outcomes.is_empty() {
         return Err(AppError::InvalidInput(
-            "请先配置本地备份目录或启用云端备份".to_string(),
+            "请先配置本地备份目录或云端备份".to_string(),
         ));
     }
 
@@ -123,6 +143,26 @@ pub fn configured_local_backup_directory(settings: &BackupSettings) -> Option<Pa
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+pub fn configured_cloud_backup(cloud: &CloudBackupSettings) -> bool {
+    match cloud.kind.as_str() {
+        "webdav" => !cloud.webdav.endpoint.trim().is_empty(),
+        "s3" => {
+            !cloud.s3.endpoint.trim().is_empty()
+                && !cloud.s3.region.trim().is_empty()
+                && !cloud.s3.bucket.trim().is_empty()
+                && !cloud.s3.access_key_id.trim().is_empty()
+                && !cloud.s3.secret_access_key.trim().is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn target_selected(target_kinds: Option<&[String]>, target_kind: &str) -> bool {
+    target_kinds
+        .map(|kinds| kinds.iter().any(|kind| kind == target_kind))
+        .unwrap_or(true)
 }
 
 async fn write_local_backup(
@@ -251,7 +291,7 @@ pub async fn list_configured_backup_records(
 ) -> AppResult<Vec<BackupRecord>> {
     let local_directory = configured_local_backup_directory(settings);
     let cloud = settings.cloud.clone();
-    let cloud_enabled = cloud.enabled;
+    let cloud_configured = configured_cloud_backup(&cloud);
 
     let local_list = async move {
         match local_directory {
@@ -260,7 +300,7 @@ pub async fn list_configured_backup_records(
         }
     };
     let cloud_list = async move {
-        if !cloud_enabled {
+        if !cloud_configured {
             return Ok(Vec::new());
         }
         list_cloud_backup_records(&cloud).await
@@ -1004,6 +1044,35 @@ mod tests {
         assert_eq!(records[0].target_kind, "local");
         assert_eq!(records[0].status, "success");
         assert!(backup_dir.join("HelM-backup-test-BJT.zip").exists());
+    }
+
+    #[tokio::test]
+    async fn auto_backup_respects_local_switch() {
+        let dir = tempdir().unwrap();
+        let vault_path = dir.path().join("vault.rpvault");
+        let backup_dir = dir.path().join("backups");
+        tokio::fs::write(&vault_path, b"vault").await.unwrap();
+        let settings = BackupSettings {
+            local_directory: Some(backup_dir.to_string_lossy().to_string()),
+            auto_enabled: false,
+            ..BackupSettings::default()
+        };
+        let mut plan = BackupRunPlan {
+            settings,
+            vault_path,
+            file_name: "HelM-backup-test-BJT.zip".to_string(),
+        };
+        let targets = vec!["local".to_string()];
+
+        assert!(matches!(
+            run_auto_backup(&plan, &targets).await,
+            Err(AppError::InvalidInput(_))
+        ));
+
+        plan.settings.auto_enabled = true;
+        let records = run_auto_backup(&plan, &targets).await.unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].target_kind, "local");
     }
 
     #[tokio::test]

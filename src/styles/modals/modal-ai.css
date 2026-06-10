@@ -1,4 +1,5 @@
 /* ─── AI API Modal ──────────────────────────────────────────────────────── */
+
 .aiApiContent {
   display: flex;
   flex-direction: column;
@@ -10,21 +11,22 @@
   flex-direction: column;
   gap: 0;
   padding: 0;
-  border-radius: 12px;
-  background: #ffffff;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #fcfdfd 100%);
   border: 1px solid #e2e8f0;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, .04);
+  box-shadow: 0 10px 30px -10px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.02);
   overflow: hidden;
+  transition: all 0.3s ease;
 }
 
 .aiApiPanel .aiApiStatusRow {
-  padding: 14px 18px;
+  padding: 18px 24px;
   background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
   border-bottom: 1px solid #e2e8f0;
 }
 
 .aiApiPanel .aiApiFormRow {
-  padding: 10px 18px;
+  padding: 12px 24px;
   border-bottom: 1px solid #f1f5f9;
 }
 
@@ -67,47 +69,75 @@
 .aiApiStatusBadge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 12px;
-  border-radius: 20px;
+  gap: 8px;
+  padding: 4px 14px;
+  border-radius: 24px;
+  border: 1px solid transparent;
+  appearance: none;
   font-size: 12px;
   font-weight: 600;
+  font-family: inherit;
+  line-height: 1.4;
   letter-spacing: .3px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  transition: all .25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .aiApiStatusBadge::before {
   content: "";
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  animation: aiApiBlink 1.5s ease-in-out infinite;
+  animation: aiApiBlink 2s ease-in-out infinite;
 }
 
 @keyframes aiApiBlink {
-  0%, 100% { opacity: 1; }
-  50% { opacity: .4; }
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .3; transform: scale(0.85); }
 }
 
 .aiApiStatusBadge-running {
-  background: linear-gradient(135deg, rgba(16, 185, 129, .12) 0%, rgba(5, 150, 105, .08) 100%);
-  color: #047857;
-  border: 1px solid rgba(16, 185, 129, .25);
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(16, 185, 129, 0.05) 100%);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.08);
+}
+
+.aiApiStatusBadge-running:hover:not(:disabled) {
+  border-color: rgba(16, 185, 129, 0.45);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.15);
+  transform: translateY(-1px);
 }
 
 .aiApiStatusBadge-running::before {
   background: #10b981;
-  box-shadow: 0 0 6px rgba(16, 185, 129, .5);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
 }
 
 .aiApiStatusBadge-stopped {
-  background: rgba(100, 116, 139, .08);
+  background: linear-gradient(135deg, rgba(148, 163, 184, 0.1) 0%, rgba(148, 163, 184, 0.05) 100%);
   color: #64748b;
-  border: 1px solid rgba(100, 116, 139, .15);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  box-shadow: 0 2px 8px rgba(148, 163, 184, 0.04);
+}
+
+.aiApiStatusBadge-stopped:hover:not(:disabled) {
+  color: #4f46e5;
+  border-color: rgba(79, 70, 229, 0.4);
+  background: linear-gradient(135deg, rgba(79, 70, 229, 0.08) 0%, rgba(79, 70, 229, 0.04) 100%);
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.1);
+  transform: translateY(-1px);
 }
 
 .aiApiStatusBadge-stopped::before {
   background: #94a3b8;
   animation: none;
+}
+
+.aiApiStatusBadge:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .aiApiFormRow {
@@ -118,10 +148,37 @@
 
 .aiApiFormLabel {
   flex-shrink: 0;
-  width: 64px;
+  width: 76px;
   font-size: 13px;
-  font-weight: 500;
-  color: #334155;
+  font-weight: 600;
+  color: #475569;
+}
+
+.aiApiFormRow .ant-input,
+.aiApiFormRow .ant-input-number,
+.aiApiFormRow .ant-input-affix-wrapper,
+.aiApiFormRow .ant-select:not(.ant-select-customize-input) .ant-select-selector {
+  border-radius: 8px !important;
+  border-color: #e2e8f0 !important;
+  background-color: #f8fafc !important;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.aiApiFormRow .ant-input:hover,
+.aiApiFormRow .ant-input-number:hover,
+.aiApiFormRow .ant-input-affix-wrapper:hover,
+.aiApiFormRow .ant-select:not(.ant-select-customize-input) .ant-select-selector:hover {
+  border-color: #cbd5e1 !important;
+  background-color: #f1f5f9 !important;
+}
+
+.aiApiFormRow .ant-input:focus,
+.aiApiFormRow .ant-input-number-focused,
+.aiApiFormRow .ant-input-affix-wrapper-focused,
+.aiApiFormRow .ant-select-focused:not(.ant-select-customize-input) .ant-select-selector {
+  border-color: #6366f1 !important;
+  background-color: #ffffff !important;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12) !important;
 }
 
 .aiApiSessionFormRow {
@@ -133,24 +190,87 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .aiApiSessionSelectRow {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
 }
 
 .aiApiSessionAction {
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e2e8f0 !important;
+  background-color: #ffffff !important;
+  color: #64748b !important;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.aiApiSessionAction:hover:not(:disabled) {
+  border-color: #cbd5e1 !important;
+  color: #4f46e5 !important;
+  background-color: #f8fafc !important;
+  transform: translateY(-1px);
+}
+
+.aiApiSessionAction.ant-btn-text {
+  border: 1px solid transparent !important;
+  background-color: transparent !important;
+}
+
+.aiApiSessionAction.ant-btn-text:hover:not(:disabled) {
+  background-color: rgba(79, 70, 229, 0.08) !important;
 }
 
 .aiApiSessionActionSpacer {
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+}
+
+.aiApiKeyInput {
+  min-width: 0;
+  padding-inline-end: 6px;
+}
+
+.aiApiKeyInput .ant-input-suffix {
+  display: inline-flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  gap: 5px;
+  margin-inline-start: 6px;
+}
+
+.aiApiKeyInput .ant-input-suffix > * {
+  margin-inline-end: 0 !important;
+}
+
+.aiApiKeyInput .ant-input-password-icon,
+.aiApiKeyRefreshButton .anticon {
+  width: 16px;
+  height: 16px;
+  font-size: 16px;
+  line-height: 16px;
+}
+
+.aiApiKeyRefreshButton {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  color: #64748b;
+}
+
+.aiApiKeyRefreshButton:hover {
+  color: #2563eb;
+  background: rgba(37, 99, 235, .08);
 }

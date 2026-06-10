@@ -73,7 +73,18 @@ export function TunnelDrawer({
     { title: "类型", width: 80, render: (_, forward) => forwardTypeLabel(forward.forwardType) },
     { title: "监听", render: (_, forward) => `${forward.bindHost}:${forward.bindPort}` },
     { title: "目标", render: (_, forward) => forward.forwardType === "dynamic" ? "SOCKS5" : `${forward.targetHost}:${forward.targetPort}` },
-    { title: "状态", width: 90, render: (_, forward) => <Tag color={forward.status === "running" ? "green" : "default"}>{forward.status}</Tag> },
+    {
+      title: "状态",
+      width: 90,
+      render: (_, forward) => {
+        const isRunning = forward.status === "running";
+        return (
+          <span className={`tunnelStatusBadge ${isRunning ? "tunnelStatusBadge-running" : "tunnelStatusBadge-stopped"}`}>
+            {isRunning ? "运行中" : "已停止"}
+          </span>
+        );
+      },
+    },
     {
       title: "操作",
       width: 112,
@@ -197,7 +208,7 @@ function TunnelConfigModal({
       footer={null}
       onCancel={onCancel}
       destroyOnHidden
-      width={520}
+      width={460}
       closable
     >
       <div className="tunnelConfigHeader">

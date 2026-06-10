@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { defaultBackupSettings, vaultApi } from "../api/vaultApi";
-import { shouldRunAutoBackup } from "./appHelpers";
+import { autoBackupDueTargetKinds } from "./appHelpers";
 import { useMountedRef } from "../lib/reactLifecycle";
 import type { AppSettings, ConfigSnapshot } from "../types";
 
@@ -30,12 +30,13 @@ export function useBackupWorkflow({
     const snapshot = configSnapshot;
     if (!appReady || !snapshot) return;
     const backup = snapshot.data.settings?.backup ?? defaultBackupSettings();
-    if (!backup.autoEnabled || backup.frequency === "manual") return;
+    if (backup.frequency === "manual") return;
     const check = () => {
       const current = configSnapshotRef.current;
       if (!current || autoBackupRunningRef.current) return;
-      if (shouldRunAutoBackup(backup, current.data.backupRecords ?? [])) {
-        void runConfiguredBackup(false);
+      const dueTargetKinds = autoBackupDueTargetKinds(backup, current.data.backupRecords ?? []);
+      if (dueTargetKinds.length > 0) {
+        void runConfiguredBackup(false, dueTargetKinds);
       }
     };
     const startupTimer = window.setTimeout(check, 3000);
@@ -82,12 +83,14 @@ export function useBackupWorkflow({
     applyConfigSnapshot(snapshot);
   }
 
-  async function runConfiguredBackup(showBusy = true) {
+  async function runConfiguredBackup(showBusy = true, autoTargetKinds?: string[]) {
     if (autoBackupRunningRef.current) return;
     autoBackupRunningRef.current = true;
     if (showBusy) setBackupBusy(true);
     try {
-      const snapshot = await vaultApi.backupRunNow();
+      const snapshot = autoTargetKinds?.length
+        ? await vaultApi.backupRunAuto(autoTargetKinds)
+        : await vaultApi.backupRunNow();
       if (!mountedRef.current) return;
       applyConfigSnapshot(snapshot);
     } finally {

@@ -35,7 +35,10 @@ pub(super) fn verify_session_access(
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let allowed_session_ids = allowed_session_ids_snapshot(state);
     if !allowed_session_ids.is_empty() {
-        if !allowed_session_ids.iter().any(|allowed| allowed == session_id) {
+        if !allowed_session_ids
+            .iter()
+            .any(|allowed| allowed == session_id)
+        {
             return Err((
                 StatusCode::FORBIDDEN,
                 Json(ApiError {

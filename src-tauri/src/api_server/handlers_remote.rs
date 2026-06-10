@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use super::auth::{verify_auth, verify_session_access};
+use super::field_catalog;
 use super::guard::check_dangerous_command;
 use super::{
     allowed_session_ids_snapshot, friendly_error_detail, map_remote_error, push_log,
@@ -130,6 +131,7 @@ pub async fn auth_check(
         "authenticated": true,
         "auth": "Authorization: Bearer <api_key>",
         "rest": {
+            "GET /api/fields": "field catalog",
             "GET /api/sessions": "list connected sessions",
             "POST /api/connect": "{sessionId} → ConnectionInfo",
             "POST /api/disconnect": "{sessionId} → {success}",
@@ -150,6 +152,19 @@ pub async fn auth_check(
             "DELETE /api/backup/records/{id}?deleteFile=true": "delete record, return list"
         }
     })))
+}
+
+/// `GET /api/fields` — 返回同一份字段库 JSON，供 AI 或外部工具动态读取。
+pub async fn rest_fields(
+    headers: HeaderMap,
+    AxumState(state): AxumState<ApiServerState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    require_auth(&state, &headers).await?;
+    let start = std::time::Instant::now();
+    let catalog = field_catalog::catalog_json()
+        .map_err(|e| internal_error(format!("字段库解析失败: {}", e)))?;
+    push_log(&state, "rest/fields", "字段库", true, elapsed_ms(start)).await;
+    Ok(Json(catalog))
 }
 
 // ─── REST: 会话生命周期 / 命令执行 / 文件列出 ───────────────────────────────────

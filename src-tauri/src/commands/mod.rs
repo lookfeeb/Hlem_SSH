@@ -32,7 +32,8 @@ pub use api_server_cmd::{
     api_server_stop, api_server_update_sessions,
 };
 pub use backup::{
-    backup_record_delete, backup_record_restore, backup_records_clear, backup_run_now,
+    backup_record_delete, backup_record_restore, backup_records_clear, backup_run_auto,
+    backup_run_now,
 };
 pub use desktop::{
     download_update, fetch_text_url, install_update, local_expand_paths, open_database_dir,

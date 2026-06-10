@@ -248,6 +248,12 @@
   gap: 2px;
 }
 
+.editorHeaderMeta {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
 .detachedEditorHeader strong,
 .detachedEditorHeader span {
   overflow: hidden;
@@ -258,6 +264,14 @@
 .detachedEditorHeader span {
   color: var(--text-secondary);
   font-size: 12px;
+}
+
+.editorHeaderPath {
+  min-width: 0;
+}
+
+.editorHeaderWarning {
+  color: #ff4d4f;
 }
 
 .detachedEditorLoading {
@@ -360,7 +374,6 @@
 
 .editorHeaderSession {
   display: inline-block;
-  margin-right: 8px;
   padding: 1px 8px;
   font-size: 12px;
   border: 1px solid;

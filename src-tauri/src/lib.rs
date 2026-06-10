@@ -12,7 +12,7 @@ mod vault;
 use commands::{
     api_server_logs, api_server_regenerate_key, api_server_start, api_server_status,
     api_server_stop, api_server_update_sessions, app_info, backup_record_delete,
-    backup_record_restore, backup_records_clear, backup_run_now, config_snapshot,
+    backup_record_restore, backup_records_clear, backup_run_auto, backup_run_now, config_snapshot,
     download_update, fetch_text_url, forward_list, forward_start_dynamic, forward_start_local,
     forward_start_remote, forward_stop, group_create, group_delete, group_update, install_update,
     local_expand_paths, open_database_dir, open_external_url, open_log_dir, open_path_dir,
@@ -104,6 +104,7 @@ pub fn run() {
             vault_backup_export,
             vault_backup_import,
             backup_run_now,
+            backup_run_auto,
             backup_record_restore,
             backup_record_delete,
             backup_records_clear,

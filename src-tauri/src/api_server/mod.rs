@@ -1,4 +1,5 @@
 mod auth;
+mod field_catalog;
 mod guard;
 mod handlers_admin;
 mod handlers_remote;
@@ -316,6 +317,7 @@ pub async fn start_server(
     let app_router = Router::new()
         // 鉴权探活
         .route("/api/auth", get(handlers_remote::auth_check))
+        .route("/api/fields", get(handlers_remote::rest_fields))
         // ─── REST：会话生命周期 + 命令执行 + 文件列表 ──────────────────────────
         .route("/api/sessions", get(handlers_remote::rest_sessions))
         .route("/api/connect", post(handlers_remote::rest_connect))

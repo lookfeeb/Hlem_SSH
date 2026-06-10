@@ -141,17 +141,14 @@ pub async fn rest_tunnels_delete(
     {
         let store = state.vault.lock().map_err(|_| lock_poisoned())?;
         let tunnels = store.tunnels().map_err(map_err_500)?;
-        let tunnel = tunnels
-            .iter()
-            .find(|t| t.id == tunnel_id)
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ApiError {
-                        error: format!("隧道 {} 不存在", tunnel_id),
-                    }),
-                )
-            })?;
+        let tunnel = tunnels.iter().find(|t| t.id == tunnel_id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: format!("隧道 {} 不存在", tunnel_id),
+                }),
+            )
+        })?;
         verify_session_access(&state, &tunnel.session_id)?;
     }
     let snapshot = {

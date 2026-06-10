@@ -1,26 +1,43 @@
 /* ─── 隧道配置 Modal（新建/编辑隧道）─────────────────────────────────────── */
-.tunnelConfigModal .ant-modal-body {
-  padding-top: 4px;
+.ant-modal-wrap:has(.tunnelConfigModal) {
+  overflow: hidden !important;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.ant-modal-wrap:has(.tunnelConfigModal)::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .tunnelConfigModal .ant-form-item {
-  margin-bottom: 14px;
+  margin-bottom: 16px;
+}
+
+.tunnelConfigModal .ant-form-item-label {
+  padding-bottom: 6px !important;
 }
 
 .tunnelConfigModal .ant-form-item-label > label {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-secondary);
-  letter-spacing: .2px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #475569;
+  letter-spacing: 0.2px;
 }
 
 .tunnelConfigModal .ant-input,
 .tunnelConfigModal .ant-input-number,
 .tunnelConfigModal .ant-select-selector {
-  border-radius: var(--radius) !important;
-  border: 1px solid rgba(221, 230, 241, .9) !important;
-  background: rgba(255, 255, 255, .85) !important;
-  transition: all .2s cubic-bezier(.4, 0, .2, 1) !important;
+  border-radius: 9px !important;
+  border: 1px solid rgba(226, 232, 240, 0.8) !important;
+  background: #f8fafc !important;
+  height: 38px !important;
+  line-height: 36px !important;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.tunnelConfigModal .ant-select-selector {
+  display: flex !important;
+  align-items: center !important;
 }
 
 /* 避免带 affix wrapper（allowClear/prefix/suffix）时出现双框 */
@@ -28,20 +45,21 @@
   border: 0 !important;
   background: transparent !important;
   box-shadow: none !important;
+  height: 100% !important;
 }
 
 .tunnelConfigModal .ant-input:hover,
 .tunnelConfigModal .ant-input-number:not(.ant-input-number-disabled):hover,
 .tunnelConfigModal .ant-select:not(.ant-select-disabled):hover .ant-select-selector {
-  border-color: rgba(99, 102, 241, .4) !important;
+  border-color: rgba(99, 102, 241, 0.35) !important;
   background: #ffffff !important;
 }
 
 .tunnelConfigModal .ant-input:focus,
 .tunnelConfigModal .ant-input-number-focused,
 .tunnelConfigModal .ant-select-focused .ant-select-selector {
-  border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, .15) !important;
+  border-color: #6366f1 !important;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12) !important;
   background: #ffffff !important;
 }
 
@@ -93,7 +111,14 @@
 /* ─── 新建/编辑隧道：现代布局 ─────────────────────────────────────────── */
 .tunnelConfigModal .ant-modal-content {
   padding: 0;
-  border-radius: 16px;
+  border-radius: 20px !important;
+  background: rgba(255, 255, 255, 0.95) !important;
+  backdrop-filter: blur(24px) saturate(140%) !important;
+  border: 1px solid rgba(226, 232, 240, 0.8) !important;
+  box-shadow:
+    0 32px 64px -16px rgba(15, 23, 42, 0.2),
+    0 12px 24px -10px rgba(99, 102, 241, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9) !important;
   overflow: hidden;
 }
 
@@ -114,56 +139,67 @@
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 20px 24px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(59, 130, 246, 0.05) 100%);
-  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+  padding: 22px 24px 18px;
+  background: #ffffff;
+  border-bottom: 1px solid rgba(241, 245, 249, 0.8);
 }
-
 .tunnelConfigHeaderIcon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #6366f1 0%, #3b82f6 100%);
-  color: #fff;
-  font-size: 18px;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+  display: flex; align-items: center; justify-content: center;
+  width: 40px; height: 40px; border-radius: 50%;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1.5px solid rgba(99, 102, 241, 0.2);
+  color: #6366f1; font-size: 18px;
+  box-shadow: 0 0 16px rgba(99, 102, 241, 0.08), inset 0 1px 2px rgba(255, 255, 255, 0.8);
   flex: 0 0 auto;
 }
-
 .tunnelConfigHeaderMeta {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
+  display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0;
 }
-
 .tunnelConfigLabel {
-  font-size: 12px;
-  color: var(--text-secondary);
-  letter-spacing: 0.5px;
+  font-size: 10px; font-weight: 800; color: #6366f1;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1px solid rgba(99, 102, 241, 0.12);
+  padding: 1px 6px; border-radius: 999px;
+  align-self: flex-start; text-transform: uppercase; letter-spacing: 0.5px;
 }
-
 .tunnelConfigTitle {
-  font-size: 16px;
-  color: var(--text-primary);
-  font-weight: 700;
+  font-size: 17px; color: #0f172a; font-weight: 800;
+  letter-spacing: -0.3px; margin-top: 2px;
 }
 
 .tunnelConfigForm {
-  padding: 18px 24px 0;
+  padding: 20px 24px 4px;
+  max-height: min(480px, calc(100vh - 200px));
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.tunnelConfigForm::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .tunnelConfigSection {
   position: relative;
-  padding: 14px 14px 4px;
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 12px;
+  padding: 20px 20px 8px;
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.6);
+  margin-bottom: 20px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tunnelConfigSection:hover {
+  border-color: rgba(99, 102, 241, 0.25);
+  box-shadow: 0 8px 24px -10px rgba(99, 102, 241, 0.12);
   background: #ffffff;
-  margin-bottom: 14px;
+}
+
+.tunnelConfigSection:focus-within {
+  border-color: rgba(99, 102, 241, 0.45);
+  box-shadow: 0 8px 28px -8px rgba(99, 102, 241, 0.15);
+  background: #ffffff;
 }
 
 .tunnelConfigSection + .tunnelConfigSection {
@@ -174,11 +210,13 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 14px;
+  padding: 14px 16px;
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.06) 0%, rgba(59, 130, 246, 0.04) 100%);
-  border-color: rgba(99, 102, 241, 0.2);
-  color: var(--text-secondary);
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  color: #475569;
   font-size: 12.5px;
+  margin-bottom: 20px;
 }
 
 .tunnelConfigSection--hint .anticon {
@@ -191,16 +229,16 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 700;
+  margin-bottom: 16px;
+  color: #1e293b;
+  font-size: 13px;
+  font-weight: 800;
   letter-spacing: 0.3px;
 }
 
 .tunnelConfigSectionTitle .anticon {
   color: #6366f1;
-  font-size: 14px;
+  font-size: 15px;
 }
 
 .tunnelConfigSectionHint {
@@ -208,13 +246,14 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
+  padding: 3px 10px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   color: #6366f1;
-  background: rgba(99, 102, 241, 0.1);
+  background: rgba(99, 102, 241, 0.08);
   border-radius: 999px;
   letter-spacing: 0.2px;
+  border: 1px solid rgba(99, 102, 241, 0.12);
 }
 
 .tunnelConfigSectionHint .anticon {
@@ -236,28 +275,44 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 10px;
-  padding: 14px 24px 20px;
+  gap: 12px;
+  padding: 16px 24px 20px;
   border-top: 1px solid rgba(226, 232, 240, 0.8);
-  background: #fafbfc;
+  background: rgba(248, 250, 252, 0.8);
 }
 
 .tunnelConfigFooter .ant-btn {
-  height: 36px;
-  padding: 0 18px;
-  border-radius: 10px;
+  height: 38px;
+  padding: 0 20px;
+  border-radius: 9px !important;
+  font-size: 13.5px;
   font-weight: 600;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.tunnelConfigFooter .ant-btn-default {
+  border: 1px solid rgba(226, 232, 240, 0.8) !important;
+  color: #475569 !important;
+  background: #ffffff !important;
+}
+
+.tunnelConfigFooter .ant-btn-default:hover {
+  border-color: #6366f1 !important;
+  color: #6366f1 !important;
+  background: rgba(99, 102, 241, 0.05) !important;
+  transform: translateY(-1px);
 }
 
 .tunnelConfigFooter .ant-btn-primary {
-  background: linear-gradient(135deg, #6366f1 0%, #3b82f6 100%);
-  border: 0;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+  background: linear-gradient(135deg, #6366f1 0%, #3b82f6 100%) !important;
+  border: 0 !important;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25) !important;
+  color: #ffffff !important;
 }
 
 .tunnelConfigFooter .ant-btn-primary:hover {
   transform: translateY(-1px);
-  box-shadow: 0 6px 16px rgba(99, 102, 241, 0.4);
-  filter: brightness(1.04);
+  box-shadow: 0 8px 20px -4px rgba(99, 102, 241, 0.45) !important;
+  filter: brightness(1.05);
 }
 

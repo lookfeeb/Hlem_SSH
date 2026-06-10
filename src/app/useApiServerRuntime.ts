@@ -16,7 +16,7 @@ export function useApiServerRuntime(configSnapshotRef: MutableRefObject<ConfigSn
 
       const settings = configSnapshotRef.current?.data.settings;
       const sessionIds = settings
-        ? [...(settings.aiApiSessionIds ?? []), settings.aiApiSessionId ?? ""].filter(Boolean).slice(0, 3)
+        ? [...(settings.aiApiSessionIds ?? []), settings.aiApiSessionId ?? ""].filter(Boolean).slice(0, 5)
         : [];
       if (!settings?.aiApiAutoStart || sessionIds.length === 0 || !settings.aiApiPort) return;
 

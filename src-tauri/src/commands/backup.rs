@@ -2,7 +2,7 @@ use tauri::{AppHandle, State};
 
 use super::{with_store, AppResult, AppState};
 use crate::backup::{
-    download_cloud_backup, merge_configured_backup_records, prepare_backup_run,
+    download_cloud_backup, merge_configured_backup_records, prepare_backup_run, run_auto_backup,
     run_configured_backup,
 };
 use crate::config::ConfigSnapshot;
@@ -12,6 +12,22 @@ use crate::errors::AppError;
 pub async fn backup_run_now(state: State<'_, AppState>) -> AppResult<ConfigSnapshot> {
     let plan = with_store(&state, |store| prepare_backup_run(store))?;
     let outcomes = run_configured_backup(&plan).await?;
+    let records = merge_configured_backup_records(&plan.settings, outcomes).await;
+    let (snapshot, delete_paths) =
+        with_store(&state, |store| store.replace_backup_records(records))?;
+    for path in delete_paths {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn backup_run_auto(
+    state: State<'_, AppState>,
+    target_kinds: Vec<String>,
+) -> AppResult<ConfigSnapshot> {
+    let plan = with_store(&state, |store| prepare_backup_run(store))?;
+    let outcomes = run_auto_backup(&plan, &target_kinds).await?;
     let records = merge_configured_backup_records(&plan.settings, outcomes).await;
     let (snapshot, delete_paths) =
         with_store(&state, |store| store.replace_backup_records(records))?;

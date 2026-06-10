@@ -5,6 +5,10 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 
 pub const VAULT_DATA_VERSION: u16 = 1;
+pub const DEFAULT_GROUP_NAME: &str = "默认分组";
+const GROUP_NAME_MAX_HAN_CHARS: usize = 8;
+const GROUP_NAME_MAX_CHARS: usize = 10;
+const GROUP_CUSTOM_MAX_COUNT: usize = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -175,6 +179,8 @@ pub struct BackupSettings {
 pub struct CloudBackupSettings {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub auto_enabled: bool,
     #[serde(default = "default_cloud_backup_kind")]
     pub kind: String,
     #[serde(default)]
@@ -201,7 +207,7 @@ pub struct WebdavBackupConfig {
 pub struct S3BackupConfig {
     #[serde(default)]
     pub endpoint: String,
-    #[serde(default)]
+    #[serde(default = "default_s3_region")]
     pub region: String,
     #[serde(default)]
     pub bucket: String,
@@ -311,7 +317,7 @@ impl VaultData {
         let mut data = Self::empty();
         let group = SessionGroup::new(
             GroupInput {
-                name: "默认分组".to_string(),
+                name: DEFAULT_GROUP_NAME.to_string(),
                 parent_id: None,
             },
             0,
@@ -323,6 +329,18 @@ impl VaultData {
 
     pub fn touch(&mut self) {
         self.updated_at = now();
+    }
+
+    pub fn default_group_id(&self) -> Option<&str> {
+        self.groups
+            .iter()
+            .find(|group| group.sort_order == 0)
+            .or_else(|| self.groups.first())
+            .map(|group| group.id.as_str())
+    }
+
+    pub fn is_default_group_id(&self, group_id: &str) -> bool {
+        self.default_group_id() == Some(group_id)
     }
 }
 
@@ -484,6 +502,7 @@ impl Default for CloudBackupSettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            auto_enabled: false,
             kind: default_cloud_backup_kind(),
             webdav: WebdavBackupConfig::default(),
             s3: S3BackupConfig::default(),
@@ -495,7 +514,7 @@ impl Default for S3BackupConfig {
     fn default() -> Self {
         Self {
             endpoint: String::new(),
-            region: String::new(),
+            region: default_s3_region(),
             bucket: String::new(),
             access_key_id: String::new(),
             secret_access_key: String::new(),
@@ -562,8 +581,21 @@ pub fn validate_group_input(
     group_id: Option<&str>,
     input: &GroupInput,
 ) -> AppResult<()> {
+    if let Some(group_id) = group_id {
+        if data.is_default_group_id(group_id) {
+            return Err(AppError::InvalidInput("默认分组不允许重命名".to_string()));
+        }
+    }
+
     if input.name.trim().is_empty() {
         return Err(AppError::InvalidInput("分组名称不能为空".to_string()));
+    }
+    validate_group_name_length(input.name.trim())?;
+    if group_id.is_none() && custom_group_count(data) >= GROUP_CUSTOM_MAX_COUNT {
+        return Err(AppError::InvalidInput(format!(
+            "自定义分组最多 {} 个",
+            GROUP_CUSTOM_MAX_COUNT
+        )));
     }
 
     if let Some(parent_id) = input.parent_id.as_deref() {
@@ -576,6 +608,39 @@ pub fn validate_group_input(
     }
 
     Ok(())
+}
+
+fn validate_group_name_length(name: &str) -> AppResult<()> {
+    let char_count = name.chars().count();
+    let han_count = name.chars().filter(|char| is_han_char(*char)).count();
+    if han_count > GROUP_NAME_MAX_HAN_CHARS || char_count > GROUP_NAME_MAX_CHARS {
+        return Err(AppError::InvalidInput(format!(
+            "分组名称不能超过 {} 个汉字或 {} 个字符",
+            GROUP_NAME_MAX_HAN_CHARS, GROUP_NAME_MAX_CHARS
+        )));
+    }
+    Ok(())
+}
+
+fn custom_group_count(data: &VaultData) -> usize {
+    let default_group_id = data.default_group_id();
+    data.groups
+        .iter()
+        .filter(|group| Some(group.id.as_str()) != default_group_id)
+        .count()
+}
+
+fn is_han_char(char: char) -> bool {
+    let code_point = char as u32;
+    matches!(
+        code_point,
+        0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xf900..=0xfaff
+            | 0x20000..=0x2a6df
+            | 0x2a700..=0x2ebef
+            | 0x30000..=0x3134f
+    )
 }
 
 pub fn validate_session_input(
@@ -650,22 +715,12 @@ pub fn validate_backup_settings(settings: &BackupSettings) -> AppResult<()> {
     if settings.retention_count == 0 {
         return Err(AppError::InvalidInput("保留份数必须大于 0".to_string()));
     }
-    let has_local_directory = settings
-        .local_directory
-        .as_deref()
-        .map(|directory| !directory.trim().is_empty())
-        .unwrap_or(false);
     if let Some(directory) = settings.local_directory.as_deref() {
         if directory.trim().is_empty() {
             return Err(AppError::InvalidInput("本地备份目录不能为空".to_string()));
         }
     }
-    if has_local_directory && settings.cloud.enabled {
-        return Err(AppError::InvalidInput(
-            "本地备份和云端备份只能选择一种".to_string(),
-        ));
-    }
-    if !settings.cloud.enabled {
+    if !settings.cloud.enabled && !settings.cloud.auto_enabled {
         return Ok(());
     }
     match settings.cloud.kind.as_str() {
@@ -772,7 +827,11 @@ fn default_cloud_backup_kind() -> String {
 }
 
 fn default_s3_path_style() -> bool {
-    true
+    false
+}
+
+fn default_s3_region() -> String {
+    "us-east-1".to_string()
 }
 
 fn clean_tags(tags: Vec<String>) -> Vec<String> {
@@ -817,6 +876,38 @@ mod tests {
             terminal: TerminalOptions::default(),
             sftp: SftpOptions::default(),
         }
+    }
+
+    fn group_input(name: &str) -> GroupInput {
+        GroupInput {
+            name: name.to_string(),
+            parent_id: None,
+        }
+    }
+
+    #[test]
+    fn validates_group_name_length_limits() {
+        let data = VaultData::with_default_group();
+
+        assert!(validate_group_input(&data, None, &group_input("一二三四五六七八")).is_ok());
+        assert!(validate_group_input(&data, None, &group_input("abcdefghij")).is_ok());
+        assert!(validate_group_input(&data, None, &group_input("一二三四五六七八九")).is_err());
+        assert!(validate_group_input(&data, None, &group_input("abcdefghijk")).is_err());
+    }
+
+    #[test]
+    fn validates_custom_group_count_limit() {
+        let mut data = VaultData::with_default_group();
+        for index in 0..GROUP_CUSTOM_MAX_COUNT {
+            data.groups.push(SessionGroup::new(
+                group_input(&format!("g{}", index)),
+                (index + 1) as u32,
+            ));
+        }
+        let group_id = data.groups[1].id.clone();
+
+        assert!(validate_group_input(&data, None, &group_input("extra")).is_err());
+        assert!(validate_group_input(&data, Some(&group_id), &group_input("rename")).is_ok());
     }
 
     #[test]

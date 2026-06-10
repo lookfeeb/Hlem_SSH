@@ -3,6 +3,7 @@ import { App as AntdApp, Button, Form, Input, InputNumber, Modal, Popconfirm, Se
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useMemo } from "react";
 import type { AppSettings, BackupRecord, BackupSettings } from "../types";
+import { defaultBackupSettings } from "../api/vaultApi";
 import { getErrorMessage } from "../lib/configMapping";
 import { formatBeijingCompactTimestamp, formatBeijingDateTime, formatBytes } from "../lib/format";
 
@@ -22,6 +23,11 @@ interface BackupModalProps {
 
 type BackupTarget = "local" | "cloud";
 type BackupFormValues = BackupSettings & { targetKind: BackupTarget };
+type PartialCloudBackupSettings = Partial<BackupSettings["cloud"]> & {
+  webdav?: Partial<BackupSettings["cloud"]["webdav"]>;
+  s3?: Partial<BackupSettings["cloud"]["s3"]>;
+};
+type PartialBackupSettings = Partial<BackupSettings> & { cloud?: PartialCloudBackupSettings };
 
 export function BackupModal({
   open,
@@ -40,13 +46,15 @@ export function BackupModal({
   const [form] = Form.useForm<BackupFormValues>();
   const backupTarget = Form.useWatch("targetKind", form) ?? "local";
   const cloudKind = Form.useWatch(["cloud", "kind"], form);
+  const activeCloudKind = cloudKind === "s3" ? "s3" : "webdav";
   const isCloudTarget = backupTarget === "cloud";
 
   useEffect(() => {
     if (!open) return;
+    const backup = normalizeBackupSettingsForForm(settings.backup);
     form.setFieldsValue({
-      ...settings.backup,
-      targetKind: settings.backup.cloud.enabled ? "cloud" : "local",
+      ...backup,
+      targetKind: backup.localDirectory ? "local" : isCloudBackupConfigured(backup.cloud) ? "cloud" : "local",
     });
   }, [form, open, settings.backup]);
 
@@ -103,11 +111,17 @@ export function BackupModal({
     }
   }
 
+  function setCloudKind(kind: "webdav" | "s3") {
+    form.setFieldValue(["cloud", "kind"], kind);
+  }
+
   async function saveBackupSettings() {
     try {
-      const values = await form.validateFields();
-      const { targetKind, ...backupValues } = values;
-      const localDirectory = targetKind === "local" ? backupValues.localDirectory?.trim() || null : null;
+      const backupValues = normalizeBackupSettingsForForm(await form.validateFields());
+      const localDirectory = backupValues.localDirectory?.trim() || null;
+      const cloud = normalizeCloudBackupKindForSave(backupValues.cloud);
+      ensureCloudBackupReady(cloud, isCloudTarget);
+      form.setFieldValue(["cloud", "kind"], cloud.kind);
       await onSettingsSave({
         ...settings,
         backup: {
@@ -116,8 +130,8 @@ export function BackupModal({
           retentionCount: backupValues.retentionCount || 10,
           retentionDays: backupValues.retentionDays || 30,
           cloud: {
-            ...backupValues.cloud,
-            enabled: targetKind === "cloud",
+            ...cloud,
+            enabled: isCloudBackupConfigured(cloud),
           },
         },
       });
@@ -152,14 +166,20 @@ export function BackupModal({
 
   const columns: ColumnsType<BackupRecord> = [
     { title: "时间", width: 150, render: (_, record) => formatBeijingDateTime(record.createdAt) },
-    { title: "位置", width: 92, render: (_, record) => <Tag>{targetLabel(record.targetKind)}</Tag> },
     { title: "文件", dataIndex: "fileName", ellipsis: true },
     { title: "路径", dataIndex: "targetPath", ellipsis: true },
     { title: "大小", width: 90, render: (_, record) => formatBytes(record.size, { zeroText: "-" }) },
     {
       title: "状态",
       width: 92,
-      render: (_, record) => <Tag color={record.status === "success" ? "green" : "red"}>{record.status === "success" ? "成功" : "失败"}</Tag>,
+      render: (_, record) => {
+        const isSuccess = record.status === "success";
+        return (
+          <span className={`tunnelStatusBadge ${isSuccess ? "tunnelStatusBadge-running" : "tunnelStatusBadge-stopped"}`}>
+            {isSuccess ? "成功" : "失败"}
+          </span>
+        );
+      },
     },
     {
       title: "",
@@ -202,7 +222,7 @@ export function BackupModal({
             <Tooltip
               mouseEnterDelay={0.4}
               placement="top"
-              classNames={{ root: "backupRecordRowTooltip" }}
+              overlayClassName="backupRecordRowTooltip"
               getPopupContainer={(trigger) => trigger.closest(".ant-modal-body") || document.body}
               title={
                 <div className="backupRecordRowTooltipContent">
@@ -226,7 +246,7 @@ export function BackupModal({
   return (
     <Modal
       open={open}
-      title="数据备份与恢复"
+      title="数据备份"
       className="backupModal"
       footer={null}
       onCancel={onClose}
@@ -255,33 +275,31 @@ export function BackupModal({
           <section className="backupPanel">
             <div className="backupSectionHeader">
               <span>备份设置</span>
-              <Button type="primary" size="small" onClick={() => void saveBackupSettings()}>
-                保存配置
-              </Button>
+              <Space size={10}>
+                <Form.Item name="targetKind" noStyle rules={[{ required: true }]}>
+                  <Segmented
+                    size="small"
+                    options={[
+                      { label: "本地", value: "local" },
+                      { label: "云端", value: "cloud" },
+                    ]}
+                  />
+                </Form.Item>
+                <Button type="primary" size="small" onClick={() => void saveBackupSettings()}>
+                  保存配置
+                </Button>
+              </Space>
             </div>
-            <Form.Item label="备份位置" name="targetKind" rules={[{ required: true }]}>
-              <Segmented
-                block
-                options={[
-                  { label: "本地", value: "local" },
-                  { label: "云端", value: "cloud" },
-                ]}
-              />
-            </Form.Item>
-            {backupTarget === "local" && (
-              <Form.Item label="本地备份目录">
-                <Space.Compact className="backupDirectoryPicker" style={{ width: "100%" }}>
-                  <Form.Item name="localDirectory" noStyle rules={[{ required: true, message: "请选择本地备份目录" }]}>
-                    <Input placeholder="选择一个目录保存备份包" />
-                  </Form.Item>
-                  <Button aria-label="选择本地备份目录" icon={<FolderOpenOutlined />} onClick={() => void chooseLocalDirectory()} />
-                </Space.Compact>
-              </Form.Item>
-            )}
             <div className="backupFormGrid backupFormGrid-tight">
-              <Form.Item label="自动备份" name="autoEnabled" valuePropName="checked">
-                <Switch />
-              </Form.Item>
+              {isCloudTarget ? (
+                <Form.Item label="自动备份" name={["cloud", "autoEnabled"]} valuePropName="checked">
+                  <Switch />
+                </Form.Item>
+              ) : (
+                <Form.Item label="自动备份" name="autoEnabled" valuePropName="checked">
+                  <Switch />
+                </Form.Item>
+              )}
               <Form.Item label="频率" name="frequency">
                 <Select
                   options={[
@@ -299,6 +317,27 @@ export function BackupModal({
                 <InputNumber min={1} max={3650} precision={0} style={{ width: "100%" }} />
               </Form.Item>
             </div>
+            {backupTarget === "local" && (
+              <Form.Item label="本地备份目录">
+                <Form.Item name="localDirectory" noStyle rules={[{ required: true, message: "请选择本地备份目录" }]}>
+                  <Input
+                    className="privateKeyPathInput"
+                    placeholder="选择一个目录保存备份包"
+                    suffix={
+                      <Tooltip title="选择本地备份目录">
+                        <Button
+                          type="text"
+                          aria-label="选择本地备份目录"
+                          className="privateKeyBrowseButton"
+                          icon={<FolderOpenOutlined />}
+                          onClick={() => void chooseLocalDirectory()}
+                        />
+                      </Tooltip>
+                    }
+                  />
+                </Form.Item>
+              </Form.Item>
+            )}
           </section>
 
           {isCloudTarget && (
@@ -308,42 +347,60 @@ export function BackupModal({
                   <CloudUploadOutlined />
                   <span>云端备份</span>
                 </Space>
+                <Form.Item name={["cloud", "kind"]} hidden>
+                  <Input />
+                </Form.Item>
+                <div className="backupCloudKindSwitch" data-kind={activeCloudKind} role="radiogroup" aria-label="云端备份类型">
+                  <span className="backupCloudKindThumb" aria-hidden="true" />
+                  <button
+                    type="button"
+                    className="backupCloudKindOption"
+                    role="radio"
+                    aria-checked={activeCloudKind === "webdav"}
+                    onClick={() => setCloudKind("webdav")}
+                  >
+                    WebDAV
+                  </button>
+                  <button
+                    type="button"
+                    className="backupCloudKindOption"
+                    role="radio"
+                    aria-checked={activeCloudKind === "s3"}
+                    onClick={() => setCloudKind("s3")}
+                  >
+                    S3 存储桶
+                  </button>
+                </div>
               </div>
-              <Form.Item label="云端类型" name={["cloud", "kind"]}>
-                <Select
-                  options={[
-                    { label: "WebDAV", value: "webdav" },
-                    { label: "S3 存储桶", value: "s3" },
-                  ]}
-                />
-              </Form.Item>
-              {cloudKind === "s3" ? (
+              {activeCloudKind === "s3" ? (
                 <div className="backupFormGrid">
-                  <Form.Item label="Endpoint" name={["cloud", "s3", "endpoint"]} rules={[{ required: true, message: "请输入 Endpoint" }]}>
+                  <Form.Item label="Endpoint" name={["cloud", "s3", "endpoint"]}>
                     <Input placeholder="https://s3.amazonaws.com" />
                   </Form.Item>
-                  <Form.Item label="Region" name={["cloud", "s3", "region"]} rules={[{ required: true, message: "请输入 Region" }]}>
-                    <Input placeholder="us-east-1" />
+                  <Form.Item label="Region" name={["cloud", "s3", "region"]}>
+                    <Input placeholder="AWS: us-east-1；R2: auto" />
                   </Form.Item>
-                  <Form.Item label="Bucket" name={["cloud", "s3", "bucket"]} rules={[{ required: true, message: "请输入 Bucket" }]}>
+                  <Form.Item label="Access Key ID" name={["cloud", "s3", "accessKeyId"]}>
                     <Input />
                   </Form.Item>
-                  <Form.Item label="Prefix" name={["cloud", "s3", "prefix"]}>
-                    <Input placeholder="helm" />
-                  </Form.Item>
-                  <Form.Item label="Access Key ID" name={["cloud", "s3", "accessKeyId"]} rules={[{ required: true, message: "请输入 Access Key" }]}>
-                    <Input />
-                  </Form.Item>
-                  <Form.Item label="Secret Access Key" name={["cloud", "s3", "secretAccessKey"]} rules={[{ required: true, message: "请输入 Secret Key" }]}>
+                  <Form.Item label="Secret Access Key" name={["cloud", "s3", "secretAccessKey"]}>
                     <Input.Password />
                   </Form.Item>
-                  <Form.Item label="Path Style" name={["cloud", "s3", "pathStyle"]} valuePropName="checked">
-                    <Switch />
+                  <Form.Item label="Bucket" name={["cloud", "s3", "bucket"]}>
+                    <Input />
+                  </Form.Item>
+                  <Form.Item label="Path" name={["cloud", "s3", "prefix"]}>
+                    <Input placeholder="helm" />
+                  </Form.Item>
+                  <Form.Item label="路径样式" name={["cloud", "s3", "pathStyle"]} valuePropName="checked">
+                    <Tooltip title="开启：使用 https://endpoint/bucket/object。关闭：使用 https://bucket.endpoint/object。AWS S3 建议关闭；Cloudflare R2 通常保持关闭；MinIO、自建或部分兼容 S3 服务如果连接失败可开启。">
+                      <Switch />
+                    </Tooltip>
                   </Form.Item>
                 </div>
               ) : (
                 <div className="backupFormGrid">
-                  <Form.Item label="WebDAV 地址" name={["cloud", "webdav", "endpoint"]} rules={[{ required: true, message: "请输入 WebDAV 地址" }]}>
+                  <Form.Item label="WebDAV 地址" name={["cloud", "webdav", "endpoint"]}>
                     <Input placeholder="https://example.com/dav" />
                   </Form.Item>
                   <Form.Item label="远端目录" name={["cloud", "webdav", "remotePath"]}>
@@ -387,4 +444,70 @@ function targetLabel(kind: BackupRecord["targetKind"]) {
   if (kind === "webdav") return "WebDAV";
   if (kind === "s3") return "S3";
   return "云端";
+}
+
+function normalizeBackupSettingsForForm(settings?: PartialBackupSettings | null): BackupSettings {
+  const defaults = defaultBackupSettings();
+  return {
+    ...defaults,
+    ...settings,
+    localDirectory: settings?.localDirectory ?? null,
+    cloud: {
+      ...defaults.cloud,
+      ...settings?.cloud,
+      autoEnabled: settings?.cloud?.autoEnabled ?? defaults.cloud.autoEnabled,
+      webdav: {
+        ...defaults.cloud.webdav,
+        ...settings?.cloud?.webdav,
+      },
+      s3: {
+        ...defaults.cloud.s3,
+        ...settings?.cloud?.s3,
+      },
+    },
+  };
+}
+
+function normalizeCloudBackupKindForSave(cloud: BackupSettings["cloud"]): BackupSettings["cloud"] {
+  const webdavConfigured = isWebdavBackupConfigured(cloud.webdav);
+  const s3Configured = isS3BackupConfigured(cloud.s3);
+  const kind = cloud.kind === "s3" ? "s3" : "webdav";
+  if (kind === "webdav" && !webdavConfigured && s3Configured) {
+    return { ...cloud, kind: "s3" };
+  }
+  if (kind === "s3" && !s3Configured && webdavConfigured) {
+    return { ...cloud, kind: "webdav" };
+  }
+  return { ...cloud, kind };
+}
+
+function ensureCloudBackupReady(cloud: BackupSettings["cloud"], cloudTargetVisible: boolean) {
+  if (isCloudBackupConfigured(cloud)) return;
+  if (!cloudTargetVisible && !cloud.autoEnabled) return;
+  if (cloud.kind === "webdav") {
+    throw new Error("请先填写 WebDAV 地址，或切换到已配置的 S3");
+  }
+  throw new Error("请先完整填写 S3 的 Endpoint、Region、Bucket、Access Key ID 和 Secret Access Key，或切换到已配置的 WebDAV");
+}
+
+function isCloudBackupConfigured(cloud?: BackupSettings["cloud"]) {
+  if (!cloud) return false;
+  if (cloud.kind === "webdav") {
+    return isWebdavBackupConfigured(cloud.webdav);
+  }
+  return isS3BackupConfigured(cloud.s3);
+}
+
+function isWebdavBackupConfigured(webdav: BackupSettings["cloud"]["webdav"]) {
+  return webdav.endpoint.trim().length > 0;
+}
+
+function isS3BackupConfigured(s3: BackupSettings["cloud"]["s3"]) {
+  return (
+    s3.endpoint.trim().length > 0 &&
+    s3.region.trim().length > 0 &&
+    s3.bucket.trim().length > 0 &&
+    s3.accessKeyId.trim().length > 0 &&
+    s3.secretAccessKey.trim().length > 0
+  );
 }

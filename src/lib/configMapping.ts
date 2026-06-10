@@ -8,6 +8,7 @@ export function configToRemoteSession(config: SessionConfig, index: number): Rem
   return {
     id: config.id,
     name: config.name,
+    groupId: config.groupId ?? null,
     host: config.host,
     username: config.username,
     state: "disconnected",

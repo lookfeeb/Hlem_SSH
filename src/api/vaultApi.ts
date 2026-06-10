@@ -1,8 +1,10 @@
 import type { AppSettings, BackupSettings, ConfigSnapshot, GroupInput, SessionInput, SshOptions, TunnelConfig, TunnelInput, VaultData } from "../types";
 import { browserUnavailable, browserUnavailableSync, call } from "./bridge";
+import { getGroupNameLengthError, GROUP_COUNT_ERROR, GROUP_CUSTOM_MAX_COUNT } from "../lib/groupName";
 import { readJsonStorage, removeStorage, writeJsonStorage } from "../lib/storage";
 
 const BROWSER_VAULT_KEY = "helm.browserVault";
+const DEFAULT_GROUP_NAME = "默认分组";
 
 export const vaultApi = {
   needsMigration: () => call<boolean>("vault_needs_migration", () => false),
@@ -15,6 +17,8 @@ export const vaultApi = {
   backupImport: (path: string) =>
     call<ConfigSnapshot>("vault_backup_import", () => browserUnavailable("备份恢复"), { path }),
   backupRunNow: () => call<ConfigSnapshot>("backup_run_now", browserBackupRunNow),
+  backupRunAuto: (targetKinds: string[]) =>
+    call<ConfigSnapshot>("backup_run_auto", () => browserBackupRunNow({ automatic: true, targetKinds }), { targetKinds }),
   backupRecordRestore: (recordId: string) =>
     call<ConfigSnapshot>("backup_record_restore", () => browserUnavailable("备份记录恢复"), { recordId }),
   backupRecordDelete: (recordId: string, deleteFile = false) =>
@@ -61,13 +65,19 @@ function browserSettingsUpdate(settings: AppSettings): ConfigSnapshot {
   });
 }
 
-function browserBackupRunNow(): ConfigSnapshot {
+function browserBackupRunNow(options?: { automatic?: boolean; targetKinds?: string[] }): ConfigSnapshot {
   return browserMutate((data) => {
     const bjt = new Date(Date.now() + 8 * 60 * 60 * 1000);
     const fileName = `HelM-backup-${bjt.toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15)}-BJT.zip`;
     const settings = data.settings.backup ?? defaultBackupSettings();
     const records = [];
-    if (!settings.cloud.enabled && settings.localDirectory) {
+    const targetKinds = new Set(options?.targetKinds ?? []);
+    const shouldRunTarget = (kind: string) => !options?.automatic || targetKinds.has(kind);
+    if (
+      settings.localDirectory &&
+      shouldRunTarget("local") &&
+      (!options?.automatic || settings.autoEnabled)
+    ) {
       records.push({
         id: crypto.randomUUID(),
         fileName,
@@ -79,7 +89,11 @@ function browserBackupRunNow(): ConfigSnapshot {
         createdAt: now(),
       });
     }
-    if (settings.cloud.enabled) {
+    if (
+      isCloudBackupConfigured(settings.cloud) &&
+      shouldRunTarget(settings.cloud.kind) &&
+      (!options?.automatic || settings.cloud.autoEnabled)
+    ) {
       records.push({
         id: crypto.randomUUID(),
         fileName,
@@ -91,7 +105,7 @@ function browserBackupRunNow(): ConfigSnapshot {
         createdAt: now(),
       });
     }
-    if (records.length === 0) throw new Error("请先配置本地备份目录或启用云端备份");
+    if (records.length === 0) throw new Error("请先配置本地备份目录或云端备份");
     data.backupRecords = [...records, ...(data.backupRecords ?? [])].slice(0, settings.retentionCount || 10);
   });
 }
@@ -110,9 +124,16 @@ function browserBackupRecordsClear(): ConfigSnapshot {
 
 function browserGroupCreate(input: GroupInput): ConfigSnapshot {
   return browserMutate((data) => {
+    const name = input.name.trim();
+    if (!name) throw new Error("分组名称不能为空");
+    const lengthError = getGroupNameLengthError(name);
+    if (lengthError) throw new Error(lengthError);
+    const defaultGroupId = browserDefaultGroupId(data);
+    const customGroupCount = data.groups.filter((group) => group.id !== defaultGroupId).length;
+    if (customGroupCount >= GROUP_CUSTOM_MAX_COUNT) throw new Error(GROUP_COUNT_ERROR);
     data.groups.push({
       id: crypto.randomUUID(),
-      name: input.name,
+      name,
       parentId: input.parentId ?? null,
       sortOrder: data.groups.length,
       createdAt: now(),
@@ -123,9 +144,14 @@ function browserGroupCreate(input: GroupInput): ConfigSnapshot {
 
 function browserGroupUpdate(groupId: string, input: GroupInput): ConfigSnapshot {
   return browserMutate((data) => {
+    if (browserIsDefaultGroup(data, groupId)) throw new Error("默认分组不允许重命名");
+    const name = input.name.trim();
+    if (!name) throw new Error("分组名称不能为空");
+    const lengthError = getGroupNameLengthError(name);
+    if (lengthError) throw new Error(lengthError);
     const group = data.groups.find((item) => item.id === groupId);
     if (!group) throw new Error("分组不存在");
-    group.name = input.name;
+    group.name = name;
     group.parentId = input.parentId ?? null;
     group.updatedAt = now();
   });
@@ -133,11 +159,25 @@ function browserGroupUpdate(groupId: string, input: GroupInput): ConfigSnapshot 
 
 function browserGroupDelete(groupId: string): ConfigSnapshot {
   return browserMutate((data) => {
+    if (browserIsDefaultGroup(data, groupId)) throw new Error("默认分组不允许删除");
+    const defaultGroupId = browserDefaultGroupId(data);
+    if (!data.groups.some((group) => group.id === groupId)) throw new Error("分组不存在");
     data.groups = data.groups.filter((group) => group.id !== groupId);
+    data.groups = data.groups.map((group) =>
+      group.parentId === groupId ? { ...group, parentId: null, updatedAt: now() } : group,
+    );
     data.sessions = data.sessions.map((session) =>
-      session.groupId === groupId ? { ...session, groupId: null, updatedAt: now() } : session,
+      session.groupId === groupId ? { ...session, groupId: defaultGroupId, updatedAt: now() } : session,
     );
   });
+}
+
+function browserDefaultGroupId(data: VaultData): string | null {
+  return data.groups.find((group) => group.sortOrder === 0)?.id ?? data.groups[0]?.id ?? null;
+}
+
+function browserIsDefaultGroup(data: VaultData, groupId: string): boolean {
+  return browserDefaultGroupId(data) === groupId;
 }
 
 function browserSessionCreate(input: SessionInput): ConfigSnapshot {
@@ -260,7 +300,7 @@ function normalizeBrowserSnapshot(snapshot: ConfigSnapshot) {
 function normalizeBrowserSettings(settings?: AppSettings | null): AppSettings {
   const aiApiSessionIds = Array.from(
     new Set([...(settings?.aiApiSessionIds ?? []), settings?.aiApiSessionId ?? ""].filter(Boolean)),
-  ).slice(0, 3);
+  ).slice(0, 5);
   return {
     proxy: settings?.proxy ?? null,
     backup: normalizeBackupSettings(settings?.backup),
@@ -283,6 +323,7 @@ function normalizeBackupSettings(settings?: BackupSettings | null): BackupSettin
     cloud: {
       ...defaults.cloud,
       ...settings?.cloud,
+      autoEnabled: settings?.cloud?.autoEnabled ?? defaults.cloud.autoEnabled,
       webdav: {
         ...defaults.cloud.webdav,
         ...settings?.cloud?.webdav,
@@ -293,6 +334,19 @@ function normalizeBackupSettings(settings?: BackupSettings | null): BackupSettin
       },
     },
   };
+}
+
+function isCloudBackupConfigured(cloud: BackupSettings["cloud"]) {
+  if (cloud.kind === "webdav") {
+    return cloud.webdav.endpoint.trim().length > 0;
+  }
+  return (
+    cloud.s3.endpoint.trim().length > 0 &&
+    cloud.s3.region.trim().length > 0 &&
+    cloud.s3.bucket.trim().length > 0 &&
+    cloud.s3.accessKeyId.trim().length > 0 &&
+    cloud.s3.secretAccessKey.trim().length > 0
+  );
 }
 
 function createDefaultVaultData(): VaultData {
@@ -308,7 +362,7 @@ function createDefaultVaultData(): VaultData {
     groups: [
       {
         id: groupId,
-        name: "默认分组",
+        name: DEFAULT_GROUP_NAME,
         parentId: null,
         sortOrder: 0,
         createdAt: timestamp,
@@ -362,6 +416,7 @@ export function defaultBackupSettings(): BackupSettings {
     retentionDays: 30,
     cloud: {
       enabled: false,
+      autoEnabled: false,
       kind: "webdav",
       webdav: {
         endpoint: "",
@@ -376,7 +431,7 @@ export function defaultBackupSettings(): BackupSettings {
         accessKeyId: "",
         secretAccessKey: "",
         prefix: "helm",
-        pathStyle: true,
+        pathStyle: false,
       },
     },
   };

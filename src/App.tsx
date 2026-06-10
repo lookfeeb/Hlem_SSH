@@ -388,6 +388,23 @@ function App() {
     setConfigSnapshot(snapshot);
   }
 
+  async function createSessionGroup(name: string) {
+    const snapshot = await vaultApi.groupCreate({ name: name.trim(), parentId: null });
+    applyConfigSnapshot(snapshot);
+    return snapshot.data.groups[snapshot.data.groups.length - 1]?.id ?? null;
+  }
+
+  async function updateSessionGroup(groupId: string, name: string) {
+    const snapshot = await vaultApi.groupUpdate(groupId, { name: name.trim(), parentId: null });
+    applyConfigSnapshot(snapshot);
+  }
+
+  async function deleteSessionGroup(groupId: string) {
+    const snapshot = await vaultApi.groupDelete(groupId);
+    applySnapshot(snapshot);
+    return snapshot.data.groups.find((group) => group.sortOrder === 0)?.id ?? snapshot.data.groups[0]?.id ?? null;
+  }
+
   function resetRuntimeStateForSnapshot() {
     resetSessionRuntime();
     resetTerminalRuntime();
@@ -430,6 +447,7 @@ function App() {
               <>
                 <TopBar
                   sessions={sessions}
+                  groups={configSnapshot?.data.groups ?? []}
                   tabSessions={openSessions}
                   activeSessionId={activeSession?.id ?? ""}
                   onActivate={activateSession}
@@ -618,6 +636,9 @@ function App() {
               editingSessionId={sessionModal.mode === "edit" ? sessionModal.sessionId : undefined}
               onCancel={closeSessionConfigModal}
               onCancelButton={returnToSessionListOnCancel ? backToSessionListFromConfig : undefined}
+              onCreateGroup={createSessionGroup}
+              onUpdateGroup={updateSessionGroup}
+              onDeleteGroup={deleteSessionGroup}
               onSubmit={saveSessionConfig}
             />
           </Suspense>

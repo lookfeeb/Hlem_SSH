@@ -114,19 +114,15 @@ export function EditorWindowApp() {
         <main className="detachedEditorWindow">
           <header className="detachedEditorHeader">
             <div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div className="editorHeaderMeta">
                 {activeTab?.sessionName && (
                   <span className="editorHeaderSession" style={{ background: `${sessionColor(activeTab.sessionId)}18`, color: sessionColor(activeTab.sessionId), borderColor: sessionColor(activeTab.sessionId) }}>
                     {activeTab.sessionName}
                   </span>
                 )}
-                <strong>{activeTab?.path || "文件编辑器"}</strong>
               </div>
-              <span>
-                {activeTab?.disconnected
-                  ? <span style={{ color: "#ff4d4f" }}>连接已断开，无法保存</span>
-                  : "内容仅保存在当前窗口内存中，不写入本地临时文件。"}
-              </span>
+              <strong className="editorHeaderPath">{activeTab?.path || "文件编辑器"}</strong>
+              {activeTab?.disconnected && <span className="editorHeaderWarning">连接已断开，无法保存</span>}
             </div>
             <Button
               type="primary"

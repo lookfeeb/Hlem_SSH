@@ -3,6 +3,7 @@ export type ConnectionState = "connected" | "connecting" | "disconnected" | "fai
 export interface RemoteSession {
   id: string;
   name: string;
+  groupId?: string | null;
   host: string;
   username: string;
   state: ConnectionState;
@@ -136,6 +137,7 @@ export interface BackupSettings {
 
 export interface CloudBackupSettings {
   enabled: boolean;
+  autoEnabled: boolean;
   kind: "webdav" | "s3";
   webdav: WebdavBackupConfig;
   s3: S3BackupConfig;

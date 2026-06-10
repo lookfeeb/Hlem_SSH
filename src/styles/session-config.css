@@ -264,6 +264,201 @@
   box-shadow: 0 0 0 3px rgba(59,130,246,0.12) !important;
 }
 
+.sessionConfigModal .privateKeyPathInput.ant-input-affix-wrapper {
+  padding-inline: 14px 6px !important;
+}
+
+.sessionConfigModal .privateKeyPathInput .ant-input {
+  padding-right: 0 !important;
+}
+
+.sessionConfigModal .privateKeyPathInput .ant-input-suffix {
+  margin-inline-start: 6px !important;
+}
+
+.sessionConfigModal .privateKeyBrowseButton {
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  padding: 0 !important;
+  border-radius: 8px !important;
+  color: var(--text-secondary) !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sessionConfigModal .privateKeyBrowseButton:hover,
+.sessionConfigModal .privateKeyBrowseButton:focus-visible {
+  color: var(--accent) !important;
+  background: rgba(59, 130, 246, 0.1) !important;
+}
+
+.sessionGroupSelectPopup .ant-select-item-option-content {
+  min-width: 0;
+}
+
+.sessionGroupSelectPopup .rc-virtual-list-holder {
+  overflow-y: auto !important;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.sessionGroupSelectPopup .rc-virtual-list-holder::-webkit-scrollbar,
+.sessionGroupSelectPopup .rc-virtual-list-scrollbar {
+  width: 0 !important;
+  display: none !important;
+}
+
+.sessionGroupSelectPopup .rc-virtual-list-holder-inner {
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.sessionGroupSelectPopup .ant-select-item {
+  margin-inline: 6px;
+  border-radius: 8px !important;
+}
+
+.sessionGroupSelectPopup .sessionGroupOption {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+}
+
+.sessionGroupSelectPopup .sessionGroupOptionName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionGroupSelectPopup .sessionGroupOptionActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.sessionGroupSelectPopup .sessionGroupOptionButton {
+  width: 26px !important;
+  height: 26px !important;
+  min-width: 26px !important;
+  padding: 0 !important;
+  border-radius: 7px !important;
+  color: var(--text-secondary) !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sessionGroupSelectPopup .sessionGroupOptionButton:not(:disabled):hover,
+.sessionGroupSelectPopup .sessionGroupOptionButton:not(:disabled):focus-visible {
+  color: var(--accent) !important;
+  background: rgba(59, 130, 246, 0.1) !important;
+}
+
+.sessionGroupSelectPopup .sessionGroupOptionButton-save {
+  color: #16a34a !important;
+}
+
+.sessionGroupSelectPopup .sessionGroupOptionButton-save:not(:disabled):hover,
+.sessionGroupSelectPopup .sessionGroupOptionButton-save:not(:disabled):focus-visible {
+  color: #15803d !important;
+  background: rgba(22, 163, 74, 0.1) !important;
+}
+
+.sessionGroupSelectPopup .sessionGroupOptionButton-danger {
+  color: var(--danger) !important;
+}
+
+.sessionGroupSelectPopup .sessionGroupOptionButton-danger:not(:disabled):hover,
+.sessionGroupSelectPopup .sessionGroupOptionButton-danger:not(:disabled):focus-visible {
+  color: var(--danger) !important;
+  background: rgba(239, 68, 68, 0.1) !important;
+}
+
+.sessionGroupSelectPopup .sessionGroupOption-editing {
+  grid-template-columns: minmax(0, 1fr) max-content;
+}
+
+.sessionGroupSelectPopup .sessionGroupRenameInput.ant-input {
+  height: 30px;
+  border-radius: 8px !important;
+  font-size: 12px;
+}
+
+.sessionGroupSelectPopup .sessionGroupLockIcon {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+}
+
+.sessionGroupSelectPopup .sessionGroupActionError {
+  margin: 6px 8px 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.sessionGroupSelectPopup .sessionGroupCreatePanel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border-top: 1px solid rgba(226, 232, 240, .8);
+  background: #ffffff;
+}
+
+.sessionGroupSelectPopup .sessionGroupCreateInput.ant-input {
+  height: 32px;
+  border-radius: 8px !important;
+  font-size: 12px;
+}
+
+.sessionGroupSelectPopup .sessionGroupCreateButton {
+  width: 30px !important;
+  height: 30px !important;
+  min-width: 30px !important;
+  padding: 0 !important;
+  border-radius: 8px !important;
+  color: #cbd5e1 !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sessionGroupSelectPopup .sessionGroupCreateButton:not(:disabled) {
+  color: var(--accent) !important;
+}
+
+.sessionGroupSelectPopup .sessionGroupCreateButton:not(:disabled):hover,
+.sessionGroupSelectPopup .sessionGroupCreateButton:not(:disabled):focus-visible {
+  background: rgba(59, 130, 246, 0.1) !important;
+}
+
+.sessionGroupSelectPopup .sessionGroupCreateButton:disabled,
+.sessionGroupSelectPopup .sessionGroupCreateButton.ant-btn-disabled {
+  background: transparent !important;
+  cursor: not-allowed;
+}
+
+.sessionGroupSelectPopup .sessionGroupCreateError {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 /* TextArea */
 .sessionConfigModal .ant-input[rows] {
   height: auto;
@@ -363,5 +558,182 @@
 
 .fullControl {
   width: 100%;
+}
+
+/* ─── 新版奢华重构高光美化 ─── */
+
+.sessionConfigModal .ant-modal-content {
+  border-radius: var(--radius-xl) !important;
+  background: rgba(255, 255, 255, 0.95) !important;
+  backdrop-filter: blur(16px) saturate(140%) !important;
+  border: 1px solid rgba(226, 232, 240, 0.8) !important;
+  box-shadow:
+    0 32px 64px -16px rgba(15, 23, 42, 0.22),
+    0 12px 24px -10px rgba(99, 102, 241, 0.15),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9) !important;
+}
+
+.sessionConfigModal .ant-modal-header {
+  padding: 24px 32px 18px !important;
+  margin: 0 !important;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8) !important;
+}
+
+.sessionConfigModal .ant-modal-close {
+  top: 22px !important;
+  inset-inline-end: 24px !important;
+  width: 32px !important;
+  height: 32px !important;
+  border-radius: 50% !important;
+  background: rgba(241, 245, 249, 0.8) !important;
+  border: 1px solid rgba(226, 232, 240, 0.6) !important;
+  color: var(--text-secondary) !important;
+  transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+}
+
+.sessionConfigModal .ant-modal-close:hover {
+  background: rgba(239, 68, 68, 0.08) !important;
+  border-color: rgba(239, 68, 68, 0.3) !important;
+  color: var(--danger) !important;
+  transform: rotate(90deg) scale(1.05);
+}
+
+.sessionConfigModal .ant-modal-body {
+  padding: 24px 32px !important;
+  max-height: 520px !important;
+  overflow-y: auto !important;
+  scrollbar-width: none !important;
+}
+
+.sessionConfigModal .ant-modal-body::-webkit-scrollbar {
+  display: none !important;
+}
+
+/* 表单分段卡片 */
+.formSectionCard {
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  border-radius: var(--radius-lg);
+  padding: 22px 24px;
+  margin-bottom: 20px;
+  transition: all 0.25s ease;
+  position: relative;
+}
+
+.formSectionCard:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+  box-shadow: 0 8px 24px -10px rgba(99, 102, 241, 0.12);
+}
+
+.formSectionTitle {
+  font-size: 13px;
+  font-weight: 800;
+  color: #6366f1;
+  letter-spacing: 0.5px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+
+/* iOS 胶囊分段单选器 */
+.sessionConfigModal .ant-radio-group {
+  display: inline-flex !important;
+  background: rgba(241, 245, 249, 0.8) !important;
+  border: 1px solid rgba(226, 232, 240, 0.6) !important;
+  border-radius: 10px !important;
+  padding: 3px !important;
+  gap: 2px !important;
+}
+
+.sessionConfigModal .ant-radio-button-wrapper {
+  border: none !important;
+  background: transparent !important;
+  border-radius: 8px !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  color: var(--text-secondary) !important;
+  height: 30px !important;
+  line-height: 30px !important;
+  padding: 0 16px !important;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  box-shadow: none !important;
+}
+
+.sessionConfigModal .ant-radio-button-wrapper::before {
+  display: none !important;
+}
+
+.sessionConfigModal .ant-radio-button-wrapper:hover {
+  color: #6366f1 !important;
+}
+
+.sessionConfigModal .ant-radio-button-wrapper-checked {
+  background: #ffffff !important;
+  color: #6366f1 !important;
+  font-weight: 700 !important;
+  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.15), 0 1px 2px rgba(0, 0, 0, 0.05) !important;
+}
+
+/* 输入框与选择框聚焦发光阴影重写 */
+.sessionConfigModal .ant-input:focus,
+.sessionConfigModal .ant-input-affix-wrapper-focused,
+.sessionConfigModal .ant-input-number-focused,
+.sessionConfigModal .ant-select-focused .ant-select-selector {
+  border-color: #6366f1 !important;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15), inset 0 1px 2px rgba(0, 0, 0, 0.02) !important;
+}
+
+/* 统一表单控件高度：Input / Select / InputNumber */
+.sessionConfigModal {
+  --session-control-height: 38px;
+  --session-control-inner-height: 36px;
+}
+
+.sessionConfigModal .sessionFormGrid .ant-form-item-control-input {
+  min-height: var(--session-control-height) !important;
+}
+
+.sessionConfigModal .sessionFormGrid .ant-input-affix-wrapper,
+.sessionConfigModal .sessionFormGrid .ant-input-number,
+.sessionConfigModal .sessionFormGrid .ant-select,
+.sessionConfigModal .sessionFormGrid .ant-select-selector {
+  width: 100%;
+  height: var(--session-control-height) !important;
+  min-height: var(--session-control-height) !important;
+  box-sizing: border-box;
+}
+
+.sessionConfigModal .sessionFormGrid .ant-input-affix-wrapper,
+.sessionConfigModal .sessionFormGrid .ant-input-number,
+.sessionConfigModal .sessionFormGrid .ant-select-selector {
+  display: flex !important;
+  align-items: center !important;
+}
+
+.sessionConfigModal .sessionFormGrid .ant-input-affix-wrapper > .ant-input,
+.sessionConfigModal .sessionFormGrid .ant-input-number-input,
+.sessionConfigModal .sessionFormGrid .ant-select-content {
+  height: var(--session-control-inner-height) !important;
+  line-height: var(--session-control-inner-height) !important;
+}
+
+.sessionConfigModal .sessionFormGrid .ant-input-number-input-wrap,
+.sessionConfigModal .sessionFormGrid .ant-select-content {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sessionConfigModal .sessionFormGrid .ant-input-number-prefix,
+.sessionConfigModal .sessionFormGrid .ant-input-prefix,
+.sessionConfigModal .sessionFormGrid .ant-input-suffix,
+.sessionConfigModal .sessionFormGrid .ant-select-suffix,
+.sessionConfigModal .sessionFormGrid .ant-select-clear {
+  display: inline-flex;
+  align-items: center;
 }
 
