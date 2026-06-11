@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use chrono::{DateTime, FixedOffset, TimeZone, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, TimeZone, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION, HOST},
@@ -159,10 +159,56 @@ pub fn configured_cloud_backup(cloud: &CloudBackupSettings) -> bool {
     }
 }
 
+pub fn auto_backup_due_target_kinds(
+    settings: &BackupSettings,
+    records: &[BackupRecord],
+) -> Vec<String> {
+    let Some(interval) = backup_frequency_duration(&settings.frequency) else {
+        return Vec::new();
+    };
+    let mut target_kinds = Vec::new();
+    if settings.auto_enabled && configured_local_backup_directory(settings).is_some() {
+        target_kinds.push("local".to_string());
+    }
+    if settings.cloud.auto_enabled && configured_cloud_backup(&settings.cloud) {
+        target_kinds.push(settings.cloud.kind.clone());
+    }
+    target_kinds
+        .into_iter()
+        .filter(|target_kind| should_run_target_auto_backup(target_kind, interval, records))
+        .collect()
+}
+
 fn target_selected(target_kinds: Option<&[String]>, target_kind: &str) -> bool {
     target_kinds
         .map(|kinds| kinds.iter().any(|kind| kind == target_kind))
         .unwrap_or(true)
+}
+
+fn should_run_target_auto_backup(
+    target_kind: &str,
+    interval: ChronoDuration,
+    records: &[BackupRecord],
+) -> bool {
+    let last_success = records
+        .iter()
+        .filter(|record| record.status == "success" && record.target_kind == target_kind)
+        .filter_map(|record| DateTime::parse_from_rfc3339(&record.created_at).ok())
+        .map(|datetime| datetime.with_timezone(&Utc))
+        .max();
+    match last_success {
+        Some(last_success) => Utc::now().signed_duration_since(last_success) >= interval,
+        None => true,
+    }
+}
+
+fn backup_frequency_duration(frequency: &str) -> Option<ChronoDuration> {
+    match frequency {
+        "hourly" => Some(ChronoDuration::hours(1)),
+        "daily" => Some(ChronoDuration::days(1)),
+        "weekly" => Some(ChronoDuration::weeks(1)),
+        _ => None,
+    }
 }
 
 async fn write_local_backup(
@@ -999,6 +1045,50 @@ mod tests {
         let package = build_backup_package_sync(&payload).unwrap();
         assert!(package.len() > payload.len());
         assert_eq!(extract_backup_payload(&package).unwrap(), payload);
+    }
+
+    #[test]
+    fn auto_backup_due_target_kinds_are_per_target() {
+        let old = (Utc::now() - ChronoDuration::days(2)).to_rfc3339();
+        let recent = Utc::now().to_rfc3339();
+        let settings = BackupSettings {
+            local_directory: Some("C:/backups".to_string()),
+            auto_enabled: true,
+            cloud: CloudBackupSettings {
+                auto_enabled: true,
+                kind: "webdav".to_string(),
+                webdav: WebdavBackupConfig {
+                    endpoint: "https://dav.example".to_string(),
+                    ..WebdavBackupConfig::default()
+                },
+                ..CloudBackupSettings::default()
+            },
+            ..BackupSettings::default()
+        };
+        let due = auto_backup_due_target_kinds(
+            &settings,
+            &[
+                BackupRecord {
+                    created_at: recent,
+                    ..BackupRecord::success(
+                        "webdav.zip".to_string(),
+                        "webdav",
+                        "https://dav.example/webdav.zip".to_string(),
+                        1,
+                    )
+                },
+                BackupRecord {
+                    created_at: old,
+                    ..BackupRecord::success(
+                        "local-old.zip".to_string(),
+                        "local",
+                        "C:/backups/local-old.zip".to_string(),
+                        1,
+                    )
+                },
+            ],
+        );
+        assert_eq!(due, vec!["local".to_string()]);
     }
 
     #[tokio::test]

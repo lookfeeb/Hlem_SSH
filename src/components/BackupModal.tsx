@@ -1,6 +1,5 @@
 import { CloudUploadOutlined, DeleteOutlined, ExportOutlined, FolderOpenOutlined, ImportOutlined, PlayCircleOutlined } from "@ant-design/icons";
-import { App as AntdApp, Button, Form, Input, InputNumber, Modal, Popconfirm, Segmented, Select, Space, Switch, Table, Tag, Tooltip } from "antd";
-import type { ColumnsType } from "antd/es/table";
+import { App as AntdApp, Button, Form, Input, InputNumber, Modal, Popconfirm, Segmented, Select, Space, Switch, Tag, Tooltip } from "antd";
 import { useEffect, useMemo } from "react";
 import type { AppSettings, BackupRecord, BackupSettings } from "../types";
 import { defaultBackupSettings } from "../api/vaultApi";
@@ -164,84 +163,69 @@ export function BackupModal({
     });
   }
 
-  const columns: ColumnsType<BackupRecord> = [
-    { title: "时间", width: 150, render: (_, record) => formatBeijingDateTime(record.createdAt) },
-    { title: "文件", dataIndex: "fileName", ellipsis: true },
-    { title: "路径", dataIndex: "targetPath", ellipsis: true },
-    { title: "大小", width: 90, render: (_, record) => formatBytes(record.size, { zeroText: "-" }) },
-    {
-      title: "状态",
-      width: 92,
-      render: (_, record) => {
-        const isSuccess = record.status === "success";
-        return (
-          <span className={`tunnelStatusBadge ${isSuccess ? "tunnelStatusBadge-running" : "tunnelStatusBadge-stopped"}`}>
-            {isSuccess ? "成功" : "失败"}
-          </span>
-        );
-      },
-    },
-    {
-      title: "",
-      width: 92,
-      render: (_, record) => (
-        <Space size={4} onMouseEnter={(e) => e.stopPropagation()}>
-          <Tooltip title="恢复此备份" mouseEnterDelay={0.15}>
-            <Button
-              aria-label="恢复此备份"
-              size="small"
-              icon={<ImportOutlined />}
-              disabled={record.status !== "success"}
-              onClick={() => restoreRecord(record)}
-            />
-          </Tooltip>
-          <Popconfirm
-            title="删除备份记录"
-            description={record.targetKind === "local" ? "同时删除本地备份文件。" : "仅删除记录，不会删除云端文件。"}
-            okText="删除"
-            cancelText="取消"
-            onConfirm={() => void onDeleteRecord(record.id, record.targetKind === "local")}
-          >
-            <Tooltip title="删除备份记录" mouseEnterDelay={0.15}>
-              <Button aria-label="删除备份记录" size="small" icon={<DeleteOutlined />} />
-            </Tooltip>
-          </Popconfirm>
-        </Space>
-      ),
-    },
-  ];
+  const visibleRecords = useMemo(
+    () => records.filter((record) => (backupTarget === "local" ? record.targetKind === "local" : record.targetKind !== "local")),
+    [backupTarget, records],
+  );
 
-  const tableComponents = useMemo(() => {
-    const recordMap = new Map(records.map((item) => [item.id, item]));
-    return {
-      body: {
-        row: (rowProps: React.HTMLAttributes<HTMLTableRowElement> & { "data-row-key"?: string }) => {
-          const record = rowProps["data-row-key"] ? recordMap.get(rowProps["data-row-key"]) : undefined;
-          if (!record) return <tr {...rowProps} />;
-          return (
-            <Tooltip
-              mouseEnterDelay={0.4}
-              placement="top"
-              overlayClassName="backupRecordRowTooltip"
-              getPopupContainer={(trigger) => trigger.closest(".ant-modal-body") || document.body}
-              title={
-                <div className="backupRecordRowTooltipContent">
-                  <div><span>时间</span>{formatBeijingDateTime(record.createdAt)}</div>
-                  <div><span>位置</span>{targetLabel(record.targetKind)}</div>
-                  <div><span>文件</span>{record.fileName}</div>
-                  <div><span>路径</span>{record.targetPath}</div>
-                  <div><span>大小</span>{formatBytes(record.size, { zeroText: "-" })}</div>
-                  <div><span>状态</span>{record.status === "success" ? "成功" : "失败"}</div>
-                </div>
-              }
-            >
-              <tr {...rowProps} />
-            </Tooltip>
-          );
-        },
-      },
-    };
-  }, [records]);
+  function renderBackupRecordRow(record: BackupRecord) {
+    const isSuccess = record.status === "success";
+    return (
+      <Tooltip
+        key={record.id}
+        mouseEnterDelay={0.4}
+        placement="top"
+        overlayClassName="backupRecordRowTooltip"
+        getPopupContainer={(trigger) => trigger.closest(".ant-modal-body") || document.body}
+        title={
+          <div className="backupRecordRowTooltipContent">
+            <div><span>时间</span>{formatBeijingDateTime(record.createdAt)}</div>
+            <div><span>位置</span>{targetLabel(record.targetKind)}</div>
+            <div><span>文件</span>{record.fileName}</div>
+            <div><span>路径</span>{record.targetPath}</div>
+            <div><span>大小</span>{formatBytes(record.size, { zeroText: "-" })}</div>
+            <div><span>状态</span>{isSuccess ? "成功" : "失败"}</div>
+          </div>
+        }
+      >
+        <tr className="backupRecordTableRow">
+          <td>{formatBeijingDateTime(record.createdAt)}</td>
+          <td className="backupRecordCellEllipsis" title={record.fileName}>{record.fileName}</td>
+          <td className="backupRecordCellEllipsis" title={record.targetPath}>{record.targetPath}</td>
+          <td>{formatBytes(record.size, { zeroText: "-" })}</td>
+          <td>
+            <span className={`tunnelStatusBadge ${isSuccess ? "tunnelStatusBadge-running" : "tunnelStatusBadge-stopped"}`}>
+              {isSuccess ? "成功" : "失败"}
+            </span>
+          </td>
+          <td>
+            <Space size={4} onMouseEnter={(e) => e.stopPropagation()}>
+              <Tooltip title="恢复此备份" mouseEnterDelay={0.15}>
+                <Button
+                  aria-label="恢复此备份"
+                  size="small"
+                  icon={<ImportOutlined />}
+                  disabled={record.status !== "success"}
+                  onClick={() => restoreRecord(record)}
+                />
+              </Tooltip>
+              <Popconfirm
+                title="删除备份记录"
+                description={record.targetKind === "local" ? "同时删除本地备份文件。" : "仅删除记录，不会删除云端文件。"}
+                okText="删除"
+                cancelText="取消"
+                onConfirm={() => void onDeleteRecord(record.id, record.targetKind === "local")}
+              >
+                <Tooltip title="删除备份记录" mouseEnterDelay={0.15}>
+                  <Button aria-label="删除备份记录" size="small" icon={<DeleteOutlined />} />
+                </Tooltip>
+              </Popconfirm>
+            </Space>
+          </td>
+        </tr>
+      </Tooltip>
+    );
+  }
 
   return (
     <Modal
@@ -420,22 +404,54 @@ export function BackupModal({
           <section className="backupPanel">
             <div className="backupSectionHeader">
               <span>{backupTarget === "local" ? "本地备份" : "云端备份"}</span>
-              <Tag>{records.filter((r) => backupTarget === "local" ? r.targetKind === "local" : r.targetKind !== "local").length}</Tag>
+              <Tag>{visibleRecords.length}</Tag>
             </div>
-            <Table
-              className="backupRecordTable"
-              rowKey="id"
-              size="small"
-              columns={columns}
-              dataSource={records.filter((r) => backupTarget === "local" ? r.targetKind === "local" : r.targetKind !== "local")}
-              components={tableComponents}
-              pagination={{ pageSize: 5, hideOnSinglePage: true }}
-              scroll={{ x: 720, y: 180 }}
-            />
+            <div className="backupRecordTableFrame">
+              <table className="backupRecordTable backupRecordTableHeader">
+                <BackupRecordColGroup />
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>文件</th>
+                    <th>路径</th>
+                    <th>大小</th>
+                    <th>状态</th>
+                    <th aria-label="操作" />
+                  </tr>
+                </thead>
+              </table>
+              <div className="backupRecordTableBodyScroll">
+                <table className="backupRecordTable backupRecordTableBody">
+                  <BackupRecordColGroup />
+                  <tbody>
+                    {visibleRecords.length > 0 ? (
+                      visibleRecords.map(renderBackupRecordRow)
+                    ) : (
+                      <tr className="backupRecordTableEmptyRow">
+                        <td colSpan={6}>暂无备份记录</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </section>
         </div>
       </Form>
     </Modal>
+  );
+}
+
+function BackupRecordColGroup() {
+  return (
+    <colgroup>
+      <col className="backupRecordColTime" />
+      <col className="backupRecordColFile" />
+      <col className="backupRecordColPath" />
+      <col className="backupRecordColSize" />
+      <col className="backupRecordColStatus" />
+      <col className="backupRecordColActions" />
+    </colgroup>
   );
 }
 

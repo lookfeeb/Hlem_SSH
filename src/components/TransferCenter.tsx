@@ -10,6 +10,8 @@ import {
   UploadOutlined,
 } from "@ant-design/icons";
 import { Button, Drawer, Empty, Progress, Space, Tooltip } from "antd";
+import { useEffect, useMemo, useState } from "react";
+import { appApi } from "../api/appApi";
 import { formatBeijingDateTime, formatBytes } from "../lib/format";
 import {
   backupKindText,
@@ -27,11 +29,12 @@ import {
 } from "../lib/transferRecords";
 import type { BackupRecord, FileSaveRecord, RemoteSession, TransferInfo } from "../types";
 
+type LocalPathExistsMap = Record<string, boolean | undefined>;
+
 interface TransferCenterProps {
   open: boolean;
   transfers: TransferInfo[];
   sessions: RemoteSession[];
-  transferSessionIds: Record<string, string>;
   saveRecords: FileSaveRecord[];
   backupRecords: BackupRecord[];
   canUpload: boolean;
@@ -54,7 +57,6 @@ export function TransferCenter({
   open,
   transfers,
   sessions,
-  transferSessionIds,
   saveRecords,
   backupRecords,
   canUpload,
@@ -73,6 +75,46 @@ export function TransferCenter({
   onOpenDir,
 }: TransferCenterProps) {
   const total = transfers.length + saveRecords.length + backupRecords.length;
+  const [localPathExistsByTransferId, setLocalPathExistsByTransferId] = useState<LocalPathExistsMap>({});
+  const localPathCheckKey = useMemo(
+    () =>
+      transfers
+        .filter(shouldCheckTransferLocalPath)
+        .map((transfer) => [transfer.transferId, transfer.localPath, transfer.status, transfer.updatedAt].join("\u0000"))
+        .join("\u0001"),
+    [transfers],
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    if (!open) {
+      return () => {
+        disposed = true;
+      };
+    }
+    const targets = transfers
+      .filter(shouldCheckTransferLocalPath)
+      .map((transfer) => ({ transferId: transfer.transferId, localPath: transfer.localPath }));
+    if (targets.length === 0) {
+      setLocalPathExistsByTransferId({});
+      return () => {
+        disposed = true;
+      };
+    }
+    void Promise.all(
+      targets.map(async (target) => [target.transferId, await appApi.localPathExists(target.localPath)] as const),
+    )
+      .then((results) => {
+        if (disposed) return;
+        setLocalPathExistsByTransferId(Object.fromEntries(results));
+      })
+      .catch(() => {
+        if (!disposed) setLocalPathExistsByTransferId({});
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [localPathCheckKey, open]);
 
   async function handleFileSelect() {
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -134,7 +176,7 @@ export function TransferCenter({
             saveRecords,
             backupRecords,
             sessions,
-            transferSessionIds,
+            localPathExistsByTransferId,
             onPause,
             onResume,
             onCancel,
@@ -157,7 +199,7 @@ interface RenderAllRecordsProps {
   saveRecords: FileSaveRecord[];
   backupRecords: BackupRecord[];
   sessions: RemoteSession[];
-  transferSessionIds: Record<string, string>;
+  localPathExistsByTransferId: LocalPathExistsMap;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onCancel: (id: string) => void;
@@ -311,11 +353,17 @@ function renderTransferRecord(transfer: TransferInfo, props: RenderAllRecordsPro
   const running = transfer.status === "queued" || transfer.status === "running";
   const paused = transfer.status === "paused";
   const retryable = transfer.status === "failed" || transfer.status === "canceled";
-  const targetSession = sessionForTransfer(transfer, props.sessions, props.transferSessionIds);
+  const targetSession = sessionForTransfer(transfer, props.sessions);
   const targetConnected = Boolean(targetSession?.state === "connected" && targetSession.sftpId);
-  const retryDisabled = retryable && !targetConnected;
-  const retryTitle = retryDisabled ? "目标终端未连接" : transfer.direction === "upload" ? "重试上传" : "重新下载";
-  const detailTooltip = transferDetailTooltip(transfer, targetSession);
+  const localMissing =
+    shouldCheckTransferLocalPath(transfer) && props.localPathExistsByTransferId[transfer.transferId] === false;
+  const retryDisabled = retryable && (!targetConnected || (transfer.direction === "upload" && localMissing));
+  const retryTitle = retryDisabled
+    ? localMissing && transfer.direction === "upload"
+      ? "本地文件不存在"
+      : "目标终端未连接"
+    : transfer.direction === "upload" ? "重试上传" : "重新下载";
+  const detailTooltip = transferDetailTooltip(transfer, targetSession, localMissing);
 
   return (
     <Tooltip
@@ -334,6 +382,14 @@ function renderTransferRecord(transfer: TransferInfo, props: RenderAllRecordsPro
               <span className={`transferInlineStatus transferInlineStatus-${transferStatusTone(transfer)}`}>
                 {transferStatusText(transfer)}
               </span>
+              {localMissing && (
+                <>
+                  {" · "}
+                  <span className="transferInlineStatus transferInlineStatus-failed transferLocalMissingBadge">
+                    本地文件不存在
+                  </span>
+                </>
+              )}
             </span>
           </div>
           <Space size={4}>
@@ -385,7 +441,7 @@ function renderTransferRecord(transfer: TransferInfo, props: RenderAllRecordsPro
                   aria-label="打开文件夹"
                   icon={<FolderOpenOutlined />}
                   size="small"
-                  onClick={() => props.onOpenDir(transferTargetPath(transfer))}
+                  onClick={() => props.onOpenDir(transfer.localPath)}
                 />
               </Tooltip>
             )}
@@ -426,18 +482,22 @@ function renderTransferRecord(transfer: TransferInfo, props: RenderAllRecordsPro
 function sessionForTransfer(
   transfer: TransferInfo,
   sessions: RemoteSession[],
-  transferSessionIds: Record<string, string>,
 ) {
   return (
     sessions.find((session) => session.sftpId === transfer.sftpId) ??
-    sessions.find((session) => session.id === transferSessionIds[transfer.sftpId]) ??
+    sessions.find((session) => session.id === transfer.sessionId) ??
     null
   );
+}
+
+function shouldCheckTransferLocalPath(transfer: TransferInfo) {
+  return !isActiveTransfer(transfer) && transfer.localPath.trim().length > 0;
 }
 
 function transferDetailTooltip(
   transfer: TransferInfo,
   targetSession: RemoteSession | null,
+  localMissing: boolean,
 ) {
   return (
     <div className="detailHoverPanel transferDetailHoverPanel">
@@ -454,6 +514,12 @@ function transferDetailTooltip(
         <strong>{transferSourcePath(transfer)}</strong>
         <span>{transfer.direction === "upload" ? "目标" : "保存"}</span>
         <strong>{transferTargetPath(transfer)}</strong>
+        {localMissing && (
+          <>
+            <span>本地文件</span>
+            <strong className="detailHoverError">不存在：{transfer.localPath}</strong>
+          </>
+        )}
         <span>大小</span>
         <strong>{formatBytes(transfer.bytesDone)} / {formatBytes(transfer.bytesTotal)}</strong>
         <span>创建时间</span>

@@ -1,12 +1,65 @@
-use tauri::{AppHandle, State};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+
+use tauri::{AppHandle, Manager, State};
 
 use super::{with_store, AppResult, AppState};
 use crate::backup::{
-    download_cloud_backup, merge_configured_backup_records, prepare_backup_run, run_auto_backup,
-    run_configured_backup,
+    auto_backup_due_target_kinds, download_cloud_backup, merge_configured_backup_records,
+    prepare_backup_run, run_auto_backup, run_configured_backup,
 };
 use crate::config::ConfigSnapshot;
 use crate::errors::AppError;
+use crate::events;
+
+const AUTO_BACKUP_INITIAL_DELAY: Duration = Duration::from_secs(3);
+const AUTO_BACKUP_INTERVAL: Duration = Duration::from_secs(60);
+
+pub fn spawn_auto_backup_scheduler(app: AppHandle) {
+    let running = Arc::new(AtomicBool::new(false));
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(AUTO_BACKUP_INITIAL_DELAY).await;
+        loop {
+            if running
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                if let Err(error) = run_due_auto_backup(&app).await {
+                    if !matches!(error, AppError::VaultLocked | AppError::VaultNotFound) {
+                        eprintln!("[helm] auto backup failed: {error}");
+                    }
+                }
+                running.store(false, Ordering::Relaxed);
+            }
+            tokio::time::sleep(AUTO_BACKUP_INTERVAL).await;
+        }
+    });
+}
+
+async fn run_due_auto_backup(app: &AppHandle) -> AppResult<()> {
+    let state = app.state::<AppState>();
+    if state.needs_migration() {
+        return Ok(());
+    }
+    let target_kinds = with_store(&state, |store| {
+        let snapshot = store.snapshot()?;
+        Ok(auto_backup_due_target_kinds(
+            &snapshot.data.settings.backup,
+            &snapshot.data.backup_records,
+        ))
+    })?;
+    if target_kinds.is_empty() {
+        return Ok(());
+    }
+    let snapshot = backup_run_auto(state, target_kinds).await?;
+    events::emit(app, events::CONFIG_CHANGED, snapshot);
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn backup_run_now(state: State<'_, AppState>) -> AppResult<ConfigSnapshot> {
@@ -21,8 +74,7 @@ pub async fn backup_run_now(state: State<'_, AppState>) -> AppResult<ConfigSnaps
     Ok(snapshot)
 }
 
-#[tauri::command]
-pub async fn backup_run_auto(
+async fn backup_run_auto(
     state: State<'_, AppState>,
     target_kinds: Vec<String>,
 ) -> AppResult<ConfigSnapshot> {

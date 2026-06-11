@@ -10,16 +10,8 @@ import {
   getHostKeyPayload,
   notifyEditorSessionDisconnected,
   shouldSkipTerminalEntry,
-  sftpUnavailableMessage,
 } from "./appHelpers";
 import type { ConfigSnapshot, RemoteSession } from "../types";
-
-type OpenSftpResult = {
-  sftp: { sftpId: string } | null;
-  path: string;
-  files: RemoteSession["files"];
-  error: unknown;
-};
 
 type TerminalInfo = { terminalId: string };
 
@@ -35,8 +27,6 @@ type UseSessionRuntimeOptions = {
   applyConfigSnapshot: (snapshot: ConfigSnapshot) => void;
   registerTerminal: (terminalId: string, sessionId: string) => void;
   consumePendingTerminalEntries: (terminalId: string) => RemoteSession["terminal"];
-  openSftpWithFiles: (connectionId: string, initialPath: string, username: string) => Promise<OpenSftpResult>;
-  rememberTransferTarget: (sftpId: string, sessionId: string) => void;
   appendTerminal: (sessionId: string, kind: "system" | "error", content: string) => void;
 };
 
@@ -52,8 +42,6 @@ export function useSessionRuntime({
   applyConfigSnapshot,
   registerTerminal,
   consumePendingTerminalEntries,
-  openSftpWithFiles,
-  rememberTransferTarget,
   appendTerminal,
 }: UseSessionRuntimeOptions) {
   const [connectingSessionId, setConnectingSessionId] = useState<string | null>(null);
@@ -188,7 +176,7 @@ export function useSessionRuntime({
           !uiInitiatedConnectsRef.current.has(session.id) &&
           !session.terminalId
         ) {
-          void backfillExternalConnection(session.id, payload.connectionId, session.username, session.currentPath);
+          void backfillExternalConnection(session.id, payload.connectionId);
         }
         return {
           ...session,
@@ -202,11 +190,8 @@ export function useSessionRuntime({
   async function backfillExternalConnection(
     sessionId: string,
     connectionId: string,
-    username: string,
-    currentPath: string,
   ) {
     if (uiInitiatedConnectsRef.current.has(sessionId)) return;
-    const initialPath = initialRemotePath(username, currentPath);
     try {
       const terminal = await remoteApi.openTerminal(connectionId, 100, 30);
       registerTerminal(terminal.terminalId, sessionId);
@@ -214,21 +199,6 @@ export function useSessionRuntime({
     } catch (error) {
       appendTerminal(sessionId, "error", `终端不可用：${getErrorMessage(error)}`);
     }
-
-    openSftpWithFiles(connectionId, initialPath, username).then((sftpResult) => {
-      const sftp = sftpResult.sftp;
-      if (sftp) rememberTransferTarget(sftp.sftpId, sessionId);
-      updateSession(sessionId, (item) => ({
-        ...item,
-        currentPath: sftp ? sftpResult.path : item.currentPath,
-        sftpId: sftp?.sftpId ?? null,
-        files: sftpResult.files.length > 0 ? sftpResult.files : item.files,
-        terminal: sftpResult.error
-          ? [...item.terminal, createTerminalEntry("error", `SFTP 不可用：${sftpUnavailableMessage(sftpResult.error)}`)]
-          : item.terminal,
-      }));
-    });
-
     startTelemetry(connectionId, sessionId);
   }
 
@@ -276,7 +246,6 @@ export function useSessionRuntime({
         ],
       }));
       setConnectingSessionId(null);
-      openSftpInBackground(session, connectionId, initialPath);
       startTelemetry(connectionId, session.id);
 
       if (!terminal) throw new Error("SSH 已连接，但远端拒绝打开终端通道");
@@ -329,27 +298,6 @@ export function useSessionRuntime({
     if (pendingTerminalEntries.length) {
       updateSession(sessionId, (item) => ({ ...item, terminal: [...item.terminal, ...pendingTerminalEntries] }));
     }
-  }
-
-  function openSftpInBackground(session: RemoteSession, connectionId: string, initialPath: string) {
-    openSftpWithFiles(connectionId, initialPath, session.username).then((sftpResult) => {
-      if (abortedConnectSessionsRef.current.has(session.id)) return;
-      const sftp = sftpResult.sftp;
-      if (sftp) rememberTransferTarget(sftp.sftpId, session.id);
-      updateSession(session.id, (item) =>
-        item.connectionId === connectionId
-          ? {
-              ...item,
-              currentPath: sftp ? sftpResult.path : item.currentPath,
-              sftpId: sftp?.sftpId ?? null,
-              files: sftpResult.files.length > 0 ? sftpResult.files : item.files,
-              terminal: sftpResult.error
-                ? [...item.terminal, createTerminalEntry("error", `SFTP 不可用：${sftpUnavailableMessage(sftpResult.error)}`)]
-                : item.terminal,
-            }
-          : item,
-      );
-    });
   }
 
   function startTelemetry(connectionId: string, sessionId: string) {

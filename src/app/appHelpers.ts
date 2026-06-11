@@ -1,13 +1,6 @@
-import { remoteApi } from "../api/remoteApi";
 import { defaultRemoteHomePath, getErrorMessage, initialRemotePath } from "../lib/configMapping";
-import {
-  getBaseName as getRemoteBaseName,
-  joinPath as joinRemotePath,
-  resolveRemoteTargetPath,
-} from "../lib/path";
 import { editorChannelName, GLOBAL_EDITOR_CHANNEL, type EditorChannelMessage } from "../lib/editorChannel";
 import type {
-  BackupSettings,
   HostKeyVerification,
   RemoteSession,
   ServerTelemetry,
@@ -81,57 +74,6 @@ export function uploadConcurrency(count: number) {
   if (count <= 3) return Math.min(count, 2);
   if (count <= 8) return Math.min(count, Math.max(2, Math.floor(cores / 2)));
   return Math.min(12, Math.max(4, Math.floor(cores * 0.75)));
-}
-
-export function shouldRunAutoBackup(settings: BackupSettings, records: { status: string; createdAt: string; targetKind?: string }[]) {
-  return autoBackupDueTargetKinds(settings, records).length > 0;
-}
-
-export function autoBackupDueTargetKinds(settings: BackupSettings, records: { status: string; createdAt: string; targetKind?: string }[]) {
-  const interval = backupFrequencyMs(settings.frequency);
-  if (!interval) return [];
-  const targetKinds: string[] = [];
-  if (settings.autoEnabled && settings.localDirectory?.trim()) {
-    targetKinds.push("local");
-  }
-  if (settings.cloud.autoEnabled && isCloudBackupConfigured(settings.cloud)) {
-    targetKinds.push(settings.cloud.kind);
-  }
-  return targetKinds.filter((targetKind) => shouldRunTargetAutoBackup(targetKind, interval, records));
-}
-
-function shouldRunTargetAutoBackup(
-  targetKind: string,
-  interval: number,
-  records: { status: string; createdAt: string; targetKind?: string }[],
-) {
-  const lastSuccess = records
-    .filter((record) => record.status === "success" && record.targetKind === targetKind)
-    .map((record) => new Date(record.createdAt).getTime())
-    .filter((value) => Number.isFinite(value))
-    .sort((left, right) => right - left)[0];
-  if (!lastSuccess) return true;
-  return Date.now() - lastSuccess >= interval;
-}
-
-function isCloudBackupConfigured(cloud: BackupSettings["cloud"]) {
-  if (cloud.kind === "webdav") {
-    return cloud.webdav.endpoint.trim().length > 0;
-  }
-  return (
-    cloud.s3.endpoint.trim().length > 0 &&
-    cloud.s3.region.trim().length > 0 &&
-    cloud.s3.bucket.trim().length > 0 &&
-    cloud.s3.accessKeyId.trim().length > 0 &&
-    cloud.s3.secretAccessKey.trim().length > 0
-  );
-}
-
-function backupFrequencyMs(frequency: BackupSettings["frequency"]) {
-  if (frequency === "hourly") return 60 * 60 * 1000;
-  if (frequency === "daily") return 24 * 60 * 60 * 1000;
-  if (frequency === "weekly") return 7 * 24 * 60 * 60 * 1000;
-  return 0;
 }
 
 function appendTerminalStreamEntry(entries: TerminalEntry[], entry: TerminalEntry) {
@@ -209,23 +151,6 @@ function stripTerminalControls(value: string) {
 
 export function remoteSessionPath(session: Pick<RemoteSession, "username" | "currentPath">) {
   return initialRemotePath(session.username, session.currentPath);
-}
-
-export async function resolveSftpOperationTarget(sftpId: string, currentPath: string, sourcePath: string, value: string) {
-  const target = resolveRemoteTargetPath(currentPath, value);
-  if (target === "/" || (await isRemoteDirectory(sftpId, target))) {
-    return joinRemotePath(target, getRemoteBaseName(sourcePath));
-  }
-  return target;
-}
-
-async function isRemoteDirectory(sftpId: string, path: string) {
-  try {
-    await remoteApi.listFiles(sftpId, path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export function hasTelemetryData(telemetry: ServerTelemetry) {

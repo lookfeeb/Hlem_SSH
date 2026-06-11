@@ -17,6 +17,7 @@ export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: U
   const [migrationNeeded, setMigrationNeeded] = useState(false);
   const [migrationBusy, setMigrationBusy] = useState(false);
   const [migrationError, setMigrationError] = useState<string>();
+  const [bootstrapError, setBootstrapError] = useState<string>();
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const mountedRef = useMountedRef();
   const requestSafeAnimationFrame = useAnimationFrameRegistry();
@@ -27,6 +28,7 @@ export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: U
 
   async function initializeApp() {
     try {
+      setBootstrapError(undefined);
       const needsMigration = await vaultApi.needsMigration();
       if (needsMigration) {
         if (!mountedRef.current) return;
@@ -38,7 +40,9 @@ export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: U
       applySnapshot(snapshot);
       setAppReady(true);
     } catch (error) {
+      const message = getErrorMessage(error);
       console.error("[helm] Failed to load config snapshot:", error);
+      if (mountedRef.current) setBootstrapError(message);
     } finally {
       signalFrontendReady();
       void initializeAppMetadata();
@@ -95,6 +99,7 @@ export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: U
     migrationNeeded,
     migrationBusy,
     migrationError,
+    bootstrapError,
     appInfo,
     setAppInfo,
     handleMigrate,

@@ -31,133 +31,65 @@ pub(super) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-pub(super) async fn create_remote_dir_all(sftp: &SftpSession, path: &str) -> AppResult<()> {
-    let normalized = normalize_remote_path(path);
-    if normalized == "/" {
+pub(super) fn build_remote_mkdir_command(path: &str) -> String {
+    remote_file_command(r#"mkdir -p -- "$1""#, &[normalize_remote_path(path)])
+}
+
+pub(super) fn build_remote_create_file_command(path: &str) -> String {
+    remote_file_command(r#": > "$1""#, &[normalize_remote_path(path)])
+}
+
+pub(super) fn build_remote_delete_command(path: &str, recursive: bool) -> String {
+    let script = if recursive {
+        r#"[ -e "$1" ] || [ -L "$1" ] || { printf "%s\n" "路径不存在: $1" >&2; exit 1; }; rm -rf -- "$1""#
+    } else {
+        r#"[ -e "$1" ] || [ -L "$1" ] || { printf "%s\n" "路径不存在: $1" >&2; exit 1; }; if [ -d "$1" ] && [ ! -L "$1" ]; then rmdir -- "$1"; else rm -f -- "$1"; fi"#
+    };
+    remote_file_command(script, &[normalize_remote_path(path)])
+}
+
+pub(super) fn build_remote_rename_command(from: &str, to: &str) -> String {
+    remote_file_command(
+        r#"[ -e "$1" ] || [ -L "$1" ] || { printf "%s\n" "路径不存在: $1" >&2; exit 1; }; if [ -d "$2" ] && [ ! -L "$2" ]; then printf "%s\n" "目标已存在且是目录: $2" >&2; exit 1; fi; mv -- "$1" "$2""#,
+        &[normalize_remote_path(from), normalize_remote_path(to)],
+    )
+}
+
+pub(super) fn build_remote_copy_command(from: &str, to: &str) -> String {
+    remote_file_command(
+        r#"[ -e "$1" ] || [ -L "$1" ] || { printf "%s\n" "路径不存在: $1" >&2; exit 1; }; if [ -d "$1" ] && [ ! -L "$1" ]; then mkdir -p -- "$2" && cp -a -- "$1"/. "$2"/; else if [ -d "$2" ] && [ ! -L "$2" ]; then printf "%s\n" "目标已存在且是目录: $2" >&2; exit 1; fi; cp -a -- "$1" "$2"; fi"#,
+        &[normalize_remote_path(from), normalize_remote_path(to)],
+    )
+}
+
+fn remote_file_command(script: &str, args: &[String]) -> String {
+    let mut command = format!("sh -lc {} sh", shell_quote(script));
+    for arg in args {
+        command.push(' ');
+        command.push_str(&shell_quote(arg));
+    }
+    command
+}
+
+pub(super) fn ensure_remote_file_command_success(
+    result: ExecResult,
+    action: &str,
+) -> AppResult<()> {
+    if result.timed_out {
+        return Err(AppError::Remote(format!("{action}超时")));
+    }
+    if result.exit_status.unwrap_or(1) == 0 {
         return Ok(());
     }
-    let mut current = String::new();
-    for part in normalized.split('/').filter(|part| !part.is_empty()) {
-        current.push('/');
-        current.push_str(part);
-        match sftp
-            .try_exists(current.clone())
-            .await
-            .map_err(remote_error)?
-        {
-            true => {
-                let metadata = sftp
-                    .symlink_metadata(current.clone())
-                    .await
-                    .map_err(remote_error)?;
-                if !metadata.file_type().is_dir() {
-                    return Err(AppError::InvalidInput(format!("{current} 不是目录")));
-                }
-            }
-            false => sftp
-                .create_dir(current.clone())
-                .await
-                .map_err(remote_error)?,
-        }
-    }
-    Ok(())
-}
-
-pub(super) async fn copy_remote_path(sftp: &SftpSession, from: &str, to: &str) -> AppResult<()> {
-    let source = normalize_remote_path(from);
-    let target = normalize_remote_path(to);
-    let metadata = sftp
-        .symlink_metadata(source.clone())
-        .await
-        .map_err(remote_error)?;
-    if !metadata.file_type().is_dir() {
-        return copy_remote_file(sftp, &source, &target).await;
-    }
-
-    create_remote_dir_all(sftp, &target).await?;
-    let mut dirs = vec![(source, target)];
-    let mut index = 0;
-    while index < dirs.len() {
-        let (current_source, current_target) = dirs[index].clone();
-        index += 1;
-        let entries = sftp
-            .read_dir(current_source.clone())
-            .await
-            .map_err(remote_error)?;
-        for entry in entries {
-            let child_source = join_remote_path(&current_source, &entry.file_name());
-            let child_target = join_remote_path(&current_target, &entry.file_name());
-            if entry.file_type().is_dir() {
-                create_remote_dir_all(sftp, &child_target).await?;
-                dirs.push((child_source, child_target));
-            } else {
-                copy_remote_file(sftp, &child_source, &child_target).await?;
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(super) async fn copy_remote_file(sftp: &SftpSession, from: &str, to: &str) -> AppResult<()> {
-    let mut source = sftp.open(from.to_string()).await.map_err(remote_error)?;
-    let mut target = sftp
-        .open_with_flags(
-            to.to_string(),
-            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-        )
-        .await
-        .map_err(remote_error)?;
-    let mut buffer = vec![0u8; 64 * 1024];
-    loop {
-        let read = source.read(&mut buffer).await.map_err(remote_error)?;
-        if read == 0 {
-            break;
-        }
-        target
-            .write_all(&buffer[..read])
-            .await
-            .map_err(remote_error)?;
-    }
-    target.flush().await.map_err(remote_error)?;
-    Ok(())
-}
-
-pub(super) async fn delete_remote_path(
-    sftp: &SftpSession,
-    path: &str,
-    recursive: bool,
-) -> AppResult<()> {
-    let path = normalize_remote_path(path);
-    let metadata = sftp
-        .symlink_metadata(path.clone())
-        .await
-        .map_err(remote_error)?;
-    if !metadata.file_type().is_dir() {
-        return sftp.remove_file(path).await.map_err(remote_error);
-    }
-    if !recursive {
-        return sftp.remove_dir(path).await.map_err(remote_error);
-    }
-
-    let mut dirs = vec![path];
-    let mut index = 0;
-    while index < dirs.len() {
-        let current = dirs[index].clone();
-        index += 1;
-        let entries = sftp.read_dir(current.clone()).await.map_err(remote_error)?;
-        for entry in entries {
-            let child = join_remote_path(&current, &entry.file_name());
-            if entry.file_type().is_dir() {
-                dirs.push(child);
-            } else {
-                sftp.remove_file(child).await.map_err(remote_error)?;
-            }
-        }
-    }
-    for dir in dirs.into_iter().rev() {
-        sftp.remove_dir(dir).await.map_err(remote_error)?;
-    }
-    Ok(())
+    let detail = result
+        .stderr
+        .trim()
+        .lines()
+        .next()
+        .or_else(|| result.stdout.trim().lines().next())
+        .filter(|line| !line.is_empty())
+        .unwrap_or("命令执行失败");
+    Err(AppError::Remote(format!("{action}失败：{detail}")))
 }
 
 #[derive(Default)]
@@ -358,5 +290,29 @@ pub(super) fn join_remote_path(parent: &str, name: &str) -> String {
         format!("/{name}")
     } else {
         format!("{}/{}", parent.trim_end_matches('/'), name)
+    }
+}
+
+pub(super) fn remote_base_name(path: &str) -> String {
+    normalize_remote_path(path)
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .last()
+        .unwrap_or_default()
+        .to_string()
+}
+
+pub(super) fn resolve_remote_target_path(current_path: &str, value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return normalize_remote_path(current_path);
+    }
+    if trimmed.starts_with('/') {
+        normalize_remote_path(trimmed)
+    } else {
+        normalize_remote_path(&join_remote_path(
+            &normalize_remote_path(current_path),
+            trimmed,
+        ))
     }
 }

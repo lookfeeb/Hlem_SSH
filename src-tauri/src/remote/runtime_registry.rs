@@ -169,16 +169,26 @@ impl RemoteRuntime {
 
         self.sftp_sessions.write().await.clear();
 
-        let transfer_records: Vec<TransferRecord> = self
+        let transfer_ids: Vec<String> = self
             .transfers
-            .write()
+            .read()
             .await
-            .drain()
-            .map(|(_, record)| record)
+            .iter()
+            .filter_map(|(id, record)| {
+                matches!(
+                    record.info.status,
+                    TaskStatus::Queued | TaskStatus::Running | TaskStatus::Paused
+                )
+                .then(|| id.clone())
+            })
             .collect();
-        for record in transfer_records {
-            cancel_transfer_record(app, record, "工作区已锁定");
+        for id in transfer_ids {
+            let _ = self
+                .cancel_transfer_in_place(app, &id, "工作区已锁定")
+                .await;
         }
+        self.prune_transfer_history().await;
+        let _ = self.persist_transfer_history().await;
 
         let telemetry_records: Vec<TelemetryJobRecord> = self
             .telemetry_jobs
@@ -254,14 +264,19 @@ impl RemoteRuntime {
             .read()
             .await
             .iter()
-            .filter_map(|(id, record)| sftp_ids.contains(&record.info.sftp_id).then(|| id.clone()))
+            .filter_map(|(id, record)| {
+                (sftp_ids.contains(&record.info.sftp_id)
+                    && matches!(
+                        record.info.status,
+                        TaskStatus::Queued | TaskStatus::Running | TaskStatus::Paused
+                    ))
+                .then(|| id.clone())
+            })
             .collect();
-        let mut transfers = self.transfers.write().await;
         for id in transfer_ids {
-            if let Some(record) = transfers.remove(&id) {
-                cancel_transfer_record(app, record, reason);
-                crate::errors::forget_resource_label(&id);
-            }
+            let _ = self.cancel_transfer_in_place(app, &id, reason).await;
         }
+        self.prune_transfer_history().await;
+        let _ = self.persist_transfer_history().await;
     }
 }

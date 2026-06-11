@@ -61,6 +61,11 @@
 }
 
 /* ─── 添加/编辑常用命令 Modal ───────────────────────────────────────────── */
+.commandDialogModal .ant-modal-container,
+.ant-modal-container:has(.commandDialogModal) {
+  padding: 0 !important;
+}
+
 .commandDialogModal .ant-modal-content {
   border: 1px solid rgba(232, 238, 246, .9) !important;
   border-radius: var(--radius-xl) !important;
@@ -136,6 +141,12 @@
   color: #ffffff;
   font-size: 20px;
   box-shadow: 0 10px 22px -8px rgba(99, 102, 241, .55);
+  animation: headerIconPulse 2.5s ease-in-out infinite;
+}
+
+@keyframes headerIconPulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 10px 22px -8px rgba(99, 102, 241, .55); }
+  50%      { transform: scale(1.04); box-shadow: 0 12px 28px -6px rgba(99, 102, 241, .7); }
 }
 
 .commandDialogHeaderMeta {
@@ -168,27 +179,38 @@
 }
 
 .commandDialogForm {
+  display: grid;
+  gap: 14px;
   padding: 18px 26px 6px;
 }
 
+.commandDialogForm .ant-form-item {
+  margin-bottom: 0 !important;
+}
+
+/* 徽章化标签 */
 .commandDialogFieldLabel {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: .2px;
+  font-size: 11px;
+  font-weight: 800;
   color: var(--text-secondary);
+  background: var(--bg-raised);
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-light);
+  margin-bottom: 2px;
 }
 
 .commandDialogFieldLabel .anticon {
-  font-size: 13px;
+  font-size: 12px;
   color: #6366f1;
 }
 
 .commandDialogModal .ant-form-item-label > label {
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 800;
   color: var(--text-secondary);
   letter-spacing: .2px;
 }
@@ -198,6 +220,8 @@
   border-radius: var(--radius) !important;
   border: 1px solid rgba(221, 230, 241, .9) !important;
   background: rgba(255, 255, 255, .85) !important;
+  color: var(--text-primary) !important;
+  caret-color: var(--accent-2) !important;
   transition: all .2s cubic-bezier(.4, 0, .2, 1) !important;
 }
 
@@ -205,6 +229,8 @@
   border: 0 !important;
   background: transparent !important;
   box-shadow: none !important;
+  color: var(--text-primary) !important;
+  caret-color: var(--accent-2) !important;
 }
 
 .commandDialogModal .ant-input:hover,
@@ -215,20 +241,106 @@
 
 .commandDialogModal .ant-input:focus,
 .commandDialogModal .ant-input-affix-wrapper-focused {
-  border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, .15) !important;
+  border-color: var(--accent-2) !important;
+  box-shadow: var(--shadow-glow) !important;
   background: #ffffff !important;
 }
 
+.commandNameField {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.commandNameInput {
+  width: 100%;
+  height: 42px;
+  padding: 0 68px 0 14px;
+  border: 1px solid rgba(221, 230, 241, .9);
+  border-radius: var(--radius);
+  outline: none;
+  background: rgba(255, 255, 255, .9);
+  color: #0f172a;
+  -webkit-text-fill-color: #0f172a;
+  caret-color: #2563eb;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 42px;
+  transition: border-color .2s cubic-bezier(.4, 0, .2, 1), box-shadow .2s cubic-bezier(.4, 0, .2, 1), background .2s cubic-bezier(.4, 0, .2, 1);
+}
+
+.commandNameInput::placeholder {
+  color: #94a3b8;
+  -webkit-text-fill-color: #94a3b8;
+  font-weight: 600;
+}
+
+.commandNameInput:hover {
+  border-color: rgba(99, 102, 241, .4);
+  background: #ffffff;
+}
+
+.commandNameInput:focus {
+  border-color: var(--accent-2);
+  box-shadow: var(--shadow-glow);
+  background: #ffffff;
+}
+
+.commandNameCounter {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 16px;
+  pointer-events: none;
+}
+
+/* 字数限制胶囊徽章 */
+.commandDialogModal .ant-input-show-count-suffix {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 800;
+  background: var(--bg-raised);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
 .commandDialogModal .commandDialogTextarea {
-  min-height: 168px !important;
+  border: 1px solid rgba(221, 230, 241, .9) !important;
+  border-radius: var(--radius) !important;
+  background: rgba(248, 250, 252, .9) !important;
+  color: #0f172a !important;
+  -webkit-text-fill-color: #0f172a !important;
+  caret-color: #2563eb !important;
+  min-height: 150px !important;
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace !important;
-  font-size: 12.5px !important;
+  font-size: 13px !important;
   line-height: 1.6 !important;
-  padding: 10px 12px !important;
+  padding: 12px 14px !important;
+  box-shadow: none !important;
   scrollbar-width: thin;
-  scrollbar-color: rgba(99, 102, 241, 0) transparent;
+  scrollbar-color: rgba(99, 102, 241, .28) transparent;
   transition: all .25s cubic-bezier(.4, 0, .2, 1) !important;
+}
+
+.commandDialogModal .commandDialogTextarea:focus {
+  border-color: var(--accent-2) !important;
+  background: #ffffff !important;
+  color: #0f172a !important;
+  -webkit-text-fill-color: #0f172a !important;
+  box-shadow: var(--shadow-glow) !important;
+}
+
+.commandDialogModal .commandDialogTextarea::placeholder {
+  color: #94a3b8 !important;
+  -webkit-text-fill-color: #94a3b8 !important;
 }
 
 .commandDialogModal .commandDialogTextarea::-webkit-scrollbar {
@@ -242,11 +354,13 @@
 
 .commandDialogModal .commandDialogTextarea::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: transparent;
+  background: rgba(99, 102, 241, .18);
   transition: background .2s;
 }
 
 .commandDialogModal .commandDialogTextarea:hover {
+  border-color: rgba(99, 102, 241, .4) !important;
+  background: #ffffff !important;
   scrollbar-color: rgba(99, 102, 241, .35) transparent;
 }
 
@@ -628,6 +742,12 @@
   box-sizing: border-box;
 }
 
+.transferDetailHoverPanel {
+  width: 420px;
+  min-width: 420px;
+  max-width: 420px;
+}
+
 .detailHoverTitle {
   overflow: hidden;
   min-width: 0;
@@ -687,6 +807,14 @@
   color: #0f172a;
   font-weight: 700;
   word-break: break-all;
+}
+
+.transferDetailHoverPanel .detailHoverGrid {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.transferDetailHoverPanel .detailHoverGrid strong {
+  overflow-wrap: anywhere;
 }
 
 .detailHoverBadge {

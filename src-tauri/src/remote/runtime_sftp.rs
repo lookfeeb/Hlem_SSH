@@ -167,10 +167,35 @@ impl RemoteRuntime {
         Ok(None)
     }
 
-    pub async fn sftp_mkdir(&self, app: &AppHandle, sftp_id: &str, path: String) -> AppResult<()> {
+    pub async fn sftp_resolve_target(
+        &self,
+        sftp_id: &str,
+        current_path: String,
+        source_path: String,
+        value: String,
+    ) -> AppResult<String> {
         let sftp = self.sftp_session(sftp_id).await?;
+        let target = resolve_remote_target_path(&current_path, &value);
+        let is_directory = target == "/"
+            || sftp
+                .symlink_metadata(target.clone())
+                .await
+                .map(|metadata| metadata.file_type().is_dir())
+                .unwrap_or(false);
+        if is_directory {
+            let name = remote_base_name(&source_path);
+            if name.is_empty() {
+                return Ok(target);
+            }
+            return Ok(normalize_remote_path(&join_remote_path(&target, &name)));
+        }
+        Ok(target)
+    }
+
+    pub async fn sftp_mkdir(&self, app: &AppHandle, sftp_id: &str, path: String) -> AppResult<()> {
         let path = normalize_remote_path(&path);
-        create_remote_dir_all(&sftp, &path).await?;
+        self.run_sftp_file_command(sftp_id, build_remote_mkdir_command(&path), "创建目录")
+            .await?;
         emit_sftp_changed(app, sftp_id, &path);
         Ok(())
     }
@@ -181,16 +206,13 @@ impl RemoteRuntime {
         sftp_id: &str,
         path: String,
     ) -> AppResult<()> {
-        let sftp = self.sftp_session(sftp_id).await?;
         let path = normalize_remote_path(&path);
-        let mut remote = sftp
-            .open_with_flags(
-                path.clone(),
-                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-            )
-            .await
-            .map_err(remote_error)?;
-        remote.flush().await.map_err(remote_error)?;
+        self.run_sftp_file_command(
+            sftp_id,
+            build_remote_create_file_command(&path),
+            "创建文件",
+        )
+        .await?;
         emit_sftp_changed(app, sftp_id, &path);
         Ok(())
     }
@@ -202,10 +224,14 @@ impl RemoteRuntime {
         path: String,
         recursive: bool,
     ) -> AppResult<()> {
-        let sftp = self.sftp_session(sftp_id).await?;
         let path = normalize_remote_path(&path);
         ensure_not_root_path(&path, "不能删除根目录")?;
-        delete_remote_path(&sftp, &path, recursive).await?;
+        self.run_sftp_file_command(
+            sftp_id,
+            build_remote_delete_command(&path, recursive),
+            "删除",
+        )
+        .await?;
         emit_sftp_changed(app, sftp_id, &path);
         Ok(())
     }
@@ -223,17 +249,13 @@ impl RemoteRuntime {
         if from == to {
             return Ok(());
         }
-        let sftp = self.sftp_session(sftp_id).await?;
-        let metadata = sftp
-            .symlink_metadata(from.clone())
-            .await
-            .map_err(remote_error)?;
-        if metadata.file_type().is_dir() {
-            ensure_not_same_or_child_path(&from, &to, "不能把目录移动到自身或子目录")?;
-        }
-        sftp.rename(from.clone(), to.clone())
-            .await
-            .map_err(remote_error)?;
+        ensure_not_same_or_child_path(&from, &to, "不能把目录移动到自身或子目录")?;
+        self.run_sftp_file_command(
+            sftp_id,
+            build_remote_rename_command(&from, &to),
+            "移动",
+        )
+        .await?;
         emit_sftp_changed(app, sftp_id, &from);
         emit_sftp_changed(app, sftp_id, &to);
         Ok(())
@@ -246,21 +268,15 @@ impl RemoteRuntime {
         from: String,
         to: String,
     ) -> AppResult<()> {
-        let sftp = self.sftp_session(sftp_id).await?;
         let from = normalize_remote_path(&from);
         let to = normalize_remote_path(&to);
         ensure_not_root_path(&from, "不能复制根目录")?;
         if from == to {
             return Ok(());
         }
-        let metadata = sftp
-            .symlink_metadata(from.clone())
-            .await
-            .map_err(remote_error)?;
-        if metadata.file_type().is_dir() {
-            ensure_not_same_or_child_path(&from, &to, "不能把目录复制到自身或子目录")?;
-        }
-        copy_remote_path(&sftp, &from, &to).await?;
+        ensure_not_same_or_child_path(&from, &to, "不能把目录复制到自身或子目录")?;
+        self.run_sftp_file_command(sftp_id, build_remote_copy_command(&from, &to), "复制")
+            .await?;
         emit_sftp_changed(app, sftp_id, &from);
         emit_sftp_changed(app, sftp_id, &to);
         Ok(())
@@ -310,6 +326,19 @@ impl RemoteRuntime {
         remote.flush().await.map_err(remote_error)?;
         emit_sftp_changed(app, sftp_id, &path);
         Ok(())
+    }
+
+    async fn run_sftp_file_command(
+        &self,
+        sftp_id: &str,
+        command: String,
+        action: &str,
+    ) -> AppResult<()> {
+        let connection_id = self.sftp_record(sftp_id).await?.info.connection_id;
+        let result = self
+            .exec_on_connection(&connection_id, command, Some(SFTP_FILE_OPERATION_TIMEOUT_MS))
+            .await?;
+        ensure_remote_file_command_success(result, action)
     }
 }
 

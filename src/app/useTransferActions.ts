@@ -1,15 +1,12 @@
 import { remoteApi } from "../api/remoteApi";
 import { getErrorCode, getErrorMessage } from "../lib/configMapping";
 import type { MutableRefObject } from "react";
-import type { RemoteSession, TransferInfo } from "../types";
+import type { RemoteSession, TransferHistorySnapshot, TransferInfo } from "../types";
 
 type TransferStateApi = {
   transfersRef: MutableRefObject<TransferInfo[]>;
-  transferSessionIdsRef: MutableRefObject<Record<string, string>>;
   setPersistedTransfers: (updater: TransferInfo[] | ((current: TransferInfo[]) => TransferInfo[])) => void;
-  setPersistedTransferSessionIds: (
-    updater: Record<string, string> | ((current: Record<string, string>) => Record<string, string>),
-  ) => void;
+  applyTransferHistorySnapshot: (snapshot: TransferHistorySnapshot) => void;
 };
 
 type UseTransferActionsOptions = TransferStateApi & {
@@ -21,15 +18,12 @@ type UseTransferActionsOptions = TransferStateApi & {
 export function useTransferActions({
   sessionsRef,
   transfersRef,
-  transferSessionIdsRef,
   setPersistedTransfers,
-  setPersistedTransferSessionIds,
+  applyTransferHistorySnapshot,
   activeSessionId,
   appendTerminal,
 }: UseTransferActionsOptions) {
   function upsertTransfer(payload: TransferInfo) {
-    const ownerSessionId = sessionsRef.current.find((session) => session.sftpId === payload.sftpId)?.id;
-    if (ownerSessionId) rememberTransferTarget(payload.sftpId, ownerSessionId);
     setPersistedTransfers((current) => {
       const existing = current.findIndex((transfer) => transfer.transferId === payload.transferId);
       if (existing === -1) return [payload, ...current];
@@ -39,17 +33,10 @@ export function useTransferActions({
     });
   }
 
-  function rememberTransferTarget(sftpId: string, sessionId: string) {
-    setPersistedTransferSessionIds((current) => {
-      if (current[sftpId] === sessionId) return current;
-      return { ...current, [sftpId]: sessionId };
-    });
-  }
-
   function sessionForTransfer(transfer: TransferInfo) {
     return (
       sessionsRef.current.find((session) => session.sftpId === transfer.sftpId) ??
-      sessionsRef.current.find((session) => session.id === transferSessionIdsRef.current[transfer.sftpId]) ??
+      sessionsRef.current.find((session) => session.id === transfer.sessionId) ??
       null
     );
   }
@@ -101,7 +88,6 @@ export function useTransferActions({
         targetSession.sftpId === transfer.sftpId
           ? await retryExistingTransfer(transfer)
           : await restartTransferOnSession(transfer, targetSession.sftpId);
-      rememberTransferTarget(next.sftpId, targetSession.id);
       setPersistedTransfers((current) => [next, ...current.filter((transfer) => transfer.transferId !== transferId)]);
     } catch (error) {
       appendTerminal(targetSession.id, "error", getErrorMessage(error));
@@ -132,7 +118,7 @@ export function useTransferActions({
   async function removeTransfer(transferId: string) {
     setPersistedTransfers((current) => current.filter((transfer) => transfer.transferId !== transferId));
     try {
-      await remoteApi.removeTransfer(transferId);
+      applyTransferHistorySnapshot(await remoteApi.removeTransfer(transferId));
     } catch {
       // 后端清理失败不影响前端已移除的条目。
     }
@@ -140,7 +126,6 @@ export function useTransferActions({
 
   return {
     upsertTransfer,
-    rememberTransferTarget,
     pauseTransfer,
     resumeTransfer,
     cancelTransfer,

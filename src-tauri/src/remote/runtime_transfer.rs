@@ -50,13 +50,10 @@ impl RemoteRuntime {
     }
 
     pub async fn transfer_cancel(&self, app: &AppHandle, transfer_id: &str) -> AppResult<()> {
-        let record = self
-            .transfers
-            .write()
-            .await
-            .remove(transfer_id)
-            .ok_or_else(|| AppError::missing_transfer(transfer_id))?;
-        cancel_transfer_record(app, record, "传输已取消");
+        self.cancel_transfer_in_place(app, transfer_id, "传输已取消")
+            .await?;
+        self.prune_transfer_history().await;
+        let _ = self.persist_transfer_history().await;
         Ok(())
     }
 
@@ -76,8 +73,11 @@ impl RemoteRuntime {
         record.info.status = TaskStatus::Paused;
         record.info.speed_kbps = 0.0;
         record.info.updated_at = now();
-        events::emit(app, events::TRANSFER_PROGRESS, record.info.clone());
-        Ok(record.info.clone())
+        let info = record.info.clone();
+        events::emit(app, events::TRANSFER_PROGRESS, info.clone());
+        drop(transfers);
+        let _ = self.persist_transfer_history().await;
+        Ok(info)
     }
 
     pub async fn transfer_resume(
@@ -95,11 +95,18 @@ impl RemoteRuntime {
         record.paused.store(false, Ordering::Relaxed);
         record.info.status = TaskStatus::Running;
         record.info.updated_at = now();
-        events::emit(app, events::TRANSFER_PROGRESS, record.info.clone());
-        Ok(record.info.clone())
+        let info = record.info.clone();
+        events::emit(app, events::TRANSFER_PROGRESS, info.clone());
+        drop(transfers);
+        let _ = self.persist_transfer_history().await;
+        Ok(info)
     }
 
-    pub async fn transfer_remove(&self, _app: &AppHandle, transfer_id: &str) -> AppResult<()> {
+    pub async fn transfer_remove(
+        &self,
+        _app: &AppHandle,
+        transfer_id: &str,
+    ) -> AppResult<TransferHistorySnapshot> {
         if let Some(mut record) = self.transfers.write().await.remove(transfer_id) {
             if !matches!(
                 record.info.status,
@@ -111,7 +118,7 @@ impl RemoteRuntime {
                 }
             }
         }
-        Ok(())
+        self.persist_transfer_history().await
     }
 
     pub async fn transfer_retry(
@@ -130,7 +137,32 @@ impl RemoteRuntime {
         request.resume = true;
         let next = self.start_transfer(app, request).await?;
         self.transfers.write().await.remove(transfer_id);
+        let _ = self.persist_transfer_history().await;
         Ok(next)
+    }
+
+    pub(super) async fn cancel_transfer_in_place(
+        &self,
+        app: &AppHandle,
+        transfer_id: &str,
+        reason: &str,
+    ) -> AppResult<TransferInfo> {
+        let mut transfers = self.transfers.write().await;
+        let record = transfers
+            .get_mut(transfer_id)
+            .ok_or_else(|| AppError::missing_transfer(transfer_id))?;
+        record.cancel.store(true, Ordering::Relaxed);
+        if let Some(handle) = record.handle.take() {
+            handle.abort();
+        }
+        record.info.status = TaskStatus::Canceled;
+        record.info.speed_kbps = 0.0;
+        record.info.error = Some(reason.to_string());
+        record.info.updated_at = now();
+        let info = record.info.clone();
+        events::emit(app, events::TRANSFER_FAILED, info.clone());
+        crate::errors::forget_resource_label(transfer_id);
+        Ok(info)
     }
     pub(super) async fn start_transfer(
         &self,
@@ -138,11 +170,14 @@ impl RemoteRuntime {
         mut request: TransferRequest,
     ) -> AppResult<TransferInfo> {
         request.remote_path = normalize_remote_path(&request.remote_path);
-        let sftp = self.sftp_session(&request.sftp_id).await?;
+        let sftp_record = self.sftp_record(&request.sftp_id).await?;
+        let connection = self.connection(&sftp_record.info.connection_id).await?;
+        let sftp = sftp_record.session.clone();
         ensure_transfer_overwrite(&sftp, &request).await?;
         let bytes_total = transfer_total_bytes(&sftp, &request).await.unwrap_or(0);
         let info = TransferInfo {
             transfer_id: Uuid::new_v4().to_string(),
+            session_id: connection.info.session_id,
             sftp_id: request.sftp_id.clone(),
             direction: request.direction.clone(),
             local_path: request.local_path.clone(),
@@ -195,6 +230,7 @@ impl RemoteRuntime {
             },
         );
         events::emit(app, events::TRANSFER_PROGRESS, info.clone());
+        let _ = self.persist_transfer_history().await;
         Ok(info)
     }
 
@@ -242,6 +278,7 @@ impl RemoteRuntime {
             events::emit(app, events::TRANSFER_COMPLETED, record.info.clone());
         }
         self.prune_transfer_history().await;
+        let _ = self.persist_transfer_history().await;
     }
 
     pub(super) async fn mark_transfer_failed(
@@ -258,6 +295,7 @@ impl RemoteRuntime {
             events::emit(app, events::TRANSFER_FAILED, record.info.clone());
         }
         self.prune_transfer_history().await;
+        let _ = self.persist_transfer_history().await;
     }
 
     pub(super) async fn prune_transfer_history(&self) {

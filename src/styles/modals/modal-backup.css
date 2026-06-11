@@ -52,48 +52,98 @@
   height: 0;
 }
 
-/* ─── 已备份表格：滚动条悬停隐式显示 ─────────────────────────────────────── */
-.backupRecordTable .ant-table-body {
+/* ─── 已备份表格：表头固定，列表内部隐藏式滚动 ───────────────────────────── */
+.backupRecordTableFrame {
+  overflow: hidden;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.backupRecordTable {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  color: #334155;
+  font-size: 12px;
+}
+
+.backupRecordTable th,
+.backupRecordTable td {
+  height: 36px;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.backupRecordTable th {
+  background: #f8fafc;
+  color: #64748b;
+  font-weight: 700;
+}
+
+.backupRecordTableBody tr:last-child td {
+  border-bottom: 0;
+}
+
+.backupRecordTableRow:hover > td {
+  background: #f8fafc;
+}
+
+.backupRecordTableBodyScroll {
+  max-height: 180px;
+  overflow-x: hidden;
+  overflow-y: auto;
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
   transition: scrollbar-color .18s ease;
 }
 
-.backupRecordTable .ant-table-body::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+.backupRecordTableBodyScroll:hover,
+.backupRecordTableBodyScroll:focus-within {
+  scrollbar-color: rgba(99, 102, 241, .35) transparent;
 }
 
-.backupRecordTable .ant-table-body::-webkit-scrollbar-track {
+.backupRecordTableBodyScroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.backupRecordTableBodyScroll::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.backupRecordTable .ant-table-body::-webkit-scrollbar-thumb {
+.backupRecordTableBodyScroll::-webkit-scrollbar-thumb {
   background: transparent;
   border-radius: 8px;
   transition: background-color .18s ease;
 }
 
-.backupRecordTable .ant-table-body::-webkit-scrollbar-corner {
-  background: transparent;
-}
-
-.backupRecordTable:hover .ant-table-body,
-.backupRecordTable .ant-table-body:hover,
-.backupRecordTable .ant-table-body:focus-within {
-  scrollbar-color: rgba(99, 102, 241, .35) transparent;
-}
-
-.backupRecordTable:hover .ant-table-body::-webkit-scrollbar-thumb {
+.backupRecordTableBodyScroll:hover::-webkit-scrollbar-thumb,
+.backupRecordTableBodyScroll:focus-within::-webkit-scrollbar-thumb {
   background: rgba(99, 102, 241, .28);
 }
 
-.backupRecordTable .ant-table-body::-webkit-scrollbar-thumb:hover {
+.backupRecordTableBodyScroll::-webkit-scrollbar-thumb:hover {
   background: rgba(99, 102, 241, .55);
 }
 
-.backupRecordTable .ant-table-row:hover > td {
-  background: #f8fafc !important;
+.backupRecordColTime { width: 142px; }
+.backupRecordColFile { width: 180px; }
+.backupRecordColSize { width: 82px; }
+.backupRecordColStatus { width: 84px; }
+.backupRecordColActions { width: 84px; }
+
+.backupRecordCellEllipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupRecordTableEmptyRow td {
+  height: 72px;
+  color: #94a3b8;
+  text-align: center;
 }
 
 .backupRecordTable .ant-btn {

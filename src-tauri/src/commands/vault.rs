@@ -9,7 +9,7 @@ use crate::vault::{VaultStore, AUTO_PASSWORD};
 
 #[tauri::command]
 pub fn vault_needs_migration(state: State<'_, AppState>) -> bool {
-    state.needs_migration
+    state.needs_migration()
 }
 
 #[tauri::command]
@@ -17,7 +17,9 @@ pub fn vault_migrate(
     state: State<'_, AppState>,
     old_password: String,
 ) -> AppResult<ConfigSnapshot> {
-    with_store(&state, |store| store.migrate(&old_password))
+    let snapshot = with_store(&state, |store| store.migrate(&old_password))?;
+    state.clear_migration_needed();
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -26,7 +28,9 @@ pub fn vault_skip_migration(state: State<'_, AppState>) -> AppResult<ConfigSnaps
     let path = store.vault_file_path();
     let _ = std::fs::remove_file(&path);
     *store = VaultStore::new(path);
-    store.create(AUTO_PASSWORD)
+    let snapshot = store.create(AUTO_PASSWORD)?;
+    state.clear_migration_needed();
+    Ok(snapshot)
 }
 
 #[tauri::command]

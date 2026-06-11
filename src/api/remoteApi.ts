@@ -14,9 +14,10 @@ import type {
   TelemetrySnapshotEvent,
   TerminalInfo,
   TerminalOutputEvent,
+  TransferHistorySnapshot,
   TransferInfo,
 } from "../types";
-import { browserUnavailable, call, listenEvent } from "./bridge";
+import { call, listenEvent } from "./bridge";
 
 const EVENT_NAMES = {
   sshStatus: "ssh://status",
@@ -32,40 +33,38 @@ const EVENT_NAMES = {
 } as const;
 
 export const remoteApi = {
-  connect: (sessionId: string) =>
-    call<ConnectionInfo>("ssh_connect", () => browserUnavailable("SSH 连接"), { sessionId }),
-  disconnect: (connectionId: string) => call<void>("ssh_disconnect", () => undefined, { connectionId }),
+  connect: (sessionId: string) => call<ConnectionInfo>("ssh_connect", { sessionId }),
+  disconnect: (connectionId: string) => call<void>("ssh_disconnect", { connectionId }),
   trustHostKey: (sessionId: string, algorithm: string, fingerprint: string) =>
-    call<ConfigSnapshot>("ssh_trust_host_key", () => browserTrustHostKey(), { sessionId, algorithm, fingerprint }),
+    call<ConfigSnapshot>("ssh_trust_host_key", { sessionId, algorithm, fingerprint }),
   openTerminal: (connectionId: string, cols = 100, rows = 30) =>
-    call<TerminalInfo>("terminal_open", () => browserUnavailable("终端"), { connectionId, cols, rows }),
-  writeTerminal: (terminalId: string, data: string) => call<void>("terminal_write", () => undefined, { terminalId, data }),
+    call<TerminalInfo>("terminal_open", { connectionId, cols, rows }),
+  writeTerminal: (terminalId: string, data: string) => call<void>("terminal_write", { terminalId, data }),
   resizeTerminal: (terminalId: string, cols: number, rows: number) =>
-    call<void>("terminal_resize", () => undefined, { terminalId, cols, rows }),
-  closeTerminal: (terminalId: string) => call<void>("terminal_close", () => undefined, { terminalId }),
+    call<void>("terminal_resize", { terminalId, cols, rows }),
+  closeTerminal: (terminalId: string) => call<void>("terminal_close", { terminalId }),
   exec: (sessionId: string, command: string, timeoutMs = 20000) =>
-    call<ExecResult>("ssh_exec", () => browserUnavailable("SSH 命令"), { sessionId, command, timeoutMs }),
+    call<ExecResult>("ssh_exec", { sessionId, command, timeoutMs }),
   execOnConnection: (connectionId: string, command: string, timeoutMs = 20000) =>
-    call<ExecResult>("ssh_exec_on_connection", () => browserUnavailable("SSH 命令"), {
+    call<ExecResult>("ssh_exec_on_connection", {
       connectionId,
       command,
       timeoutMs,
     }),
-  openSftp: (connectionId: string) => call<SftpInfo>("sftp_open", () => browserUnavailable("SFTP"), { connectionId }),
-  listFiles: (sftpId: string, path: string) => call<RemoteFileEntry[]>("sftp_list", () => [], { sftpId, path }),
+  openSftp: (connectionId: string) => call<SftpInfo>("sftp_open", { connectionId }),
+  listFiles: (sftpId: string, path: string) => call<RemoteFileEntry[]>("sftp_list", { sftpId, path }),
   searchFile: (sftpId: string, basePath: string, query: string) =>
-    call<string | null>("sftp_search", () => null, { sftpId, basePath, query }),
-  mkdir: (sftpId: string, path: string) => call<void>("sftp_mkdir", () => undefined, { sftpId, path }),
-  createFile: (sftpId: string, path: string) =>
-    call<void>("sftp_create_file", () => browserUnavailable("文件创建"), { sftpId, path }),
+    call<string | null>("sftp_search", { sftpId, basePath, query }),
+  mkdir: (sftpId: string, path: string) => call<void>("sftp_mkdir", { sftpId, path }),
+  createFile: (sftpId: string, path: string) => call<void>("sftp_create_file", { sftpId, path }),
   delete: (sftpId: string, path: string, recursive = false) =>
-    call<void>("sftp_delete", () => undefined, { sftpId, path, recursive }),
-  rename: (sftpId: string, from: string, to: string) => call<void>("sftp_rename", () => undefined, { sftpId, from, to }),
-  copy: (sftpId: string, from: string, to: string) => call<void>("sftp_copy", () => undefined, { sftpId, from, to }),
-  readText: (sftpId: string, path: string) =>
-    call<string>("sftp_read_text", () => browserUnavailable("文件读取"), { sftpId, path }),
-  writeText: (sftpId: string, path: string, content: string) =>
-    call<void>("sftp_write_text", () => browserUnavailable("文件保存"), { sftpId, path, content }),
+    call<void>("sftp_delete", { sftpId, path, recursive }),
+  rename: (sftpId: string, from: string, to: string) => call<void>("sftp_rename", { sftpId, from, to }),
+  copy: (sftpId: string, from: string, to: string) => call<void>("sftp_copy", { sftpId, from, to }),
+  readText: (sftpId: string, path: string) => call<string>("sftp_read_text", { sftpId, path }),
+  writeText: (sftpId: string, path: string, content: string) => call<void>("sftp_write_text", { sftpId, path, content }),
+  resolveTarget: (sftpId: string, currentPath: string, sourcePath: string, value: string) =>
+    call<string>("sftp_resolve_target", { sftpId, currentPath, sourcePath, value }),
   upload: (
     sftpId: string,
     localPath: string,
@@ -74,7 +73,7 @@ export const remoteApi = {
     accelerated = false,
     resume = false,
   ) =>
-    call<TransferInfo>("transfer_upload", () => browserUnavailable("文件上传"), {
+    call<TransferInfo>("transfer_upload", {
       sftpId,
       localPath,
       remotePath,
@@ -83,25 +82,23 @@ export const remoteApi = {
       resume,
     }),
   download: (sftpId: string, remotePath: string, localPath: string, overwrite = false) =>
-    call<TransferInfo>("transfer_download", () => browserUnavailable("文件下载"), {
+    call<TransferInfo>("transfer_download", {
       sftpId,
       remotePath,
       localPath,
       overwrite,
     }),
-  cancelTransfer: (transferId: string) => call<void>("transfer_cancel", () => undefined, { transferId }),
-  pauseTransfer: (transferId: string) =>
-    call<TransferInfo>("transfer_pause", () => browserUnavailable("传输暂停"), { transferId }),
-  resumeTransfer: (transferId: string) =>
-    call<TransferInfo>("transfer_resume", () => browserUnavailable("传输恢复"), { transferId }),
-  removeTransfer: (transferId: string) => call<void>("transfer_remove", () => undefined, { transferId }),
-  retryTransfer: (transferId: string) =>
-    call<TransferInfo>("transfer_retry", () => browserUnavailable("传输重试"), { transferId }),
+  cancelTransfer: (transferId: string) => call<void>("transfer_cancel", { transferId }),
+  pauseTransfer: (transferId: string) => call<TransferInfo>("transfer_pause", { transferId }),
+  resumeTransfer: (transferId: string) => call<TransferInfo>("transfer_resume", { transferId }),
+  removeTransfer: (transferId: string) => call<TransferHistorySnapshot>("transfer_remove", { transferId }),
+  retryTransfer: (transferId: string) => call<TransferInfo>("transfer_retry", { transferId }),
+  transferHistorySnapshot: () => call<TransferHistorySnapshot>("transfer_history_snapshot"),
+  clearFinishedTransferHistory: () => call<TransferHistorySnapshot>("transfer_history_clear_finished"),
   startTelemetry: (connectionId: string, sessionId: string, intervalMs = 5000) =>
-    call<TelemetryJobInfo>("telemetry_start", () => browserUnavailable("监控"), { connectionId, sessionId, intervalMs }),
-  stopTelemetry: (jobId: string) => call<void>("telemetry_stop", () => undefined, { jobId }),
-  telemetrySnapshot: (connectionId: string) =>
-    call<ServerTelemetry>("telemetry_snapshot", () => browserUnavailable("监控"), { connectionId }),
+    call<TelemetryJobInfo>("telemetry_start", { connectionId, sessionId, intervalMs }),
+  stopTelemetry: (jobId: string) => call<void>("telemetry_stop", { jobId }),
+  telemetrySnapshot: (connectionId: string) => call<ServerTelemetry>("telemetry_snapshot", { connectionId }),
   startLocalForward: (
     sessionId: string,
     bindHost: string,
@@ -109,11 +106,7 @@ export const remoteApi = {
     remoteHost: string,
     remotePort: number,
   ) =>
-    call<ForwardInfo>(
-      "forward_start_local",
-      () => browserUnavailable("本地端口转发"),
-      { sessionId, bindHost, bindPort, remoteHost, remotePort },
-    ),
+    call<ForwardInfo>("forward_start_local", { sessionId, bindHost, bindPort, remoteHost, remotePort }),
   startRemoteForward: (
     sessionId: string,
     remoteBindHost: string,
@@ -121,19 +114,15 @@ export const remoteApi = {
     localHost: string,
     localPort: number,
   ) =>
-    call<ForwardInfo>(
-      "forward_start_remote",
-      () => browserUnavailable("远端端口转发"),
-      { sessionId, remoteBindHost, remoteBindPort, localHost, localPort },
-    ),
+    call<ForwardInfo>("forward_start_remote", { sessionId, remoteBindHost, remoteBindPort, localHost, localPort }),
   startDynamicForward: (sessionId: string, bindHost: string, bindPort: number) =>
-    call<ForwardInfo>("forward_start_dynamic", () => browserUnavailable("动态端口转发"), {
+    call<ForwardInfo>("forward_start_dynamic", {
       sessionId,
       bindHost,
       bindPort,
     }),
-  stopForward: (forwardId: string) => call<void>("forward_stop", () => undefined, { forwardId }),
-  listForwards: () => call<ForwardInfo[]>("forward_list", () => [], undefined),
+  stopForward: (forwardId: string) => call<void>("forward_stop", { forwardId }),
+  listForwards: () => call<ForwardInfo[]>("forward_list"),
   onForwardStatus: (handler: (payload: ForwardStatusEvent) => void) => listenEvent(EVENT_NAMES.forwardStatus, handler),
   onSshStatus: (handler: (payload: ConnectionInfo) => void) => listenEvent(EVENT_NAMES.sshStatus, handler),
   onSftpChanged: (handler: (payload: SftpChangedEvent) => void) => listenEvent(EVENT_NAMES.sftpChanged, handler),
@@ -146,7 +135,3 @@ export const remoteApi = {
   onTransferFailed: (handler: (payload: TransferInfo) => void) => listenEvent(EVENT_NAMES.transferFailed, handler),
   onHostKeyVerify: (handler: (payload: HostKeyVerification) => void) => listenEvent(EVENT_NAMES.hostKeyVerify, handler),
 };
-
-function browserTrustHostKey(): ConfigSnapshot {
-  throw new Error("浏览器环境无法保存 SSH 主机密钥");
-}

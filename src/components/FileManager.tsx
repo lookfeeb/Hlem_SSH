@@ -908,21 +908,28 @@ export function FileManager({
         </div>
         <Form layout="vertical" className="commandDialogForm" onFinish={addQuickCommand}>
           <Form.Item label={<span className="commandDialogFieldLabel"><TagOutlined /> 名称</span>}>
-            <Input
-              autoFocus
-              placeholder="例如：查看系统负载"
-              maxLength={40}
-              showCount
-              value={commandName}
-              onChange={(event) => setCommandName(event.target.value)}
-              onPressEnter={addQuickCommand}
-            />
+            <div className="commandNameField">
+              <input
+                className="commandNameInput"
+                autoFocus
+                placeholder="例如：查看系统负载"
+                maxLength={40}
+                value={commandName}
+                onChange={(event) => setCommandName(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  addQuickCommand();
+                }}
+              />
+              <span className="commandNameCounter">{commandName.length} / 40</span>
+            </div>
           </Form.Item>
-          <Form.Item label={<span className="commandDialogFieldLabel"><CodeOutlined /> 命令</span>}>
+          <Form.Item label={<span className="commandDialogFieldLabel"><CodeOutlined /> 运行脚本</span>}>
             <Input.TextArea
               className="commandDialogTextarea"
               autoSize={{ minRows: 6, maxRows: 14 }}
-              placeholder={"例如：\ntop -bn1 | head -n 20"}
+              placeholder={"# 例如：\ntop -bn1 | head -n 20"}
               value={commandValue}
               onChange={(event) => setCommandValue(event.target.value)}
             />

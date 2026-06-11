@@ -10,7 +10,10 @@ mod vault;
 use std::{
     env,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use serde::Serialize;
@@ -32,12 +35,12 @@ pub use api_server_cmd::{
     api_server_stop, api_server_update_sessions,
 };
 pub use backup::{
-    backup_record_delete, backup_record_restore, backup_records_clear, backup_run_auto,
-    backup_run_now,
+    backup_record_delete, backup_record_restore, backup_records_clear, backup_run_now,
+    spawn_auto_backup_scheduler,
 };
 pub use desktop::{
-    download_update, fetch_text_url, install_update, local_expand_paths, open_database_dir,
-    open_external_url, open_log_dir, open_path_dir,
+    check_update, download_update, fetch_text_url, install_update, local_expand_paths,
+    local_path_exists, open_database_dir, open_external_url, open_log_dir, open_path_dir,
 };
 pub use remote::{
     forward_list, forward_start_dynamic, forward_start_local, forward_start_remote, forward_stop,
@@ -49,7 +52,8 @@ pub use sessions::{
 };
 pub use sftp::{
     sftp_copy, sftp_create_file, sftp_delete, sftp_list, sftp_mkdir, sftp_open, sftp_read_text,
-    sftp_rename, sftp_search, sftp_write_text, transfer_cancel, transfer_download, transfer_pause,
+    sftp_rename, sftp_resolve_target, sftp_search, sftp_write_text, transfer_cancel,
+    transfer_download, transfer_history_clear_finished, transfer_history_snapshot, transfer_pause,
     transfer_remove, transfer_resume, transfer_retry, transfer_upload,
 };
 pub use terminal::{
@@ -66,6 +70,7 @@ pub use vault::{
 
 const VAULT_PATH_ENV: &str = "HELM_VAULT_PATH";
 const PROXY_KIND_DIRECT: &str = "direct";
+const TRANSFER_HISTORY_FILE_NAME: &str = "transfer-history.json";
 
 // ─── Public types ──────────────────────────────────────────────────────────────
 
@@ -83,7 +88,7 @@ pub struct AppState {
     pub(super) remote: RemoteRuntime,
     pub(super) api_server: TokioMutex<Option<ApiServerHandle>>,
     pub(super) data_dir: PathBuf,
-    pub(super) needs_migration: bool,
+    pub(super) needs_migration: AtomicBool,
 }
 
 impl AppState {
@@ -100,12 +105,14 @@ impl AppState {
             let needs_migration = result == crate::vault::AutoOpenResult::NeedsMigration;
             (Arc::new(Mutex::new(store)), needs_migration)
         };
+        let remote =
+            RemoteRuntime::with_transfer_history_path(data_dir.join(TRANSFER_HISTORY_FILE_NAME));
         Self {
             vault,
-            remote: RemoteRuntime::default(),
+            remote,
             api_server: TokioMutex::new(None),
             data_dir,
-            needs_migration,
+            needs_migration: AtomicBool::new(needs_migration),
         }
     }
 
@@ -116,6 +123,14 @@ impl AppState {
 
     pub fn remote(&self) -> &RemoteRuntime {
         &self.remote
+    }
+
+    pub(super) fn needs_migration(&self) -> bool {
+        self.needs_migration.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn clear_migration_needed(&self) {
+        self.needs_migration.store(false, Ordering::Relaxed);
     }
 }
 
@@ -233,7 +248,7 @@ mod tests {
         let store = state.vault.lock().expect("vault mutex");
         assert!(store.status().exists);
         assert!(store.status().unlocked);
-        assert!(!state.needs_migration);
+        assert!(!state.needs_migration());
     }
 
     #[test]

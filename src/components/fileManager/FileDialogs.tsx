@@ -1,5 +1,5 @@
 import { Form, Input, Modal, Radio, Tree } from "antd";
-import { FolderAddOutlined } from "@ant-design/icons";
+import { ArrowRightOutlined, CopyOutlined, EditOutlined, FolderAddOutlined, InfoCircleOutlined, SwapOutlined } from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
 import type { RemoteFileEntry } from "../../types";
 
@@ -77,8 +77,30 @@ export function FileDialogs({
         </Form>
       )}
       {(dialog?.kind === "copy" || dialog?.kind === "move") && (
-        <Form layout="vertical">
-          <div className="fileOperationTree">
+        <Form layout="vertical" className="fileOperationForm">
+          {/* 路径流向卡片 */}
+          <div className="fileOperationFlow">
+            <div className="flowNode sourceNode">
+              <span className="nodeIcon">📄</span>
+              <span className="nodeText" title={dialog.entry.name}>
+                {dialog.entry.name}
+              </span>
+            </div>
+            <div className="flowConnector">
+              <ArrowRightOutlined className="flowArrowIcon" />
+            </div>
+            <div className="flowNode targetNode" key={dialog.value}>
+              <span className="nodeIcon">📁</span>
+              <span className="nodeText" title={dialog.value || "/"}>
+                {dialog.value.split("/").filter(Boolean).pop() || "根目录"}
+              </span>
+            </div>
+          </div>
+
+          {/* 目录树卡片 */}
+          <div className="fileOperationTreeContainer">
+            <div className="treeHeader">选择目标目录</div>
+            <div className="fileOperationTree">
             <Tree
               showIcon
               blockNode
@@ -102,17 +124,21 @@ export function FileDialogs({
               }}
             />
           </div>
-          <Form.Item label={dialog.kind === "copy" ? "复制到路径" : "移动到路径"}>
-            <Input
-              autoFocus
-              prefix={<FolderAddOutlined />}
-              placeholder="/目标目录/或/完整目标路径"
-              value={dialog.value}
-              onChange={(event) => onDialogChange({ ...dialog, value: event.target.value })}
-              onPressEnter={onSubmit}
-            />
-          </Form.Item>
-          <div className="fileOperationHint">可以从目录树选择，也可以输入目录或完整目标路径。</div>
+        </div>
+        <Form.Item className="fileOperationPathItem">
+          <Input
+            autoFocus
+            prefix={<FolderAddOutlined className="pathInputIcon" />}
+            placeholder="目标目录"
+            value={dialog.value}
+            onChange={(event) => onDialogChange({ ...dialog, value: event.target.value })}
+            onPressEnter={onSubmit}
+          />
+        </Form.Item>
+        <div className="fileOperationHintCard">
+          <InfoCircleOutlined className="hintIcon" />
+          <span className="hintText">可以从目录树选择，也可以手动编辑输入完整目标路径。</span>
+        </div>
         </Form>
       )}
     </Modal>
@@ -120,11 +146,38 @@ export function FileDialogs({
 }
 
 function dialogTitle(dialog: FileDialogState | null) {
-  if (!dialog) return "";
-  if (dialog.kind === "create") return "新建文件或目录";
-  if (dialog.kind === "rename") return "重命名";
-  if (dialog.kind === "copy") return "复制到";
-  return "移动到";
+  if (!dialog) return null;
+  const iconStyle = { marginRight: 8, color: "var(--accent-2)" };
+  if (dialog.kind === "create") {
+    return (
+      <span className="fileDialogTitle">
+        <FolderAddOutlined style={iconStyle} />
+        新建文件或目录
+      </span>
+    );
+  }
+  if (dialog.kind === "rename") {
+    return (
+      <span className="fileDialogTitle">
+        <EditOutlined style={iconStyle} />
+        重命名
+      </span>
+    );
+  }
+  if (dialog.kind === "copy") {
+    return (
+      <span className="fileDialogTitle">
+        <CopyOutlined style={iconStyle} />
+        复制到
+      </span>
+    );
+  }
+  return (
+    <span className="fileDialogTitle">
+      <SwapOutlined style={iconStyle} />
+      移动到
+    </span>
+  );
 }
 
 function isTreeSwitcherClick(target: EventTarget | null) {

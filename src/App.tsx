@@ -1,6 +1,7 @@
 import { Modal } from "antd";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { appApi } from "./api/appApi";
+import { appEvents } from "./api/appEvents";
 import { remoteApi } from "./api/remoteApi";
 import { defaultBackupSettings, vaultApi } from "./api/vaultApi";
 import {
@@ -44,6 +45,8 @@ import type {
   SftpChangedEvent,
 } from "./types";
 
+const AUTO_SFTP_CONNECT_DELAY_MS = 900;
+
 function App() {
   const [configSnapshot, setConfigSnapshot] = useState<ConfigSnapshot>();
   const [sessions, setSessions] = useState<RemoteSession[]>([]);
@@ -54,11 +57,10 @@ function App() {
   const {
     transfers,
     transfersRef,
-    transferSessionIds,
-    transferSessionIdsRef,
     setPersistedTransfers,
-    setPersistedTransferSessionIds,
     resetTransferHistory,
+    refreshTransferHistory,
+    applyTransferHistorySnapshot,
     clearFinishedTransferHistory,
   } = useTransferHistory();
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -67,6 +69,7 @@ function App() {
   const [fileLoadingSessionIds, setFileLoadingSessionIds] = useState<Set<string>>(new Set());
   const sessionsRef = useRef<RemoteSession[]>([]);
   const configSnapshotRef = useRef<ConfigSnapshot | undefined>(configSnapshot);
+  const autoSftpConnectionKeysRef = useRef<Set<string>>(new Set());
   const {
     apiServerRunning,
     setApiServerRunning,
@@ -77,6 +80,7 @@ function App() {
     migrationNeeded,
     migrationBusy,
     migrationError,
+    bootstrapError,
     appInfo,
     setAppInfo,
     handleMigrate,
@@ -118,7 +122,6 @@ function App() {
   });
   const {
     upsertTransfer,
-    rememberTransferTarget,
     pauseTransfer,
     resumeTransfer,
     cancelTransfer,
@@ -127,9 +130,8 @@ function App() {
   } = useTransferActions({
     sessionsRef,
     transfersRef,
-    transferSessionIdsRef,
     setPersistedTransfers,
-    setPersistedTransferSessionIds,
+    applyTransferHistorySnapshot,
     activeSessionId,
     appendTerminal: (sessionId, kind, content) => appendTerminal(sessionId, kind, content),
   });
@@ -164,7 +166,6 @@ function App() {
     [activeSessionId, openSessions],
   );
   const {
-    openSftpWithFiles,
     changePath,
     refreshActiveFiles,
     runFileOperation,
@@ -185,9 +186,9 @@ function App() {
     appendTerminal: (sessionId, kind, content) => appendTerminal(sessionId, kind, content),
     formatSessionError,
     upsertTransfer,
-    rememberTransferTarget,
     openTransferCenter: () => setTransferCenterOpen(true),
   });
+  const refreshActiveFilesRef = useRef(refreshActiveFiles);
   const {
     connectingSessionId,
     resetSessionRuntime,
@@ -210,8 +211,6 @@ function App() {
     applyConfigSnapshot,
     registerTerminal,
     consumePendingTerminalEntries,
-    openSftpWithFiles,
-    rememberTransferTarget,
     appendTerminal: (sessionId, kind, content) => appendTerminal(sessionId, kind, content),
   });
   const {
@@ -252,9 +251,6 @@ function App() {
     runConfiguredBackup,
     deleteBackupRecord,
   } = useBackupWorkflow({
-    appReady,
-    configSnapshot,
-    configSnapshotRef,
     applySnapshot,
     applyConfigSnapshot,
     resetRuntimeState: resetRuntimeStateForSnapshot,
@@ -271,8 +267,38 @@ function App() {
   }, [sessions]);
 
   useEffect(() => {
+    refreshActiveFilesRef.current = refreshActiveFiles;
+  }, [refreshActiveFiles]);
+
+  useEffect(() => {
     configSnapshotRef.current = configSnapshot;
   }, [configSnapshot]);
+
+  useEffect(() => {
+    if (!appReady) return;
+    if (!activeSession?.connectionId || !activeSession.terminalId || activeSession.state !== "connected" || activeSession.sftpId) return;
+    const connectionKey = `${activeSession.id}:${activeSession.connectionId}`;
+    if (autoSftpConnectionKeysRef.current.has(connectionKey)) return;
+
+    const timer = window.setTimeout(() => {
+      const session = sessionsRef.current.find((item) => item.id === activeSession.id);
+      if (!session || session.connectionId !== activeSession.connectionId || session.state !== "connected" || session.sftpId) return;
+      if (autoSftpConnectionKeysRef.current.has(connectionKey)) return;
+      autoSftpConnectionKeysRef.current.add(connectionKey);
+      void refreshActiveFilesRef.current().catch((error) => {
+        console.warn("[helm] failed to auto connect sftp:", getErrorMessage(error));
+      });
+    }, AUTO_SFTP_CONNECT_DELAY_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [appReady, activeSession?.id, activeSession?.state, activeSession?.connectionId, activeSession?.terminalId, activeSession?.sftpId]);
+
+  useEffect(() => {
+    if (!appReady) return;
+    void refreshTransferHistory().catch((error) => {
+      console.warn("[helm] failed to load transfer history:", getErrorMessage(error));
+    });
+  }, [appReady]);
 
   useEffect(() => {
     if (!appReady) return;
@@ -299,6 +325,7 @@ function App() {
         void refreshFilesForTransfer(payload);
       }),
       remoteApi.onTransferFailed(upsertTransfer),
+      appEvents.onConfigChanged(applyConfigSnapshot),
       remoteApi.onForwardStatus(upsertForward),
       remoteApi.onHostKeyVerify((payload) => {
         appendTerminal(payload.sessionId, "system", `主机密钥待确认：${payload.fingerprint}`);
@@ -521,7 +548,7 @@ function App() {
               </>
             </Suspense>
           ) : (
-            <div className="appPlaceholder" />
+            <AppLoadingFallback error={bootstrapError} />
           )}
       </div>
 
@@ -540,7 +567,6 @@ function App() {
               open={transferCenterOpen}
               transfers={transfers}
               sessions={sessions}
-              transferSessionIds={transferSessionIds}
               saveRecords={fileSaveRecords}
               backupRecords={(() => {
                 const records = configSnapshot?.data.backupRecords ?? [];
@@ -560,7 +586,7 @@ function App() {
               onRestoreBackup={(id) => void restoreBackupRecord(id)}
               onRemoveBackup={(id) => void deleteBackupRecord(id, false)}
               onClear={() => {
-                clearFinishedTransferHistory();
+                void clearFinishedTransferHistory();
                 clearFileSaveRecords();
                 void vaultApi.backupRecordsClear().then(applyConfigSnapshot);
               }}

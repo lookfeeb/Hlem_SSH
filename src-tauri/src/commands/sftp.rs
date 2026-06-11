@@ -1,7 +1,7 @@
 use tauri::{AppHandle, State};
 
 use crate::errors::AppResult;
-use crate::remote::{RemoteFileEntry, SftpInfo, TransferInfo};
+use crate::remote::{RemoteFileEntry, SftpInfo, TransferHistorySnapshot, TransferInfo};
 
 use super::{ensure_vault_unlocked, AppState};
 
@@ -32,6 +32,21 @@ pub async fn sftp_search(
     state
         .remote
         .sftp_search_file(&sftp_id, base_path, query)
+        .await
+}
+
+#[tauri::command]
+pub async fn sftp_resolve_target(
+    state: State<'_, AppState>,
+    sftp_id: String,
+    current_path: String,
+    source_path: String,
+    value: String,
+) -> AppResult<String> {
+    ensure_vault_unlocked(&state)?;
+    state
+        .remote
+        .sftp_resolve_target(&sftp_id, current_path, source_path, value)
         .await
 }
 
@@ -198,7 +213,7 @@ pub async fn transfer_remove(
     app: AppHandle,
     state: State<'_, AppState>,
     transfer_id: String,
-) -> AppResult<()> {
+) -> AppResult<TransferHistorySnapshot> {
     ensure_vault_unlocked(&state)?;
     state.remote.transfer_remove(&app, &transfer_id).await
 }
@@ -211,4 +226,20 @@ pub async fn transfer_retry(
 ) -> AppResult<TransferInfo> {
     ensure_vault_unlocked(&state)?;
     state.remote.transfer_retry(&app, &transfer_id).await
+}
+
+#[tauri::command]
+pub async fn transfer_history_snapshot(
+    state: State<'_, AppState>,
+) -> AppResult<TransferHistorySnapshot> {
+    ensure_vault_unlocked(&state)?;
+    state.remote.transfer_history_snapshot().await
+}
+
+#[tauri::command]
+pub async fn transfer_history_clear_finished(
+    state: State<'_, AppState>,
+) -> AppResult<TransferHistorySnapshot> {
+    ensure_vault_unlocked(&state)?;
+    state.remote.clear_finished_transfer_history().await
 }

@@ -56,10 +56,6 @@ export function useAppUpdater({
     const info = knownInfo ?? (await appApi.info());
     if (!mountedRef.current) return;
     setAppInfo(info);
-    if (!appApi.updateRepo()) {
-      if (manual) Modal.warning({ title: "未配置更新源", content: "发布版会由 GitHub Actions 自动写入更新仓库地址。" });
-      return;
-    }
     if (manual) {
       setUpdateChecking(true);
       setUpdateError(null);

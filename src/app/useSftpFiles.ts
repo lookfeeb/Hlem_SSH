@@ -4,10 +4,8 @@ import { remoteApi } from "../api/remoteApi";
 import type { FileOperation } from "../components/FileManager";
 import { defaultRemoteHomePath, getErrorMessage, initialRemotePath } from "../lib/configMapping";
 import { getParentPath as getRemoteParentPath, joinPath as joinRemotePath, normalizePath as normalizeRemotePath } from "../lib/path";
-import { createTerminalEntry } from "../lib/session";
 import {
   remoteSessionPath,
-  resolveSftpOperationTarget,
   runUploadQueue,
   sftpUnavailableMessage,
   uploadConcurrency,
@@ -29,7 +27,6 @@ type UseSftpFilesOptions = {
   appendTerminal: (sessionId: string, kind: "system" | "error", content: string) => void;
   formatSessionError: (error: unknown, session: Pick<RemoteSession, "name" | "connectionId" | "terminalId" | "sftpId">) => string;
   upsertTransfer: (transfer: TransferInfo) => void;
-  rememberTransferTarget: (sftpId: string, sessionId: string) => void;
   openTransferCenter: () => void;
 };
 
@@ -41,7 +38,6 @@ export function useSftpFiles({
   appendTerminal,
   formatSessionError,
   upsertTransfer,
-  rememberTransferTarget,
   openTransferCenter,
 }: UseSftpFilesOptions) {
   const lastDownloadDirRef = useRef("");
@@ -87,15 +83,13 @@ export function useSftpFiles({
       }
       if (session.state !== "connected" || !session.connectionId) return;
 
-      appendTerminal(session.id, "system", "正在连接 SFTP...");
       const sftpResult = await openSftpWithFiles(
         session.connectionId,
         initialRemotePath(session.username, session.currentPath),
         session.username,
       );
       if (!sftpResult.sftp) {
-        appendTerminal(session.id, "error", `SFTP 不可用：${sftpUnavailableMessage(sftpResult.error)}`);
-        return;
+        throw new Error(`SFTP 不可用：${sftpUnavailableMessage(sftpResult.error)}`);
       }
       const sftp = sftpResult.sftp;
       updateSession(session.id, (item) =>
@@ -105,7 +99,6 @@ export function useSftpFiles({
               currentPath: sftpResult.path,
               sftpId: sftp.sftpId,
               files: sftpResult.files,
-              terminal: [...item.terminal, createTerminalEntry("system", "SFTP 已连接")],
             }
           : item,
       );
@@ -133,14 +126,14 @@ export function useSftpFiles({
         await remoteApi.copy(
           sftpId,
           operation.sourcePath,
-          await resolveSftpOperationTarget(sftpId, remoteSessionPath(session), operation.sourcePath, operation.targetPath),
+          await remoteApi.resolveTarget(sftpId, remoteSessionPath(session), operation.sourcePath, operation.targetPath),
         );
         break;
       case "move":
         await remoteApi.rename(
           sftpId,
           operation.sourcePath,
-          await resolveSftpOperationTarget(sftpId, remoteSessionPath(session), operation.sourcePath, operation.targetPath),
+          await remoteApi.resolveTarget(sftpId, remoteSessionPath(session), operation.sourcePath, operation.targetPath),
         );
         break;
       case "delete":
@@ -302,7 +295,6 @@ export function useSftpFiles({
   }
 
   return {
-    openSftpWithFiles,
     changePath,
     refreshActiveFiles,
     runFileOperation,

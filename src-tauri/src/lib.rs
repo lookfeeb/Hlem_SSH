@@ -12,19 +12,20 @@ mod vault;
 use commands::{
     api_server_logs, api_server_regenerate_key, api_server_start, api_server_status,
     api_server_stop, api_server_update_sessions, app_info, backup_record_delete,
-    backup_record_restore, backup_records_clear, backup_run_auto, backup_run_now, config_snapshot,
+    backup_record_restore, backup_records_clear, backup_run_now, check_update, config_snapshot,
     download_update, fetch_text_url, forward_list, forward_start_dynamic, forward_start_local,
     forward_start_remote, forward_stop, group_create, group_delete, group_update, install_update,
-    local_expand_paths, open_database_dir, open_external_url, open_log_dir, open_path_dir,
-    resolve_vault_path, session_create, session_delete, session_duplicate, session_update,
-    settings_update, sftp_copy, sftp_create_file, sftp_delete, sftp_list, sftp_mkdir, sftp_open,
-    sftp_read_text, sftp_rename, sftp_search, sftp_write_text, ssh_connect, ssh_disconnect,
-    ssh_exec, ssh_exec_on_connection, ssh_trust_host_key, telemetry_snapshot, telemetry_start,
+    local_expand_paths, local_path_exists, open_database_dir, open_external_url, open_log_dir,
+    open_path_dir, resolve_vault_path, session_create, session_delete, session_duplicate,
+    session_update, settings_update, sftp_copy, sftp_create_file, sftp_delete, sftp_list,
+    sftp_mkdir, sftp_open, sftp_read_text, sftp_rename, sftp_resolve_target, sftp_search,
+    sftp_write_text, spawn_auto_backup_scheduler, ssh_connect, ssh_disconnect, ssh_exec,
+    ssh_exec_on_connection, ssh_trust_host_key, telemetry_snapshot, telemetry_start,
     telemetry_stop, terminal_close, terminal_open, terminal_resize, terminal_write,
-    transfer_cancel, transfer_download, transfer_pause, transfer_remove, transfer_resume,
-    transfer_retry, transfer_upload, tunnel_create, tunnel_delete, tunnel_list, tunnel_update,
-    vault_backup_export, vault_backup_import, vault_migrate, vault_needs_migration,
-    vault_skip_migration, AppState,
+    transfer_cancel, transfer_download, transfer_history_clear_finished, transfer_history_snapshot,
+    transfer_pause, transfer_remove, transfer_resume, transfer_retry, transfer_upload,
+    tunnel_create, tunnel_delete, tunnel_list, tunnel_update, vault_backup_export,
+    vault_backup_import, vault_migrate, vault_needs_migration, vault_skip_migration, AppState,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -76,11 +77,18 @@ pub fn run() {
             // 注意：setup 闭包运行在主线程（非 Tokio 上下文），不能直接 tokio::spawn，
             // 需要通过 tauri::async_runtime::spawn 提交到 Tauri 管理的 Tokio runtime。
             let remote = state.remote().clone();
+            let history_remote = remote.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = history_remote.load_transfer_history().await {
+                    eprintln!("[helm] failed to load transfer history: {error}");
+                }
+            });
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 remote.spawn_dead_connection_reaper(app_handle);
             });
             app.manage(state);
+            spawn_auto_backup_scheduler(app.handle().clone());
             configure_main_window(app);
             create_tray(app)?;
             Ok(())
@@ -88,7 +96,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_version,
             app_info,
+            check_update,
             local_expand_paths,
+            local_path_exists,
             fetch_text_url,
             download_update,
             install_update,
@@ -104,7 +114,6 @@ pub fn run() {
             vault_backup_export,
             vault_backup_import,
             backup_run_now,
-            backup_run_auto,
             backup_record_restore,
             backup_record_delete,
             backup_records_clear,
@@ -131,6 +140,7 @@ pub fn run() {
             ssh_exec_on_connection,
             sftp_open,
             sftp_list,
+            sftp_resolve_target,
             sftp_search,
             sftp_mkdir,
             sftp_create_file,
@@ -142,6 +152,8 @@ pub fn run() {
             transfer_upload,
             transfer_download,
             transfer_cancel,
+            transfer_history_snapshot,
+            transfer_history_clear_finished,
             transfer_pause,
             transfer_resume,
             transfer_remove,

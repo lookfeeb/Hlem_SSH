@@ -291,6 +291,7 @@ export interface ExecResult {
 
 export interface TransferInfo {
   transferId: string;
+  sessionId: string;
   sftpId: string;
   direction: "upload" | "download";
   localPath: string;
@@ -302,6 +303,12 @@ export interface TransferInfo {
   error?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TransferHistorySnapshot {
+  version: 1;
+  savedAt: string;
+  transfers: TransferInfo[];
 }
 
 export interface FileSaveRecord {

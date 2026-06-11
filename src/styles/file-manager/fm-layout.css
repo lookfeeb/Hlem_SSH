@@ -102,9 +102,225 @@
   background: transparent;
 }
 
-.fileOperationHint {
+/* 弹窗通用美化 */
+.fileOperationModal .ant-modal-content {
+  border-radius: var(--radius-xl) !important;
+  border: 1px solid rgba(226, 232, 240, 0.8) !important;
+  box-shadow: var(--shadow-lg) !important;
+  overflow: hidden;
+}
+
+.fileOperationModal .ant-form-item:last-child {
+  margin-bottom: 0;
+}
+
+/* 路径流向图 */
+.fileOperationFlow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  padding: 12px 18px;
+  border-radius: var(--radius);
+  margin-bottom: 16px;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+.flowNode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.flowNode .nodeIcon {
+  font-size: 16px;
+}
+.flowNode .nodeText {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.flowConnector {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+.flowArrowIcon {
+  font-size: 16px;
+  animation: flowArrowPulse 1.8s ease-in-out infinite;
+}
+@keyframes flowArrowPulse {
+  0%, 100% { transform: translateX(0); opacity: 0.7; }
+  50%      { transform: translateX(4px); opacity: 1; }
+}
+
+/* 目标节点的淡入动画，在切换路径时触发 */
+.targetNode {
+  animation: targetNodeFadeIn 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+@keyframes targetNodeFadeIn {
+  from { opacity: 0; transform: translateX(-4px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* 目录树容器 */
+.fileOperationTreeContainer {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #ffffff;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.treeHeader {
+  padding: 8px 12px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 800;
   color: var(--text-muted);
-  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* 目录树项在文件操作模态框中的高阶细节样式 */
+.fileOperationTree {
+  max-height: 200px;
+  margin-bottom: 0;
+  overflow: auto;
+  padding: 8px;
+  border: none;
+}
+.fileOperationTree .ant-tree-treenode {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 32px;
+  margin: 2px 0;
+  padding: 0 8px 0 4px !important;
+  border-radius: 6px;
+  border-left: 3px solid transparent; /* 活动指示线占位 */
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.fileOperationTree .ant-tree-treenode:hover {
+  background: rgba(59, 130, 246, 0.06) !important;
+  border-left-color: rgba(59, 130, 246, 0.35) !important;
+}
+
+.fileOperationTree .ant-tree-node-content-wrapper,
+.fileOperationTree .ant-tree-node-content-wrapper:hover {
+  background: transparent !important;
+}
+
+.fileOperationTree .ant-tree-treenode:hover .anticon-folder {
+  color: var(--accent) !important;
+}
+
+.fileOperationTree .ant-tree-indent {
+  display: inline-flex !important;
+  align-items: center;
+}
+
+.fileOperationTree .ant-tree-switcher {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 28px !important;
+  min-width: 28px !important;
+  height: 28px;
+  line-height: 28px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  background: transparent !important;
+}
+
+.fileOperationTree .ant-tree-switcher_open .pathTreeChevron::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.fileOperationTree .ant-tree-switcher-noop .pathTreeChevron {
+  display: none;
+}
+
+.fileOperationTree .ant-tree-node-content-wrapper {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding-inline: 2px 6px !important;
+}
+
+/* 选中项独特效果 */
+.fileOperationTree .ant-tree-treenode-selected {
+  background: var(--accent-dim) !important;
+  border-left-color: var(--accent) !important; /* 精致的指示边框 */
+}
+.fileOperationTree .ant-tree-treenode-selected .ant-tree-node-content-wrapper {
+  color: var(--accent) !important;
+  font-weight: 700 !important;
+  background: transparent !important;
+}
+
+/* 选中项图标与普通图标差异 */
+.fileOperationTree .ant-tree-treenode-selected .anticon-folder {
+  color: var(--accent) !important; /* 图标由灰黄变为活力蓝 */
+  filter: drop-shadow(0 2px 4px rgba(59, 130, 246, 0.25));
+  transform: scale(1.05);
+}
+.fileOperationTree .anticon-folder {
+  color: #a0aec0; /* 未选中的默认为低调灰蓝色 */
+  transition: all 0.2s ease;
+}
+
+/* 地址栏输入框 */
+.fileOperationPathItem {
+  margin-bottom: 12px !important;
+}
+.fileOperationPathItem .ant-input-affix-wrapper {
+  padding: 8px 12px !important;
+  border-radius: var(--radius) !important;
+  background: var(--bg-raised) !important;
+  border-color: var(--border) !important;
+  transition: all 0.25s ease;
+}
+.fileOperationPathItem .ant-input-affix-wrapper:hover {
+  border-color: rgba(99, 102, 241, 0.4) !important;
+  background: #ffffff !important;
+}
+.fileOperationPathItem .ant-input-affix-wrapper-focused {
+  border-color: var(--accent-2) !important;
+  box-shadow: var(--shadow-glow) !important;
+  background: #ffffff !important;
+}
+.pathInputIcon {
+  color: var(--accent-2);
+  font-size: 16px;
+}
+
+/* 提示卡片 */
+.fileOperationHintCard {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.04) 0%, rgba(59, 130, 246, 0.02) 100%);
+  border: 1px solid rgba(99, 102, 241, 0.1);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+.fileOperationHintCard .hintIcon {
+  color: var(--accent-2);
+  font-size: 14px;
+  margin-top: 2px;
+}
+.fileOperationHintCard .hintText {
+  font-size: 11.5px;
+  line-height: 1.4;
 }
 
 .fileDropOverlay {

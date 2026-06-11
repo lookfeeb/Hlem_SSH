@@ -6,6 +6,13 @@ use std::{
 };
 
 use base64::{engine::general_purpose, Engine as _};
+use rsa::{
+    pkcs8::DecodePublicKey,
+    pss::{Signature as PssSignature, VerifyingKey},
+    signature::Verifier,
+    RsaPublicKey,
+};
+use serde::Deserialize;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
@@ -15,12 +22,82 @@ use crate::http_client::{http_client, send_with_retry};
 
 const UPDATE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_UPDATE_REPO: &str = "lookfeeb/Hlem_SSH";
+const HELM_UPDATE_REPO_ENV: &str = "HELM_UPDATE_REPO";
+const VITE_UPDATE_REPO_ENV: &str = "VITE_HELM_UPDATE_REPO";
+const HELM_UPDATE_PUBLIC_KEY_ENV: &str = "HELM_UPDATE_PUBLIC_KEY_PEM";
+const VITE_UPDATE_PUBLIC_KEY_ENV: &str = "VITE_HELM_UPDATE_PUBLIC_KEY_PEM";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalExpandedEntry {
     pub local_path: String,
     pub relative_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAsset {
+    pub name: String,
+    pub download_url: String,
+    pub size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub tag_name: String,
+    pub html_url: String,
+    pub body: String,
+    pub published_at: String,
+    pub asset: Option<UpdateAsset>,
+    pub has_update: bool,
+    pub signature_verified: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: Option<String>,
+    name: Option<String>,
+    html_url: Option<String>,
+    body: Option<String>,
+    published_at: Option<String>,
+    assets: Option<Vec<GitHubAsset>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubAsset {
+    name: Option<String>,
+    browser_download_url: Option<String>,
+    size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignedUpdateManifest {
+    app_version: Option<String>,
+    latest_version: Option<String>,
+    tag_name: Option<String>,
+    html_url: Option<String>,
+    body: Option<String>,
+    published_at: Option<String>,
+    assets: Option<Vec<SignedUpdateAsset>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SignedUpdateAsset {
+    platform: Option<String>,
+    arch: Option<String>,
+    name: Option<String>,
+    url: Option<String>,
+    download_url: Option<String>,
+    size: Option<u64>,
+    sha256: Option<String>,
 }
 
 /// Expand local paths: if a path is a directory, recursively list all files inside it
@@ -83,7 +160,29 @@ pub async fn local_expand_paths(paths: Vec<String>) -> AppResult<Vec<LocalExpand
 
 #[tauri::command]
 pub async fn fetch_text_url(url: String) -> AppResult<String> {
-    let trimmed = validate_http_url(&url)?;
+    fetch_text_url_inner(&url).await
+}
+
+#[tauri::command]
+pub async fn check_update(
+    current_version: String,
+    current_arch: String,
+) -> AppResult<Option<UpdateInfo>> {
+    let Some(repo) = configured_update_repo() else {
+        return Ok(None);
+    };
+    let public_key = configured_update_public_key();
+    if let Some(public_key) = public_key.as_deref() {
+        check_signed_manifest(&repo, public_key, current_version, current_arch)
+            .await
+            .map(Some)
+    } else {
+        check_github_release(&repo, current_version).await.map(Some)
+    }
+}
+
+async fn fetch_text_url_inner(url: &str) -> AppResult<String> {
+    let trimmed = validate_http_url(url)?;
     let client = http_client(UPDATE_FETCH_TIMEOUT)?;
     let response = send_with_retry("读取远程内容", || {
         client
@@ -101,6 +200,76 @@ pub async fn fetch_text_url(url: String) -> AppResult<String> {
         .text()
         .await
         .map_err(|error| AppError::Remote(format!("解析远程内容失败：{error}")))
+}
+
+async fn check_signed_manifest(
+    repo: &str,
+    public_key: &str,
+    current_version: String,
+    current_arch: String,
+) -> AppResult<UpdateInfo> {
+    let manifest_url = format!("https://github.com/{repo}/releases/latest/download/latest.json");
+    let signature_url = format!("{manifest_url}.sig");
+    let (manifest_text, signature) = tokio::try_join!(
+        fetch_text_url_inner(&manifest_url),
+        fetch_text_url_inner(&signature_url)
+    )?;
+    if !verify_manifest_signature(&manifest_text, signature.trim(), public_key)? {
+        return Err(AppError::Crypto("更新清单签名验证失败".to_string()));
+    }
+    let manifest: SignedUpdateManifest = serde_json::from_str(&manifest_text)?;
+    let tag_name = manifest.tag_name.unwrap_or_default();
+    let latest_version = normalize_version(
+        manifest
+            .app_version
+            .as_deref()
+            .or(manifest.latest_version.as_deref())
+            .unwrap_or(&tag_name),
+    );
+    if latest_version.is_empty() {
+        return Err(AppError::InvalidInput("最新版本号无效".to_string()));
+    }
+    let asset = select_manifest_asset(manifest.assets.unwrap_or_default(), &current_arch)?;
+    Ok(UpdateInfo {
+        has_update: compare_versions(&latest_version, &current_version) > 0,
+        current_version,
+        latest_version: latest_version.clone(),
+        tag_name: if tag_name.is_empty() {
+            format!("v{latest_version}")
+        } else {
+            tag_name
+        },
+        html_url: manifest
+            .html_url
+            .unwrap_or_else(|| format!("https://github.com/{repo}/releases/latest")),
+        body: manifest.body.unwrap_or_default(),
+        published_at: manifest.published_at.unwrap_or_default(),
+        asset,
+        signature_verified: true,
+    })
+}
+
+async fn check_github_release(repo: &str, current_version: String) -> AppResult<UpdateInfo> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let release: GitHubRelease = serde_json::from_str(&fetch_text_url_inner(&url).await?)?;
+    let tag_name = release.tag_name.or(release.name).unwrap_or_default();
+    let latest_version = normalize_version(&tag_name);
+    if latest_version.is_empty() {
+        return Err(AppError::InvalidInput("最新版本号无效".to_string()));
+    }
+    Ok(UpdateInfo {
+        has_update: compare_versions(&latest_version, &current_version) > 0,
+        current_version,
+        latest_version,
+        tag_name,
+        html_url: release
+            .html_url
+            .unwrap_or_else(|| format!("https://github.com/{repo}/releases/latest")),
+        body: release.body.unwrap_or_default(),
+        published_at: release.published_at.unwrap_or_default(),
+        asset: select_windows_asset(release.assets.unwrap_or_default()),
+        signature_verified: false,
+    })
 }
 
 #[tauri::command]
@@ -211,6 +380,15 @@ pub fn open_path_dir(path: String) -> AppResult<()> {
 }
 
 #[tauri::command]
+pub fn local_path_exists(path: String) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    PathBuf::from(trimmed).exists()
+}
+
+#[tauri::command]
 pub fn open_external_url(url: String) -> AppResult<()> {
     let trimmed = validate_http_url(&url)?;
     open_url(trimmed)
@@ -219,6 +397,186 @@ pub fn open_external_url(url: String) -> AppResult<()> {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
+
+fn configured_update_repo() -> Option<String> {
+    env_value(HELM_UPDATE_REPO_ENV)
+        .or_else(|| env_value(VITE_UPDATE_REPO_ENV))
+        .or_else(|| Some(DEFAULT_UPDATE_REPO.to_string()))
+}
+
+fn configured_update_public_key() -> Option<String> {
+    env_value(HELM_UPDATE_PUBLIC_KEY_ENV).or_else(|| env_value(VITE_UPDATE_PUBLIC_KEY_ENV))
+}
+
+fn env_value(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn select_manifest_asset(
+    assets: Vec<SignedUpdateAsset>,
+    current_arch: &str,
+) -> AppResult<Option<UpdateAsset>> {
+    let arch = normalize_arch(current_arch);
+    let candidates: Vec<_> = assets
+        .into_iter()
+        .filter(|asset| {
+            asset
+                .platform
+                .as_deref()
+                .unwrap_or("windows")
+                .eq_ignore_ascii_case("windows")
+        })
+        .filter(|asset| {
+            asset
+                .name
+                .as_deref()
+                .is_some_and(|name| name.ends_with(".exe"))
+        })
+        .filter(|asset| asset.url.is_some() || asset.download_url.is_some())
+        .collect();
+    let selected = candidates
+        .iter()
+        .find(|asset| normalize_arch(asset.arch.as_deref().unwrap_or_default()) == arch)
+        .or_else(|| candidates.first());
+    let Some(asset) = selected else {
+        return Ok(None);
+    };
+    let Some(name) = asset.name.clone() else {
+        return Ok(None);
+    };
+    let Some(download_url) = asset.url.clone().or_else(|| asset.download_url.clone()) else {
+        return Ok(None);
+    };
+    let Some(sha256) = asset
+        .sha256
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Err(AppError::InvalidInput(
+            "更新清单缺少安装包 SHA256".to_string(),
+        ));
+    };
+    Ok(Some(UpdateAsset {
+        name,
+        download_url,
+        size: asset.size.unwrap_or(0),
+        sha256: Some(sha256),
+    }))
+}
+
+fn select_windows_asset(assets: Vec<GitHubAsset>) -> Option<UpdateAsset> {
+    let mut candidates: Vec<_> = assets
+        .into_iter()
+        .filter(|asset| {
+            asset
+                .name
+                .as_deref()
+                .is_some_and(|name| name.ends_with(".exe"))
+        })
+        .filter(|asset| asset.browser_download_url.is_some())
+        .collect();
+    candidates.sort_by_key(|asset| asset_rank(asset.name.as_deref().unwrap_or_default()));
+    let asset = candidates.into_iter().next()?;
+    Some(UpdateAsset {
+        name: asset.name?,
+        download_url: asset.browser_download_url?,
+        size: asset.size.unwrap_or(0),
+        sha256: None,
+    })
+}
+
+fn asset_rank(name: &str) -> u8 {
+    let lower = name.to_lowercase();
+    if lower.contains("setup") {
+        0
+    } else if lower.ends_with(".exe") {
+        1
+    } else {
+        9
+    }
+}
+
+fn normalize_arch(value: &str) -> String {
+    match value.to_lowercase().as_str() {
+        "x64" | "x86_64" | "amd64" => "x64".to_string(),
+        "x86" | "i686" | "ia32" => "x86".to_string(),
+        "arm64" | "aarch64" => "arm64".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn normalize_version(value: &str) -> String {
+    let trimmed = value.trim().trim_start_matches(['v', 'V']);
+    let mut started = false;
+    let mut version = String::new();
+    for ch in trimmed.chars() {
+        if !started && !ch.is_ascii_digit() {
+            continue;
+        }
+        started = true;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+') {
+            version.push(ch);
+        } else {
+            break;
+        }
+    }
+    if version
+        .split(['+', '-'])
+        .next()
+        .unwrap_or_default()
+        .matches('.')
+        .count()
+        >= 2
+    {
+        version
+    } else {
+        String::new()
+    }
+}
+
+fn compare_versions(left: &str, right: &str) -> i32 {
+    let left_parts = version_numbers(left);
+    let right_parts = version_numbers(right);
+    for index in 0..left_parts.len().max(right_parts.len()) {
+        let diff = left_parts.get(index).copied().unwrap_or(0)
+            - right_parts.get(index).copied().unwrap_or(0);
+        if diff != 0 {
+            return diff;
+        }
+    }
+    0
+}
+
+fn version_numbers(value: &str) -> Vec<i32> {
+    value
+        .split(['+', '-'])
+        .next()
+        .unwrap_or_default()
+        .split('.')
+        .map(|part| part.parse::<i32>().unwrap_or(0))
+        .collect()
+}
+
+fn verify_manifest_signature(
+    manifest_text: &str,
+    signature_base64: &str,
+    public_key_pem: &str,
+) -> AppResult<bool> {
+    let public_key = RsaPublicKey::from_public_key_pem(&public_key_pem.replace("\\n", "\n"))
+        .map_err(|error| AppError::Crypto(format!("更新公钥无效：{error}")))?;
+    let signature_bytes = general_purpose::STANDARD
+        .decode(signature_base64)
+        .map_err(|error| AppError::Crypto(format!("更新签名无效：{error}")))?;
+    let signature = PssSignature::try_from(signature_bytes.as_slice())
+        .map_err(|error| AppError::Crypto(format!("更新签名无效：{error}")))?;
+    let verifying_key = VerifyingKey::<Sha256>::new(public_key);
+    Ok(verifying_key
+        .verify(manifest_text.as_bytes(), &signature)
+        .is_ok())
+}
 
 fn launch_update_installer(app: &AppHandle, installer: &Path) -> AppResult<()> {
     #[cfg(target_os = "windows")]
@@ -402,4 +760,71 @@ fn sanitize_download_name(value: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::OsRng;
+    use rsa::{
+        pkcs8::{EncodePublicKey, LineEnding},
+        RsaPrivateKey,
+    };
+
+    #[test]
+    fn compares_semver_like_versions() {
+        assert!(compare_versions("1.2.4", "1.2.3") > 0);
+        assert_eq!(compare_versions("1.2.3", "1.2.3"), 0);
+        assert!(compare_versions("1.2.3", "1.3.0") < 0);
+        assert_eq!(normalize_version("v1.2.3-beta.1"), "1.2.3-beta.1");
+    }
+
+    #[test]
+    fn selects_setup_exe_from_github_assets() {
+        let asset = select_windows_asset(vec![
+            GitHubAsset {
+                name: Some("HelM-portable.exe".to_string()),
+                browser_download_url: Some("https://example.com/portable.exe".to_string()),
+                size: Some(1),
+            },
+            GitHubAsset {
+                name: Some("HelM-setup.exe".to_string()),
+                browser_download_url: Some("https://example.com/setup.exe".to_string()),
+                size: Some(2),
+            },
+        ])
+        .expect("asset");
+        assert_eq!(asset.name, "HelM-setup.exe");
+    }
+
+    #[test]
+    fn signed_manifest_asset_requires_sha256() {
+        let error = select_manifest_asset(
+            vec![SignedUpdateAsset {
+                platform: Some("windows".to_string()),
+                arch: Some("x64".to_string()),
+                name: Some("HelM-setup.exe".to_string()),
+                url: Some("https://example.com/setup.exe".to_string()),
+                download_url: None,
+                size: Some(2),
+                sha256: None,
+            }],
+            "x64",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("SHA256"));
+    }
+
+    #[test]
+    fn invalid_pss_signature_fails_verification() {
+        let mut rng = OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("private key");
+        let public_key = RsaPublicKey::from(&private_key)
+            .to_public_key_pem(LineEnding::LF)
+            .expect("public key pem");
+        let invalid_signature = general_purpose::STANDARD.encode(vec![0_u8; 256]);
+        let verified = verify_manifest_signature("manifest", &invalid_signature, &public_key)
+            .expect("verification result");
+        assert!(!verified);
+    }
 }

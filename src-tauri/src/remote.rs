@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::SeekFrom,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex as StdMutex,
@@ -19,7 +19,7 @@ use russh_sftp::{
     client::{fs::DirEntry, SftpSession},
     protocol::{FileAttributes, FileType as SftpFileType, OpenFlags},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tokio::{
     fs::{File, OpenOptions},
@@ -52,6 +52,7 @@ mod sftp;
 mod ssh;
 mod telemetry;
 mod transfer;
+mod transfer_history;
 
 use event_emitters::*;
 use lifecycle::*;
@@ -75,7 +76,8 @@ const MAX_SFTP_SEARCH_CONCURRENCY: usize = 12;
 const MAX_SFTP_SEARCH_DIRS: usize = 800;
 const MAX_SFTP_SEARCH_ENTRIES: usize = 6000;
 const SFTP_REMOTE_SEARCH_TIMEOUT_MS: u64 = 3_500;
-const MAX_TRANSFER_HISTORY: usize = 12;
+const SFTP_FILE_OPERATION_TIMEOUT_MS: u64 = 30 * 60_000;
+const MAX_TRANSFER_HISTORY: usize = 100;
 pub(crate) const TRANSFER_BUFFER_BYTES: usize = 1024 * 1024;
 const TRANSFER_ACCELERATED_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 const TRANSFER_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
@@ -324,6 +326,9 @@ pub struct RemoteRuntime {
     terminals: Arc<RwLock<HashMap<String, TerminalRecord>>>,
     sftp_sessions: Arc<RwLock<HashMap<String, SftpRecord>>>,
     transfers: Arc<RwLock<HashMap<String, TransferRecord>>>,
+    transfer_history_path: Arc<RwLock<Option<PathBuf>>>,
+    transfer_history_loaded: Arc<AtomicBool>,
+    transfer_history_load_lock: Arc<Mutex<()>>,
     telemetry_jobs: Arc<RwLock<HashMap<String, TelemetryJobRecord>>>,
     forwards: Arc<RwLock<HashMap<String, ForwardRecord>>>,
     connection_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
@@ -391,10 +396,12 @@ pub struct ExecResult {
     pub timed_out: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferInfo {
     pub transfer_id: String,
+    #[serde(default)]
+    pub session_id: String,
     pub sftp_id: String,
     pub direction: TransferDirection,
     pub local_path: String,
@@ -406,6 +413,14 @@ pub struct TransferInfo {
     pub error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferHistorySnapshot {
+    pub version: u16,
+    pub saved_at: String,
+    pub transfers: Vec<TransferInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -497,7 +512,7 @@ pub enum RuntimeStatus {
     Disconnected,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskStatus {
     Queued,
@@ -508,7 +523,7 @@ pub enum TaskStatus {
     Canceled,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TransferDirection {
     Upload,
@@ -737,6 +752,34 @@ PROC 42 sshd 1.5 20.0
             build_remote_find_command("/tmp/app", "log'2026"),
             "command -v find >/dev/null 2>&1 && find '/tmp/app' -iname '*log'\\''2026*' -print -quit 2>/dev/null"
         );
+    }
+
+    #[test]
+    fn builds_safe_remote_file_operation_commands() {
+        assert_eq!(
+            build_remote_mkdir_command("/tmp/it's here"),
+            "sh -lc 'mkdir -p -- \"$1\"' sh '/tmp/it'\\''s here'"
+        );
+        let copy = build_remote_copy_command("/tmp/src dir", "/tmp/-target");
+        assert!(copy.contains("cp -a --"));
+        assert!(copy.contains("'/tmp/src dir'"));
+        assert!(copy.contains("'/tmp/-target'"));
+    }
+
+    #[test]
+    fn reports_remote_file_command_failure_detail() {
+        let error = ensure_remote_file_command_success(
+            ExecResult {
+                stdout: String::new(),
+                stderr: "permission denied\nmore detail".to_string(),
+                exit_status: Some(1),
+                duration_ms: 12,
+                timed_out: false,
+            },
+            "删除",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("删除失败：permission denied"));
     }
 
     #[test]
