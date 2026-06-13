@@ -101,6 +101,9 @@ pub(super) fn merge_telemetry(
     if has_telemetry_tag(&sample.output, "IP") && !source.ip.is_empty() {
         target.ip = source.ip;
     }
+    if has_telemetry_tag(&sample.output, "IPV6") {
+        target.ipv6 = source.ipv6;
+    }
     if has_telemetry_tag(&sample.output, "PROC") {
         target.processes = source.processes;
     }
@@ -153,6 +156,14 @@ pub(super) fn parse_linux_telemetry(
             }
             Some("CPU") => telemetry.cpu = parse_f64(parts.next()).clamp(0.0, 100.0),
             Some("IP") => telemetry.ip = parts.next().unwrap_or(fallback_ip).to_string(),
+            Some("IPV6") => {
+                let value = parts.next().unwrap_or("");
+                telemetry.ipv6 = if value == "//" || value == "-" {
+                    String::new()
+                } else {
+                    value.to_string()
+                };
+            }
             Some("NET") => {
                 let interface_name = parts.next().unwrap_or("ssh").to_string();
                 let _rx_bytes = parts.next();
@@ -234,6 +245,7 @@ fn parse_link_speed_mbps(value: Option<&str>) -> Option<u64> {
 pub(super) fn empty_telemetry(ip: &str, latency_ms: u128) -> ServerTelemetry {
     ServerTelemetry {
         ip: ip.to_string(),
+        ipv6: String::new(),
         uptime: "未知".to_string(),
         cpu: 0.0,
         memory: UsageMetric { used: 0, total: 0 },

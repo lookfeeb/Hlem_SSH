@@ -3,6 +3,7 @@ import type { ServerTelemetry } from "../types";
 export function createEmptyTelemetry(ip: string): ServerTelemetry {
   return {
     ip,
+    ipv6: "",
     uptime: "-",
     cpu: 0,
     memory: { used: 0, total: 0 },

@@ -44,6 +44,10 @@ pub struct SessionConfig {
     pub id: String,
     pub name: String,
     pub group_id: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub last_connected_at: Option<String>,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -400,6 +404,8 @@ impl SessionConfig {
             id: Uuid::new_v4().to_string(),
             name: input.name.trim().to_string(),
             group_id: input.group_id,
+            favorite: false,
+            last_connected_at: None,
             host: input.host.trim().to_string(),
             port: input.port,
             username: input.username.trim().to_string(),
@@ -436,6 +442,8 @@ impl SessionConfig {
         let mut duplicate = self.clone();
         duplicate.id = Uuid::new_v4().to_string();
         duplicate.name = format!("{} 副本", self.name);
+        duplicate.favorite = false;
+        duplicate.last_connected_at = None;
         duplicate.created_at = timestamp.clone();
         duplicate.updated_at = timestamp;
         duplicate

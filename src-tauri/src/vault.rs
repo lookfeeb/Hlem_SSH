@@ -438,6 +438,35 @@ impl VaultStore {
         })
     }
 
+    pub fn set_session_favorite(
+        &mut self,
+        session_id: &str,
+        favorite: bool,
+    ) -> AppResult<ConfigSnapshot> {
+        self.mutate(|data| {
+            let session = data
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| AppError::NotFound(format!("会话 {}", session_id)))?;
+            session.favorite = favorite;
+            session.updated_at = crate::config::now();
+            Ok(())
+        })
+    }
+
+    pub fn mark_session_recent(&mut self, session_id: &str) -> AppResult<ConfigSnapshot> {
+        self.mutate(|data| {
+            let session = data
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| AppError::NotFound(format!("会话 {}", session_id)))?;
+            session.last_connected_at = Some(crate::config::now());
+            Ok(())
+        })
+    }
+
     pub fn delete_session(&mut self, session_id: &str) -> AppResult<ConfigSnapshot> {
         self.mutate(|data| {
             let before_len = data.sessions.len();

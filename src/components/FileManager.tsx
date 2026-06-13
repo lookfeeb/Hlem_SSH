@@ -13,7 +13,6 @@ import { App as AntdApp, Button, Dropdown, Form, Input, Modal, Table, Tooltip } 
 import type { MenuProps } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { writeClipboardText } from "../lib/clipboard";
 import { formatFileSize } from "../lib/format";
 import { getErrorMessage } from "../lib/configMapping";
 import { readJsonStorage, writeJsonStorage } from "../lib/storage";
@@ -185,6 +184,7 @@ export function FileManager({
   const [commandName, setCommandName] = useState("");
   const [commandValue, setCommandValue] = useState("");
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => ({ ...inMemoryColumnWidths }));
+  const [tableSurfaceWidth, setTableSurfaceWidth] = useState(0);
   const columnWidthsRef = useRef(columnWidths);
   const mountedRef = useMountedRef();
   useEffect(() => {
@@ -193,6 +193,7 @@ export function FileManager({
     writeJsonStorage(COLUMN_WIDTHS_KEY, columnWidths);
   }, [columnWidths]);
   const contentRef = useRef<HTMLDivElement>(null);
+  const tableSurfaceRef = useRef<HTMLDivElement>(null);
   const searchSeq = useRef(0);
   const directoryExpandedKeysRef = useRef<string[]>(["/"]);
   const detachedEditorsRef = useRef<Map<string, BroadcastChannel>>(new Map());
@@ -262,9 +263,13 @@ export function FileManager({
     [columnWidths, handleColumnResizeStart, path],
   );
 
-  const tableScrollX = useMemo(
+  const tableColumnWidth = useMemo(
     () => 48 + Object.keys(DEFAULT_COLUMN_WIDTHS).reduce((sum, key) => sum + (columnWidths[key] ?? DEFAULT_COLUMN_WIDTHS[key]), 0),
     [columnWidths],
+  );
+  const tableScrollX = useMemo(
+    () => Math.max(tableColumnWidth, tableSurfaceWidth > 0 ? Math.ceil(tableSurfaceWidth) + 12 : 0),
+    [tableColumnWidth, tableSurfaceWidth],
   );
 
   useEffect(() => {
@@ -284,7 +289,20 @@ export function FileManager({
     const element = contentRef.current;
     if (!element) return;
     const update = () => {
-      setTableScrollY(Math.max(120, element.clientHeight - 39));
+      setTableScrollY(Math.max(120, element.clientHeight - 30));
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    const element = tableSurfaceRef.current;
+    if (!element) return;
+    const update = () => {
+      const next = Math.floor(element.clientWidth);
+      setTableSurfaceWidth((current) => (current === next ? current : next));
     };
     update();
     const observer = new ResizeObserver(update);
@@ -326,12 +344,6 @@ export function FileManager({
         setDirectoryLoadingKeys((current) => current.filter((key) => key !== targetPath));
       }
     }
-  }
-
-  function expandDirectory(directoryPath: string) {
-    const targetPath = normalizePath(directoryPath);
-    setDirectoryExpandedKeys((current) => uniqueKeys([...current, targetPath]));
-    void loadDirectory(targetPath);
   }
 
   function toggleDirectory(directoryPath: string) {
@@ -546,16 +558,6 @@ export function FileManager({
       });
   }
 
-  async function copyPath(entry: RemoteFileEntry) {
-    const fullPath = normalizePath(entry.path || joinPath(path, entry.name));
-    const copied = await writeClipboardText(fullPath);
-    if (copied) {
-      message.success(`完整路径已复制：${fullPath}`);
-    } else {
-      message.error("复制失败，请手动复制路径");
-    }
-  }
-
   function openCreateDialog() {
     if (!canUseFiles) return;
     setDialog({ kind: "create", entryType: "file", name: "" });
@@ -725,15 +727,6 @@ export function FileManager({
     }
   }
 
-  async function downloadFile(remotePath: string, fileName: string) {
-    try {
-      await onDownloadFile(remotePath, fileName);
-      message.success(`已开始下载 ${fileName}`);
-    } catch (error) {
-      message.error(getErrorMessage(error));
-    }
-  }
-
   return (
     <section className="filePanel">
       <div className="fileWorkspace">
@@ -801,6 +794,7 @@ export function FileManager({
             onExpandChange={(keys) => setDirectoryExpandedKeys(keys)}
           />
           <div
+            ref={tableSurfaceRef}
             className={`fileTableSurface${canUseFiles ? "" : " fileTableSurface-disabled"}`}
             onClick={() => setContextMenu(null)}
             onDragOver={(event) => {
@@ -839,7 +833,6 @@ export function FileManager({
               }}
               rowClassName={(entry) => (focusedPath && entry.path === focusedPath ? "fileTableRow-focused" : "")}
               pagination={false}
-              virtual
               onRow={(entry) => ({
                 onDoubleClick: () => openDirectory(entry),
                 onContextMenu: (event) => {

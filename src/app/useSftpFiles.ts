@@ -24,6 +24,7 @@ type UseSftpFilesOptions = {
   sessionsRef: MutableRefObject<RemoteSession[]>;
   updateSession: (sessionId: string, updater: (session: RemoteSession) => RemoteSession) => void;
   setSessionFilesLoading: (sessionId: string, loading: boolean) => void;
+  listFiles: (sftpId: string, path: string) => Promise<RemoteSession["files"]>;
   appendTerminal: (sessionId: string, kind: "system" | "error", content: string) => void;
   formatSessionError: (error: unknown, session: Pick<RemoteSession, "name" | "connectionId" | "terminalId" | "sftpId">) => string;
   upsertTransfer: (transfer: TransferInfo) => void;
@@ -35,6 +36,7 @@ export function useSftpFiles({
   sessionsRef,
   updateSession,
   setSessionFilesLoading,
+  listFiles,
   appendTerminal,
   formatSessionError,
   upsertTransfer,
@@ -46,12 +48,12 @@ export function useSftpFiles({
     try {
       const sftp = await remoteApi.openSftp(connectionId);
       try {
-        const files = await remoteApi.listFiles(sftp.sftpId, initialPath);
+        const files = await listFiles(sftp.sftpId, initialPath);
         return { sftp, path: initialPath, files, error: null };
       } catch (error) {
         const homePath = defaultRemoteHomePath(username);
         if (normalizeRemotePath(initialPath) === homePath) throw error;
-        const files = await remoteApi.listFiles(sftp.sftpId, homePath);
+        const files = await listFiles(sftp.sftpId, homePath);
         return { sftp, path: homePath, files, error: null };
       }
     } catch (error) {
@@ -242,7 +244,7 @@ export function useSftpFiles({
 
   async function refreshFiles(sftpId: string, path: string, sessionId: string) {
     try {
-      const files = await remoteApi.listFiles(sftpId, path);
+      const files = await listFiles(sftpId, path);
       updateSession(sessionId, (session) => ({ ...session, files }));
     } catch (error) {
       const session = sessionsRef.current.find((item) => item.id === sessionId || item.sftpId === sftpId);
@@ -253,7 +255,7 @@ export function useSftpFiles({
   async function refreshFilesForTransfer(transfer: TransferInfo) {
     const directory = getRemoteParentPath(transfer.remotePath);
     try {
-      const files = await remoteApi.listFiles(transfer.sftpId, directory);
+      const files = await listFiles(transfer.sftpId, directory);
       updateSessionBySftp(transfer.sftpId, (session) =>
         normalizeRemotePath(remoteSessionPath(session)) === directory ? { ...session, files } : session,
       );
@@ -276,7 +278,7 @@ export function useSftpFiles({
     const directory = getRemoteParentPath(targetPath);
     setSessionFilesLoading(session.id, true);
     try {
-      const files = await remoteApi.listFiles(session.sftpId, directory);
+      const files = await listFiles(session.sftpId, directory);
       updateSession(session.id, (item) => ({
         ...item,
         currentPath: directory,
@@ -291,7 +293,7 @@ export function useSftpFiles({
   async function listRemoteDirectory(path: string) {
     const session = activeSession;
     if (!session?.sftpId) throw new Error("当前 SFTP 不可用");
-    return remoteApi.listFiles(session.sftpId, path);
+    return listFiles(session.sftpId, path);
   }
 
   return {

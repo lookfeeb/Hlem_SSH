@@ -1,21 +1,14 @@
 import { Modal } from "antd";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { appApi } from "./api/appApi";
 import { appEvents } from "./api/appEvents";
 import { remoteApi } from "./api/remoteApi";
 import { defaultBackupSettings, vaultApi } from "./api/vaultApi";
 import {
   BackupModal,
-  FileManager,
   SettingsModal,
-  SessionConfigModal,
-  SplitPane,
-  TelemetrySidebar,
-  TerminalPanel,
-  TopBar,
   TransferCenter,
   TunnelDrawer,
-  preloadWorkspaceComponents,
 } from "./app/lazyComponents";
 import {
   formatSessionError,
@@ -37,10 +30,21 @@ import { useTransferHistory } from "./app/useTransferHistory";
 import { useTunnelRuntime } from "./app/useTunnelRuntime";
 import { AppLoadingFallback } from "./components/shared/AppLoadingFallback";
 import { AppProviders } from "./components/shared/AppProviders";
+import { AppStatusBar } from "./components/AppStatusBar";
+import { ConnectionSidebar } from "./components/ConnectionSidebar";
+import { FileManager } from "./components/FileManager";
 import { MigrationGate } from "./components/MigrationGate";
+import { SessionConfigModal } from "./components/SessionConfigModal";
+import { SplitPane } from "./components/SplitPane";
+import { TelemetrySidebar } from "./components/TelemetrySidebar";
+import { TerminalPanel } from "./components/TerminalPanel";
+import { TopBar } from "./components/TopBar";
+import { EmptyWorkspace } from "./components/shared/EmptyWorkspace";
 import { configToRemoteSession, getErrorMessage } from "./lib/configMapping";
+import { normalizePath as normalizeRemotePath } from "./lib/path";
 import type {
   ConfigSnapshot,
+  RemoteFileEntry,
   RemoteSession,
   SftpChangedEvent,
 } from "./types";
@@ -52,7 +56,6 @@ function App() {
   const [sessions, setSessions] = useState<RemoteSession[]>([]);
   const [openSessionIds, setOpenSessionIds] = useState<string[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
-  const [sessionListOpen, setSessionListOpen] = useState(false);
   const [transferCenterOpen, setTransferCenterOpen] = useState(false);
   const {
     transfers,
@@ -70,6 +73,21 @@ function App() {
   const sessionsRef = useRef<RemoteSession[]>([]);
   const configSnapshotRef = useRef<ConfigSnapshot | undefined>(configSnapshot);
   const autoSftpConnectionKeysRef = useRef<Set<string>>(new Set());
+  const fileLoadingCountsRef = useRef<Map<string, number>>(new Map());
+  const sftpListRequestsRef = useRef<Map<string, Promise<RemoteFileEntry[]>>>(new Map());
+  const listSftpFiles = useCallback((sftpId: string, path: string) => {
+    const normalizedPath = normalizeRemotePath(path);
+    const requestKey = `${sftpId}:${normalizedPath}`;
+    const existing = sftpListRequestsRef.current.get(requestKey);
+    if (existing) return existing;
+    const request = remoteApi.listFiles(sftpId, normalizedPath).finally(() => {
+      if (sftpListRequestsRef.current.get(requestKey) === request) {
+        sftpListRequestsRef.current.delete(requestKey);
+      }
+    });
+    sftpListRequestsRef.current.set(requestKey, request);
+    return request;
+  }, []);
   const {
     apiServerRunning,
     setApiServerRunning,
@@ -119,6 +137,7 @@ function App() {
     updateSession,
     setSessionFilesLoading,
     formatSessionError,
+    listFiles: listSftpFiles,
   });
   const {
     upsertTransfer,
@@ -145,17 +164,14 @@ function App() {
   });
   const {
     sessionModal,
-    returnToSessionListOnCancel,
     addSession,
     editSession,
     saveSessionConfig,
     closeSessionConfigModal,
-    backToSessionListFromConfig,
   } = useSessionConfigWorkflow({
     configSnapshot,
     activeSessionId,
     applySnapshot,
-    openSessionList: () => setSessionListOpen(true),
   });
   const openSessions = useMemo(
     () => openSessionIds.map((id) => sessions.find((session) => session.id === id)).filter(Boolean) as RemoteSession[],
@@ -183,6 +199,7 @@ function App() {
     sessionsRef,
     updateSession,
     setSessionFilesLoading,
+    listFiles: listSftpFiles,
     appendTerminal: (sessionId, kind, content) => appendTerminal(sessionId, kind, content),
     formatSessionError,
     upsertTransfer,
@@ -343,13 +360,6 @@ function App() {
     };
   }, [appReady]);
 
-  useEffect(() => {
-    if (!appReady) return;
-    if (sessionModal || activeSession) return;
-    if (openSessionIds.length > 0) return;
-    setSessionListOpen(true);
-  }, [appReady, sessionModal, activeSession, openSessionIds.length]);
-
   async function openDatabaseDir() {
     await safeAppAction("打开数据库目录失败", () => appApi.openDatabaseDir());
   }
@@ -387,7 +397,6 @@ function App() {
       return validIds;
     });
     setActiveSessionId((current) => (preferredId || (mappedIds.includes(current) ? current : "")));
-    preloadWorkspaceComponents();
   }
 
   function mergeSnapshotSessions(nextSessions: RemoteSession[], currentSessions: RemoteSession[]) {
@@ -400,6 +409,8 @@ function App() {
         state: current.state,
         currentPath: current.currentPath,
         connectionId: current.connectionId,
+        connectedAt: current.connectedAt,
+        sshVersion: current.sshVersion,
         terminalId: current.terminalId,
         sftpId: current.sftpId,
         telemetryJobId: current.telemetryJobId,
@@ -432,11 +443,33 @@ function App() {
     return snapshot.data.groups.find((group) => group.sortOrder === 0)?.id ?? snapshot.data.groups[0]?.id ?? null;
   }
 
+  async function updateSessionFavorite(sessionId: string, favorite: boolean) {
+    try {
+      applySnapshot(await vaultApi.sessionFavoriteUpdate(sessionId, favorite));
+    } catch (error) {
+      Modal.error({ title: "更新收藏失败", content: getErrorMessage(error) });
+    }
+  }
+
+  async function markSessionRecent(sessionId: string) {
+    try {
+      applySnapshot(await vaultApi.sessionMarkRecent(sessionId));
+    } catch (error) {
+      console.warn("记录最近连接失败", error);
+    }
+  }
+
+  async function connectSessionWithRecent(session: RemoteSession) {
+    void markSessionRecent(session.id);
+    await connectSession(session);
+  }
+
   function resetRuntimeStateForSnapshot() {
     resetSessionRuntime();
     resetTerminalRuntime();
     resetTransferHistory();
     resetForwards();
+    fileLoadingCountsRef.current.clear();
     setFileLoadingSessionIds(new Set());
   }
 
@@ -445,15 +478,18 @@ function App() {
   }
 
   function setSessionFilesLoading(sessionId: string, loading: boolean) {
-    setFileLoadingSessionIds((current) => {
-      const next = new Set(current);
-      if (loading) {
-        next.add(sessionId);
+    const counts = fileLoadingCountsRef.current;
+    if (loading) {
+      counts.set(sessionId, (counts.get(sessionId) ?? 0) + 1);
+    } else {
+      const nextCount = (counts.get(sessionId) ?? 0) - 1;
+      if (nextCount > 0) {
+        counts.set(sessionId, nextCount);
       } else {
-        next.delete(sessionId);
+        counts.delete(sessionId);
       }
-      return next;
-    });
+    }
+    setFileLoadingSessionIds(new Set(counts.keys()));
   }
 
   function handleSftpChanged(payload: SftpChangedEvent) {
@@ -473,24 +509,18 @@ function App() {
             <Suspense fallback={<AppLoadingFallback />}>
               <>
                 <TopBar
-                  sessions={sessions}
-                  groups={configSnapshot?.data.groups ?? []}
                   tabSessions={openSessions}
                   activeSessionId={activeSession?.id ?? ""}
                   onActivate={activateSession}
-                  onAdd={() => void addSession(true)}
+                  onAdd={() => void addSession()}
                   onClose={closeSession}
-                  onEdit={(id) => editSession(id, true)}
-                  onDelete={(id) => void deleteSession(id)}
-                  onConnect={(session) => void connectSession(session)}
+                  onConnect={(session) => void connectSessionWithRecent(session)}
                   onDisconnect={(session) => void disconnectSession(session)}
                   onCancelConnect={(id) => void cancelConnectingSession(id)}
                   onTransferOpen={() => setTransferCenterOpen(true)}
                   onSettingsOpen={() => setSettingsOpen(true)}
                   connectingSessionId={connectingSessionId}
                   transfers={transfers}
-                  sessionListOpen={sessionListOpen}
-                  onSessionListOpenChange={setSessionListOpen}
                   apiServerRunning={apiServerRunning}
                   apiConfigured={!!currentSettings.aiApiKey}
                   onApiServerStart={() => {
@@ -499,7 +529,21 @@ function App() {
                 />
                 {activeSession ? (
                   <main className="workspace">
-                    <TelemetrySidebar session={activeSession} />
+                    <ConnectionSidebar
+                      sessions={sessions}
+                      groups={configSnapshot?.data.groups ?? []}
+                      activeSessionId={activeSession?.id ?? ""}
+                      connectingSessionId={connectingSessionId}
+                      onActivate={activateSession}
+                      onAdd={() => void addSession()}
+                      onEdit={(id) => editSession(id)}
+                      onDelete={(id) => void deleteSession(id)}
+                      onConnect={(session) => void connectSessionWithRecent(session)}
+                      onDisconnect={(session) => void disconnectSession(session)}
+                      onCancelConnect={(id) => void cancelConnectingSession(id)}
+                      onFavoriteChange={(id, favorite) => void updateSessionFavorite(id, favorite)}
+                      onMarkRecent={(id) => void markSessionRecent(id)}
+                    />
                     <section className="mainSurface">
                       <SplitPane
                         minTop={240}
@@ -543,8 +587,36 @@ function App() {
                         }
                       />
                     </section>
+                    <TelemetrySidebar session={activeSession} />
                   </main>
-                ) : null}
+                ) : (
+                  <main className="workspace workspace-empty">
+                    <ConnectionSidebar
+                      sessions={sessions}
+                      groups={configSnapshot?.data.groups ?? []}
+                      activeSessionId=""
+                      connectingSessionId={connectingSessionId}
+                      onActivate={activateSession}
+                      onAdd={() => void addSession()}
+                      onEdit={(id) => editSession(id)}
+                      onDelete={(id) => void deleteSession(id)}
+                      onConnect={(session) => void connectSessionWithRecent(session)}
+                      onDisconnect={(session) => void disconnectSession(session)}
+                      onCancelConnect={(id) => void cancelConnectingSession(id)}
+                      onFavoriteChange={(id, favorite) => void updateSessionFavorite(id, favorite)}
+                      onMarkRecent={(id) => void markSessionRecent(id)}
+                    />
+                    <EmptyWorkspace
+                      sessionCount={sessions.length}
+                      onAddSession={() => void addSession()}
+                    />
+                  </main>
+                )}
+                <AppStatusBar
+                  activeSession={activeSession}
+                  sessions={sessions}
+                  connectingSessionId={connectingSessionId}
+                />
               </>
             </Suspense>
           ) : (
@@ -661,7 +733,6 @@ function App() {
               existingSessions={configSnapshot.data.sessions.map((s) => ({ id: s.id, name: s.name, host: s.host }))}
               editingSessionId={sessionModal.mode === "edit" ? sessionModal.sessionId : undefined}
               onCancel={closeSessionConfigModal}
-              onCancelButton={returnToSessionListOnCancel ? backToSessionListFromConfig : undefined}
               onCreateGroup={createSessionGroup}
               onUpdateGroup={updateSessionGroup}
               onDeleteGroup={deleteSessionGroup}

@@ -1,4 +1,4 @@
-import { ApartmentOutlined, ApiOutlined, ExportOutlined, InfoCircleOutlined } from "@ant-design/icons";
+import { ApartmentOutlined, ExportOutlined, InfoCircleOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import { Button, Form, Modal, Space } from "antd";
 import { useEffect, useState } from "react";
 import type { AppInfo, AppSettings, ConfigSnapshot, UpdateInfo } from "../types";
@@ -82,7 +82,7 @@ export function SettingsModal({
             <div className="settingsShortcutGrid">
               <Button block icon={<ExportOutlined />} onClick={onBackupOpen}>数据备份与恢复</Button>
               <Button block icon={<ApartmentOutlined />} onClick={onTunnelOpen}>SSH 隧道管理</Button>
-              <Button block icon={<ApiOutlined />} onClick={() => onAiApiOpenChange(true)}>AI API 控制</Button>
+              <Button block icon={<ThunderboltOutlined />} onClick={() => onAiApiOpenChange(true)}>AI API 控制</Button>
               <Button block icon={<InfoCircleOutlined />} onClick={() => setAboutOpen(true)}>关于版本</Button>
             </div>
           </div>

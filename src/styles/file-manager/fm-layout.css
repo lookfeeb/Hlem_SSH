@@ -67,7 +67,7 @@
 }
 
 .fileTableSurface .ant-table-body {
-  overflow-x: hidden !important;
+  overflow-x: scroll !important;
 }
 
 .fileTableSurface-disabled {
@@ -108,6 +108,18 @@
   border: 1px solid rgba(226, 232, 240, 0.8) !important;
   box-shadow: var(--shadow-lg) !important;
   overflow: hidden;
+}
+
+.fileOperationModal .ant-form-item {
+  margin-bottom: 10px;
+}
+
+.fileOperationModal .ant-form-item-label {
+  padding-bottom: 4px;
+}
+
+.fileOperationModal .fileCreateForm .ant-form-item:first-child .ant-form-item-label {
+  display: none;
 }
 
 .fileOperationModal .ant-form-item:last-child {

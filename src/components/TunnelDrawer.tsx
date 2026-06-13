@@ -1,5 +1,5 @@
 import { ApartmentOutlined, CopyOutlined, DeleteOutlined, EditOutlined, GlobalOutlined, LinkOutlined, NodeIndexOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined, TagOutlined } from "@ant-design/icons";
-import { App as AntdApp, Button, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, Tooltip } from "antd";
+import { App as AntdApp, Button, Form, Input, InputNumber, Modal, Select, Space, Table, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useState } from "react";
 import { getErrorMessage } from "../lib/configMapping";

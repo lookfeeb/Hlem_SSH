@@ -1,5 +1,5 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "HelM",
   "identifier": "com.helm.desktop",
   "build": {
@@ -14,7 +14,7 @@
         "label": "main",
         "url": "index.html",
         "title": "HelM",
-        "width": 1365,
+        "width": 1520,
         "height": 900,
         "minWidth": 1024,
         "minHeight": 720,

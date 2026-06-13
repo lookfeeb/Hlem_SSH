@@ -34,17 +34,6 @@
   border-bottom: none;
 }
 
-.aiApiDescription {
-  margin: 0;
-  padding: 12px 14px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, .06) 0%, rgba(139, 92, 246, .06) 100%);
-  border: 1px solid rgba(99, 102, 241, .12);
-  color: #475569;
-  font-size: 13px;
-  line-height: 1.7;
-}
-
 .aiApiStatusRow {
   display: flex;
   align-items: center;
@@ -228,12 +217,6 @@
 
 .aiApiSessionAction.ant-btn-text:hover:not(:disabled) {
   background-color: rgba(79, 70, 229, 0.08) !important;
-}
-
-.aiApiSessionActionSpacer {
-  flex: 0 0 32px;
-  width: 32px;
-  height: 32px;
 }
 
 .aiApiKeyInput {

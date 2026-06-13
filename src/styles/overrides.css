@@ -29,10 +29,6 @@
   background: linear-gradient(180deg, rgba(99, 102, 241, .55) 0%, rgba(139, 92, 246, .55) 100%);
 }
 
-.terminalPrompt {
-  letter-spacing: .3px;
-}
-
 .codeEditorToolbar {
   background: linear-gradient(180deg, #f8fafc 0%, #eef3fb 100%);
 }
@@ -478,40 +474,48 @@
   transform: scale(.98);
 }
 
-.fileEditorSaveButton,
 .editorPrimarySaveButton {
-  background: var(--accent-grad) !important;
-  box-shadow: 0 6px 16px -4px rgba(99, 102, 241, .45) !important;
+  min-width: 104px;
+  padding: 0 16px !important;
+  border-radius: 8px !important;
+  background: linear-gradient(135deg, #2563eb 0%, #4f46e5 100%) !important;
+  box-shadow:
+    0 10px 22px -10px rgba(37, 99, 235, .75),
+    inset 0 1px 0 rgba(255, 255, 255, .22) !important;
   border-color: transparent !important;
   color: #ffffff !important;
-  transition: transform .18s ease, box-shadow .18s ease !important;
+  letter-spacing: 0 !important;
+  transition: transform .18s ease, box-shadow .18s ease, filter .18s ease !important;
 }
 
-.fileEditorSaveButton:hover,
-.fileEditorSaveButton:focus,
-.fileEditorSaveButton:focus-visible,
 .editorPrimarySaveButton:hover,
 .editorPrimarySaveButton:focus,
 .editorPrimarySaveButton:focus-visible {
-  background: var(--accent-grad) !important;
+  background: linear-gradient(135deg, #1d4ed8 0%, #4338ca 100%) !important;
   border-color: transparent !important;
   color: #ffffff !important;
-  transform: translateY(-2px);
-  box-shadow: 0 10px 22px -6px rgba(99, 102, 241, .55) !important;
+  transform: translateY(-1px);
+  box-shadow:
+    0 14px 28px -12px rgba(37, 99, 235, .9),
+    inset 0 1px 0 rgba(255, 255, 255, .28) !important;
 }
 
-.fileEditorSaveButton:active,
 .editorPrimarySaveButton:active {
-  background: var(--accent-grad) !important;
+  background: linear-gradient(135deg, #1d4ed8 0%, #4338ca 100%) !important;
   border-color: transparent !important;
   color: #ffffff !important;
   transform: translateY(0);
-  box-shadow: 0 3px 8px rgba(99, 102, 241, .25) !important;
+  box-shadow: 0 5px 14px -8px rgba(37, 99, 235, .65) !important;
 }
 
-.fileEditorSaveButton span,
-.editorPrimarySaveButton span {
+.editorPrimarySaveButton span,
+.editorPrimarySaveButton .ant-btn-icon {
   color: #ffffff !important;
+  letter-spacing: 0 !important;
+}
+
+.editorPrimarySaveButton .ant-btn-icon {
+  margin-inline-end: 6px !important;
 }
 
 .transferPanel {
@@ -553,17 +557,6 @@
   border-color: rgba(99, 102, 241, .35) !important;
   color: var(--accent) !important;
   box-shadow: 0 2px 8px rgba(99, 102, 241, .12);
-}
-
-.sessionListModalItem {
-  transition: all .22s cubic-bezier(.4, 0, .2, 1);
-}
-
-.sessionListModalItem:hover {
-  transform: translateY(-1px);
-  border-color: rgba(99, 102, 241, .35) !important;
-  background: linear-gradient(135deg, #fafbff 0%, #f5f3ff 100%) !important;
-  box-shadow: 0 8px 24px -8px rgba(99, 102, 241, .15);
 }
 
 .transferDrawer.ant-drawer-content {
@@ -854,11 +847,6 @@
   box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
 }
 
-.terminalPanel {
-  background:
-    linear-gradient(180deg, rgba(251, 253, 255, 1) 0%, rgba(247, 250, 254, 1) 100%);
-}
-
 .ant-input:focus,
 .ant-input:focus-within,
 .ant-input-affix-wrapper-focused,
@@ -956,11 +944,6 @@
   border-color: rgba(232, 238, 246, .9);
   border-radius: var(--radius-lg);
   box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
-}
-
-.terminalPanel {
-  background:
-    linear-gradient(180deg, rgba(251, 253, 255, 1) 0%, rgba(247, 250, 254, 1) 100%);
 }
 
 .ant-input:focus,

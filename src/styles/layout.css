@@ -1,28 +1,17 @@
 /* ─── App Shell ─────────────────────────────────────────────────────────── */
 .appShell {
   display: grid;
-  grid-template-rows: 56px 1fr;
+  grid-template-rows: 40px minmax(0, 1fr) 28px;
   width: 100vw;
   height: 100vh;
-  min-width: 1024px;
+  min-width: 1180px;
   min-height: 720px;
-  background:
-    radial-gradient(1200px 600px at 12% -8%, rgba(99, 102, 241, .14) 0%, rgba(99, 102, 241, 0) 60%),
-    radial-gradient(900px 500px at 95% 4%, rgba(139, 92, 246, .12) 0%, rgba(139, 92, 246, 0) 60%),
-    radial-gradient(900px 600px at 50% 110%, rgba(59, 130, 246, .08) 0%, rgba(59, 130, 246, 0) 65%),
-    linear-gradient(180deg, #eef2f9 0%, #e6ecf6 100%);
+  background: linear-gradient(180deg, #f7f9fd 0%, #eef3f8 100%);
   position: relative;
 }
 
 .appShell::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    radial-gradient(circle at 1px 1px, rgba(15, 23, 42, .035) 1px, transparent 0);
-  background-size: 22px 22px;
-  opacity: .6;
-  mix-blend-mode: multiply;
+  content: none;
+  display: none;
 }
 

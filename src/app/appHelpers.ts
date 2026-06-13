@@ -155,8 +155,9 @@ export function remoteSessionPath(session: Pick<RemoteSession, "username" | "cur
 
 export function hasTelemetryData(telemetry: ServerTelemetry) {
   return Boolean(
-    telemetry.uptime !== "未知" ||
+      telemetry.uptime !== "未知" ||
       telemetry.ip ||
+      (telemetry.ipv6 && telemetry.ipv6 !== "//") ||
       telemetry.cpu > 0 ||
       telemetry.memory.total > 0 ||
       telemetry.swap.total > 0 ||

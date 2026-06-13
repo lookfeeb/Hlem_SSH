@@ -8,8 +8,12 @@ export interface RemoteSession {
   username: string;
   state: ConnectionState;
   accent: string;
+  favorite: boolean;
+  lastConnectedAt?: string | null;
   currentPath: string;
   connectionId?: string | null;
+  connectedAt?: string | null;
+  sshVersion?: string | null;
   terminalId?: string | null;
   sftpId?: string | null;
   telemetryJobId?: string | null;
@@ -28,6 +32,7 @@ export interface TerminalEntry {
 
 export interface ServerTelemetry {
   ip: string;
+  ipv6: string;
   uptime: string;
   cpu: number;
   memory: UsageMetric;
@@ -192,6 +197,8 @@ export interface SessionConfig {
   id: string;
   name: string;
   groupId?: string | null;
+  favorite?: boolean;
+  lastConnectedAt?: string | null;
   host: string;
   port: number;
   username: string;
@@ -240,7 +247,7 @@ export interface SftpOptions {
 
 export type GroupInput = Pick<SessionGroup, "name" | "parentId">;
 
-export type SessionInput = Omit<SessionConfig, "id" | "createdAt" | "updatedAt">;
+export type SessionInput = Omit<SessionConfig, "id" | "createdAt" | "updatedAt" | "favorite" | "lastConnectedAt">;
 
 export interface TunnelConfig {
   id: string;

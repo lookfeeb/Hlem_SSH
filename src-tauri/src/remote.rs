@@ -181,6 +181,20 @@ if [ -n "$public_ip" ]; then
 else
   set -- $(hostname -I 2>/dev/null); [ -n "$1" ] && printf "IP %s\n" "$1";
 fi;
+ipv6="";
+if command -v ip >/dev/null 2>&1; then
+  ipv6=$(ip -6 addr show scope global 2>/dev/null | awk "/inet6 / { sub(/\/.*/, \"\", \$2); print \$2; exit }");
+fi;
+if [ -z "$ipv6" ]; then
+  for candidate in $(hostname -I 2>/dev/null); do
+    case "$candidate" in
+      *:*)
+        case "$candidate" in fe80:*|::1) ;; *) ipv6="$candidate"; break ;; esac
+        ;;
+    esac
+  done;
+fi;
+if [ -n "$ipv6" ]; then printf "IPV6 %s\n" "$ipv6"; else printf "IPV6 //\n"; fi;
 '"#;
 const TELEMETRY_DISK_COMMAND: &str = r#"sh -lc 'export LC_ALL=C;
 df -B1 -P 2>/dev/null | while read -r fs total used avail pct mount; do
@@ -290,6 +304,20 @@ helm_tm_ip() {
   else
     set -- $(hostname -I 2>/dev/null); [ -n "$1" ] && printf "IP %s\n" "$1";
   fi;
+  ipv6="";
+  if command -v ip >/dev/null 2>&1; then
+    ipv6=$(ip -6 addr show scope global 2>/dev/null | awk "/inet6 / { sub(/\/.*/, \"\", \$2); print \$2; exit }");
+  fi;
+  if [ -z "$ipv6" ]; then
+    for candidate in $(hostname -I 2>/dev/null); do
+      case "$candidate" in
+        *:*)
+          case "$candidate" in fe80:*|::1) ;; *) ipv6="$candidate"; break ;; esac
+          ;;
+      esac
+    done;
+  fi;
+  if [ -n "$ipv6" ]; then printf "IPV6 %s\n" "$ipv6"; else printf "IPV6 //\n"; fi;
 };
 helm_tm_disk() {
   df -B1 -P 2>/dev/null | while read -r fs total used avail pct mount; do
@@ -437,6 +465,7 @@ pub struct TelemetryJobInfo {
 #[serde(rename_all = "camelCase")]
 pub struct ServerTelemetry {
     pub ip: String,
+    pub ipv6: String,
     pub uptime: String,
     pub cpu: f64,
     pub memory: UsageMetric,
@@ -705,11 +734,13 @@ MEM 4096 1024
 SWAP 2048 128
 CPU 12.5
 IP 10.0.0.5
+IPV6 2604:a880:400:d0::1
 DISK / 100 200
 PROC 42 sshd 1.5 20.0
 ";
         let telemetry = parse_linux_telemetry(output, "127.0.0.1", 33);
         assert_eq!(telemetry.ip, "10.0.0.5");
+        assert_eq!(telemetry.ipv6, "2604:a880:400:d0::1");
         assert_eq!(telemetry.uptime, "1 天 1 小时");
         assert_eq!(telemetry.memory.used, 1024);
         assert_eq!(telemetry.memory.total, 4096);

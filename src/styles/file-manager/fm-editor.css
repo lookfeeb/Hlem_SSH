@@ -1,94 +1,44 @@
-.fileEditorModal .ant-modal-content {
-  overflow: hidden;
-}
-
-.fileEditorModal .ant-modal-body {
-  padding: 0;
-}
-
-.fileEditorModal .ant-modal-header {
-  padding-right: 52px;
-}
-
-.fileEditorTitle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.fileEditorTitle > span {
-  overflow: hidden;
-  min-width: 0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fileEditorTitle .ant-btn {
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
-  border-radius: 7px !important;
-  box-shadow: none !important;
-}
-
-.fileEditorModal .ant-modal-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 12px 16px;
-  border-top: 1px solid #eef2f7;
-  background: #fbfdff;
-}
-
-.fileEditorModal .ant-tabs {
-  margin: 0 16px;
-}
-
-.fileEditorModal .ant-tabs-nav {
-  margin-bottom: 0;
-}
-
-.fileEditorModal .ant-tabs-tab {
-  padding: 6px 12px !important;
-  font-size: 13px;
-}
-
-.fileEditorModal .ant-tabs-nav::before {
-  border-bottom: 1px solid #eef2f7;
-}
-
-.fileEditorSaveButton,
 .editorPrimarySaveButton {
-  height: 32px !important;
+  height: 34px !important;
+  min-width: 104px;
+  padding: 0 16px !important;
   border: 0 !important;
-  border-radius: 7px !important;
-  background: #1677ff !important;
-  box-shadow: 0 5px 12px rgba(22, 119, 255, .18) !important;
+  border-radius: 8px !important;
+  background: linear-gradient(135deg, #2563eb 0%, #4f46e5 100%) !important;
+  box-shadow:
+    0 10px 22px -10px rgba(37, 99, 235, .75),
+    inset 0 1px 0 rgba(255, 255, 255, .22) !important;
   color: #ffffff !important;
   font-weight: 700 !important;
+  letter-spacing: 0 !important;
+  transition: transform .18s ease, box-shadow .18s ease, filter .18s ease !important;
 }
 
-.fileEditorSaveButton .ant-btn-icon,
-.fileEditorSaveButton span,
 .editorPrimarySaveButton .ant-btn-icon,
 .editorPrimarySaveButton span {
   color: #ffffff !important;
+  letter-spacing: 0 !important;
 }
 
-.fileEditorSaveButton:hover,
-.editorPrimarySaveButton:hover {
-  background: #2563eb !important;
-  box-shadow: 0 6px 14px rgba(37, 99, 235, .22) !important;
+.editorPrimarySaveButton .ant-btn-icon {
+  margin-inline-end: 6px !important;
+}
+
+.editorPrimarySaveButton:hover,
+.editorPrimarySaveButton:focus-visible {
+  background: linear-gradient(135deg, #1d4ed8 0%, #4338ca 100%) !important;
+  box-shadow:
+    0 14px 28px -12px rgba(37, 99, 235, .9),
+    inset 0 1px 0 rgba(255, 255, 255, .28) !important;
   color: #ffffff !important;
+  transform: translateY(-1px);
 }
 
-.fileEditorLoading {
-  display: grid;
-  place-items: center;
-  gap: 10px;
-  min-height: 360px;
-  color: var(--text-secondary);
+.editorPrimarySaveButton:disabled {
+  filter: grayscale(.18);
+  opacity: .62;
+  box-shadow: none !important;
+  transform: none;
 }
 
 .codeEditorShell {
@@ -384,14 +334,5 @@
 .editorTabDisconnected {
   color: #ff4d4f;
   opacity: 0.7;
-}
-
-.editorTabSession {
-  margin-left: 6px;
-  font-size: 10px;
-  color: #999;
-  background: #f0f0f0;
-  padding: 1px 5px;
-  border-radius: 3px;
 }
 

@@ -42,7 +42,7 @@ export function AboutModal({
     <Modal open={open} title={null} className="aboutVersionModal" footer={null} closable onCancel={onClose} width={420}>
       <div className="aboutHero">
         <div className="aboutHeroGlow" />
-        <div className="aboutHeroIcon"><img src="./nexus_icon.svg" alt="" aria-hidden="true" /></div>
+        <div className="aboutHeroIcon"><img src="./Helm_icon.svg" alt="" aria-hidden="true" /></div>
         <h2 className="aboutHeroTitle">HelM</h2>
         <span className="aboutHeroVersion">
           {updateRepo ? (

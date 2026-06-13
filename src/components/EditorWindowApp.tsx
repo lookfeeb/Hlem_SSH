@@ -1,8 +1,9 @@
 import { App as AntdApp, Button, ConfigProvider, Spin, Tabs, message, theme } from "antd";
+import { SaveOutlined } from "@ant-design/icons";
 import zhCN from "antd/locale/zh_CN";
 import { useEffect, useRef, useState } from "react";
 import { CodeEditor } from "./CodeEditor";
-import { editorChannelName, GLOBAL_EDITOR_CHANNEL, type EditorChannelMessage } from "../lib/editorChannel";
+import { editorChannelName, type EditorChannelMessage } from "../lib/editorChannel";
 
 interface EditorTab {
   path: string;
@@ -127,11 +128,13 @@ export function EditorWindowApp() {
             <Button
               type="primary"
               className="editorPrimarySaveButton"
+              aria-label="保存文件"
+              icon={<SaveOutlined />}
               loading={activeTab?.saving}
               disabled={!ready || !activeTab || activeTab.disconnected}
               onClick={save}
             >
-              保存
+              保存文件
             </Button>
           </header>
           {ready ? (

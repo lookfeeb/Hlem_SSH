@@ -1,33 +1,21 @@
 import {
-  ApiOutlined,
-  AppstoreOutlined,
-  DeleteOutlined,
-  DisconnectOutlined,
-  EditOutlined,
-  LoadingOutlined,
-  PlusOutlined,
+  CloseOutlined,
+  LeftOutlined,
   ProfileOutlined,
-  RobotOutlined,
+  RightOutlined,
   SettingOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
-import { Badge, Button, Modal, Space, Tabs, Tooltip } from "antd";
-import { useEffect, useMemo, useState } from "react";
-import type { ConnectionState, RemoteSession, SessionGroup, TransferInfo } from "../types";
-import { SessionListModalInner } from "./SessionListModalInner";
-
-const SESSION_LIST_MODAL_Z_INDEX = 1000;
-const DELETE_CONFIRM_MODAL_Z_INDEX = 1100;
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Badge, Button, Space, Tooltip } from "antd";
+import type { ConnectionState, RemoteSession, TransferInfo } from "../types";
 
 interface TopBarProps {
-  sessions: RemoteSession[];
-  groups: SessionGroup[];
   tabSessions: RemoteSession[];
   activeSessionId: string;
   onActivate: (id: string) => void;
   onAdd: () => void;
   onClose: (id: string) => void;
-  onEdit: (id: string) => void;
-  onDelete: (id: string) => void;
   onConnect: (session: RemoteSession) => void;
   onDisconnect: (session: RemoteSession) => void;
   onCancelConnect: (id: string) => void;
@@ -35,23 +23,17 @@ interface TopBarProps {
   onSettingsOpen: () => void;
   connectingSessionId: string | null;
   transfers: TransferInfo[];
-  sessionListOpen: boolean;
-  onSessionListOpenChange: (open: boolean) => void;
   apiServerRunning: boolean;
   apiConfigured: boolean;
   onApiServerStart: () => void;
 }
 
 export function TopBar({
-  sessions,
-  groups,
   tabSessions,
   activeSessionId,
   onActivate,
   onAdd,
   onClose,
-  onEdit,
-  onDelete,
   onConnect,
   onDisconnect,
   onCancelConnect,
@@ -59,78 +41,89 @@ export function TopBar({
   onSettingsOpen,
   connectingSessionId,
   transfers,
-  sessionListOpen,
-  onSessionListOpenChange,
   apiServerRunning,
   apiConfigured,
   onApiServerStart,
 }: TopBarProps) {
-
-  const [sessionListGroupId, setSessionListGroupId] = useState<string>("all");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; name: string } | null>(null);
-  const activeSessionListGroupId = sessionListGroupId || "all";
-
-  const filteredSessions = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (q) {
-      return sessions.filter(
-        (session) =>
-          session.name.toLowerCase().includes(q) ||
-          session.host.toLowerCase().includes(q) ||
-          session.username.toLowerCase().includes(q),
-      );
-    }
-
-    if (activeSessionListGroupId !== "all") {
-      return sessions.filter((session) => session.groupId === activeSessionListGroupId);
-    }
-
-    return sessions;
-  }, [sessions, activeSessionListGroupId, searchQuery]);
-
   const activeTransferTotal = activeTransferCount(transfers);
+  const tabsViewportRef = useRef<HTMLDivElement>(null);
+  const [tabScrollState, setTabScrollState] = useState({ canLeft: false, canRight: false });
+  const tabsScrollable = tabScrollState.canLeft || tabScrollState.canRight;
 
-
-
-  useEffect(() => {
-    if (!groups.length) {
-      if (sessionListGroupId) setSessionListGroupId("");
+  const updateTabScrollState = useCallback(() => {
+    const element = tabsViewportRef.current;
+    if (!element) {
+      setTabScrollState({ canLeft: false, canRight: false });
       return;
     }
-    if (sessionListGroupId === "all") return;
-    if (!sessionListGroupId || !groups.some((group) => group.id === sessionListGroupId)) {
-      setSessionListGroupId("all");
+    const maxScrollLeft = Math.max(0, element.scrollWidth - element.clientWidth);
+    const next = {
+      canLeft: element.scrollLeft > 1,
+      canRight: element.scrollLeft < maxScrollLeft - 1,
+    };
+    setTabScrollState((current) =>
+      current.canLeft === next.canLeft && current.canRight === next.canRight ? current : next,
+    );
+  }, []);
+
+  useEffect(() => {
+    const element = tabsViewportRef.current;
+    if (!element) return;
+    updateTabScrollState();
+    const list = element.firstElementChild;
+    const observer = new ResizeObserver(updateTabScrollState);
+    observer.observe(element);
+    if (list) observer.observe(list);
+    element.addEventListener("scroll", updateTabScrollState, { passive: true });
+    return () => {
+      observer.disconnect();
+      element.removeEventListener("scroll", updateTabScrollState);
+    };
+  }, [tabSessions.length, updateTabScrollState]);
+
+  useEffect(() => {
+    const element = tabsViewportRef.current?.querySelector(".sessionTab-active");
+    if (!(element instanceof HTMLElement)) return;
+    element.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+    window.requestAnimationFrame(updateTabScrollState);
+  }, [activeSessionId, tabSessions.length, updateTabScrollState]);
+
+  const scrollSessionTabs = useCallback((direction: -1 | 1) => {
+    const element = tabsViewportRef.current;
+    if (!element) return;
+    const distance = Math.max(160, Math.floor(element.clientWidth * 0.72));
+    element.scrollBy({ left: direction * distance, behavior: "smooth" });
+  }, []);
+
+  const handleSessionTabClick = useCallback((session: RemoteSession) => {
+    if (session.id !== activeSessionId) {
+      onActivate(session.id);
+      return;
     }
-  }, [groups, sessionListGroupId]);
-
-
-
-  function openCreateSession() {
-    onAdd();
-  }
-
-  function openSessionFromList(session: RemoteSession) {
-    onActivate(session.id);
-    onSessionListOpenChange(false);
-    if (connectingSessionId === session.id || session.state === "connected") return;
-    onConnect(session);
-  }
+    const state = sessionState(session, connectingSessionId);
+    if (state === "connected") {
+      onDisconnect(session);
+    } else if (state === "connecting") {
+      onCancelConnect(session.id);
+    } else if (state === "disconnected" || state === "failed") {
+      onConnect(session);
+    }
+  }, [activeSessionId, connectingSessionId, onActivate, onCancelConnect, onConnect, onDisconnect]);
 
   return (
     <header className="topBar">
       <div className="brand">
         <span className="brandMark">
-          <img className="brandIcon" src="./nexus_icon.svg" alt="" aria-hidden="true" />
+          <img className="brandIcon" src="./Helm_icon.svg" alt="" aria-hidden="true" />
           <span>HelM</span>
         </span>
-        <span className="brandActions">
+        <Space size={6} className="brandActions">
           {apiConfigured && (
             <Tooltip title={apiServerRunning ? "AI API 运行中" : "AI API 已停止"} placement="bottom">
               <Button
                 aria-label="AI API"
                 className={`brandApiButton${apiServerRunning ? " brandApiButton-running" : " brandApiButton-stopped"}`}
-                icon={<RobotOutlined />}
+                icon={<ThunderboltOutlined />}
                 size="small"
                 onClick={onApiServerStart}
               />
@@ -144,60 +137,65 @@ export function TopBar({
               onClick={onSettingsOpen}
             />
           </Tooltip>
-        </span>
+        </Space>
       </div>
-      <Tabs
-        className="sessionTabs"
-        hideAdd
-        tabBarExtraContent={{
-          right: (
-            <Tooltip title="会话列表" placement="bottom">
-              <Button
-                aria-label="会话列表"
-                className="sessionTabsListButton"
-                icon={<AppstoreOutlined />}
-                size="small"
-                onClick={() => onSessionListOpenChange(true)}
-              />
-            </Tooltip>
-          ),
-        }}
-        type="editable-card"
-        size="small"
-        activeKey={activeSessionId}
-        onChange={onActivate}
-        onTabClick={(key) => {
-          if (key === activeSessionId) {
-            const session = tabSessions.find((s) => s.id === key);
-            if (!session) return;
-            const state = sessionState(session, connectingSessionId);
-            if (state === "connected") {
-              onDisconnect(session);
-            } else if (state === "connecting") {
-              onCancelConnect(session.id);
-            } else if (state === "disconnected" || state === "failed") {
-              onConnect(session);
-            }
-          }
-        }}
-        onEdit={(targetKey, action) => {
-          if (action === "add") onAdd();
-          if (action === "remove" && typeof targetKey === "string")
-            onClose(targetKey);
-        }}
-        items={tabSessions.map((session) => {
-          const state = sessionState(session, connectingSessionId);
-          return {
-            key: session.id,
-            label: (
-              <span className={`sessionTabLabel sessionTabLabel-${state}`}>
-                <span className="sessionTabName">{session.name}</span>
-              </span>
-            ),
-            closable: true,
-          };
-        })}
-      />
+      <div className={`sessionTabs${tabsScrollable ? " sessionTabs-scrollable" : ""}`}>
+        <Button
+          aria-label="向左滚动标签"
+          className="sessionTabsScrollButton sessionTabsScrollButton-left"
+          disabled={!tabScrollState.canLeft}
+          icon={<LeftOutlined />}
+          size="small"
+          onClick={() => scrollSessionTabs(-1)}
+        />
+        <div className="sessionTabsViewport" ref={tabsViewportRef}>
+          <div className="sessionTabsList" role="tablist" aria-orientation="horizontal">
+            {tabSessions.map((session) => {
+              const state = sessionState(session, connectingSessionId);
+              const stateText = sessionStateText(state);
+              const active = session.id === activeSessionId;
+              return (
+                <div
+                  key={session.id}
+                  className={`sessionTab sessionTab-${state}${active ? " sessionTab-active" : ""}`}
+                  role="presentation"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    aria-label={`${stateText}：${session.name}`}
+                    className="sessionTabButton"
+                    title={`${stateText}：${session.name}`}
+                    onClick={() => handleSessionTabClick(session)}
+                  >
+                    <span className={`sessionTabLabel sessionTabLabel-${state}`}>
+                      <span className={`sessionTabState sessionTabState-${state}`} aria-hidden="true" />
+                      <span className="sessionTabName">{session.name}</span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`关闭 ${session.name}`}
+                    className="sessionTabClose"
+                    onClick={() => onClose(session.id)}
+                  >
+                    <CloseOutlined />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        <Button
+          aria-label="向右滚动标签"
+          className="sessionTabsScrollButton sessionTabsScrollButton-right"
+          disabled={!tabScrollState.canRight}
+          icon={<RightOutlined />}
+          size="small"
+          onClick={() => scrollSessionTabs(1)}
+        />
+      </div>
 
       <Space size={4} className="toolbar">
         <Tooltip title={activeTransferTotal > 0 ? `传输进行中 · ${activeTransferTotal} 条` : "传输列表"} placement="bottom">
@@ -212,80 +210,25 @@ export function TopBar({
           </Badge>
         </Tooltip>
       </Space>
-
-      <Modal
-        title={null}
-        open={sessionListOpen}
-        footer={null}
-        centered
-        width={780}
-        className="sessionListModal"
-        zIndex={SESSION_LIST_MODAL_Z_INDEX}
-        transitionName=""
-        maskTransitionName=""
-        destroyOnHidden
-        onCancel={() => onSessionListOpenChange(false)}
-      >
-        <SessionListModalInner
-          sessions={sessions}
-          groups={groups}
-          activeSessionId={activeSessionId}
-          connectingSessionId={connectingSessionId}
-          sessionListGroupId={sessionListGroupId}
-          setSessionListGroupId={setSessionListGroupId}
-          searchQuery={searchQuery}
-          setSearchQuery={setSearchQuery}
-          openCreateSession={openCreateSession}
-          openSessionFromList={openSessionFromList}
-          onDisconnect={onDisconnect}
-          onCancelConnect={onCancelConnect}
-          onEdit={onEdit}
-          onDeleteConfirm={setDeleteConfirm}
-          filteredSessions={filteredSessions}
-        />
-      </Modal>
-      <Modal
-        open={!!deleteConfirm}
-        title={null}
-        footer={null}
-        closable={false}
-        centered
-        width={360}
-        className="deleteConfirmModal"
-        zIndex={DELETE_CONFIRM_MODAL_Z_INDEX}
-        onCancel={() => setDeleteConfirm(null)}
-      >
-        <div className="deleteConfirmContent">
-          <div className="deleteConfirmIcon">
-            <DeleteOutlined />
-          </div>
-          <h3 className="deleteConfirmTitle">确认删除</h3>
-          <p className="deleteConfirmDesc">
-            确定要删除会话「<strong>{deleteConfirm?.name}</strong>」吗？此操作不可撤销。
-          </p>
-          <div className="deleteConfirmActions">
-            <Button onClick={() => setDeleteConfirm(null)}>取消</Button>
-            <Button
-              danger
-              type="primary"
-              onClick={() => {
-                if (deleteConfirm) {
-                  onDelete(deleteConfirm.id);
-                  setDeleteConfirm(null);
-                }
-              }}
-            >
-              删除
-            </Button>
-          </div>
-        </div>
-      </Modal>
     </header>
   );
 }
 
 function sessionState(session: RemoteSession, connectingSessionId: string | null): ConnectionState {
   return connectingSessionId === session.id ? "connecting" : session.state;
+}
+
+function sessionStateText(state: ConnectionState) {
+  switch (state) {
+    case "connected":
+      return "已连接";
+    case "connecting":
+      return "连接中";
+    case "failed":
+      return "连接失败";
+    default:
+      return "未连接";
+  }
 }
 
 function activeTransferCount(transfers: TransferInfo[]) {

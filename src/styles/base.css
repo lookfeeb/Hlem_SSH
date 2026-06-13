@@ -54,7 +54,6 @@ button { font: inherit; cursor: pointer; }
   line-height: 16px;
 }
 
-.appPlaceholder,
 .appLoadingFallback {
   display: flex;
   align-items: center;

@@ -17,7 +17,7 @@ const LogWindowApp = lazy(() =>
 function BootFallback() {
   return (
     <div className="bootScreen" role="status" aria-live="polite">
-      <img className="bootMark" src="./nexus_icon.svg" alt="" aria-hidden="true" />
+      <img className="bootMark" src="./Helm_icon.svg" alt="" aria-hidden="true" />
       <div>
         <strong>HelM</strong>
         <span>正在启动...</span>

@@ -19,6 +19,7 @@ type UseTerminalRuntimeOptions = {
   setSessions: Dispatch<SetStateAction<RemoteSession[]>>;
   updateSession: (sessionId: string, updater: (session: RemoteSession) => RemoteSession) => void;
   setSessionFilesLoading: (sessionId: string, loading: boolean) => void;
+  listFiles: (sftpId: string, path: string) => Promise<RemoteSession["files"]>;
   formatSessionError: (error: unknown, session: Pick<RemoteSession, "name" | "connectionId" | "terminalId" | "sftpId">) => string;
 };
 
@@ -27,6 +28,7 @@ export function useTerminalRuntime({
   setSessions,
   updateSession,
   setSessionFilesLoading,
+  listFiles,
   formatSessionError,
 }: UseTerminalRuntimeOptions) {
   const terminalSessionMapRef = useRef<Map<string, string>>(new Map());
@@ -99,8 +101,7 @@ export function useTerminalRuntime({
     updateSession(session.id, (item) => ({ ...item, currentPath: nextPath }));
     if (!session.sftpId) return;
     setSessionFilesLoading(session.id, true);
-    void remoteApi
-      .listFiles(session.sftpId, nextPath)
+    void listFiles(session.sftpId, nextPath)
       .then((files) => {
         if (!mountedRef.current) return;
         setSessions((current) =>

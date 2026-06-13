@@ -19,6 +19,10 @@ export const vaultApi = {
   groupDelete: (groupId: string) => call<ConfigSnapshot>("group_delete", { groupId }),
   sessionCreate: (input: SessionInput) => call<ConfigSnapshot>("session_create", { input }),
   sessionUpdate: (sessionId: string, input: SessionInput) => call<ConfigSnapshot>("session_update", { sessionId, input }),
+  sessionFavoriteUpdate: (sessionId: string, favorite: boolean) =>
+    callWithCommandFallback<ConfigSnapshot>("session_favorite_update", "sessionFavoriteUpdate", { sessionId, favorite }),
+  sessionMarkRecent: (sessionId: string) =>
+    callWithCommandFallback<ConfigSnapshot>("session_mark_recent", "sessionMarkRecent", { sessionId }),
   sessionDelete: (sessionId: string) => call<ConfigSnapshot>("session_delete", { sessionId }),
   sessionDuplicate: (sessionId: string) => call<ConfigSnapshot>("session_duplicate", { sessionId }),
   tunnelCreate: (input: TunnelInput) => call<ConfigSnapshot>("tunnel_create", { input }),
@@ -89,4 +93,26 @@ export function defaultBackupSettings(): BackupSettings {
       },
     },
   };
+}
+
+async function callWithCommandFallback<T>(
+  command: string,
+  fallbackCommand: string,
+  args: Record<string, unknown>,
+) {
+  try {
+    return await call<T>(command, args);
+  } catch (error) {
+    if (!isCommandNotFound(error)) throw error;
+    try {
+      return await call<T>(fallbackCommand, args);
+    } catch (fallbackError) {
+      throw isCommandNotFound(fallbackError) ? error : fallbackError;
+    }
+  }
+}
+
+function isCommandNotFound(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /command .* not found/i.test(message);
 }

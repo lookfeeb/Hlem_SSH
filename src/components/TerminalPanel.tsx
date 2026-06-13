@@ -95,17 +95,17 @@ export function TerminalPanel({ session, onSendData, onResize, onClear }: Termin
       macOptionIsMeta: true,
       theme: {
         background: "#fbfdff",
-        foreground: "#0f172a",
+        foreground: "#1f2937",
         cursor: "#2563eb",
         selectionBackground: "#bfdbfe",
-        black: "#0f172a",
+        black: "#111827",
         red: "#dc2626",
-        green: "#059669",
+        green: "#047857",
         yellow: "#b45309",
         blue: "#2563eb",
         magenta: "#7c3aed",
         cyan: "#0891b2",
-        white: "#f8fafc",
+        white: "#475569",
         brightBlack: "#64748b",
         brightRed: "#ef4444",
         brightGreen: "#10b981",
@@ -113,7 +113,7 @@ export function TerminalPanel({ session, onSendData, onResize, onClear }: Termin
         brightBlue: "#3b82f6",
         brightMagenta: "#8b5cf6",
         brightCyan: "#06b6d4",
-        brightWhite: "#ffffff",
+        brightWhite: "#0f172a",
       },
     });
     const fitAddon = new FitAddon();
@@ -353,9 +353,6 @@ export function TerminalPanel({ session, onSendData, onResize, onClear }: Termin
         </Dropdown>
       </div>
       <div className="terminalToolbar">
-        <span className={`terminalPrompt terminalPrompt-${session.state}`}>
-          {session.username}@{session.host}
-        </span>
         <input
           ref={commandInputRef}
           className="terminalToolbarInput"

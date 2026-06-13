@@ -207,12 +207,8 @@ impl RemoteRuntime {
         path: String,
     ) -> AppResult<()> {
         let path = normalize_remote_path(&path);
-        self.run_sftp_file_command(
-            sftp_id,
-            build_remote_create_file_command(&path),
-            "创建文件",
-        )
-        .await?;
+        self.run_sftp_file_command(sftp_id, build_remote_create_file_command(&path), "创建文件")
+            .await?;
         emit_sftp_changed(app, sftp_id, &path);
         Ok(())
     }
@@ -250,12 +246,8 @@ impl RemoteRuntime {
             return Ok(());
         }
         ensure_not_same_or_child_path(&from, &to, "不能把目录移动到自身或子目录")?;
-        self.run_sftp_file_command(
-            sftp_id,
-            build_remote_rename_command(&from, &to),
-            "移动",
-        )
-        .await?;
+        self.run_sftp_file_command(sftp_id, build_remote_rename_command(&from, &to), "移动")
+            .await?;
         emit_sftp_changed(app, sftp_id, &from);
         emit_sftp_changed(app, sftp_id, &to);
         Ok(())
@@ -336,7 +328,11 @@ impl RemoteRuntime {
     ) -> AppResult<()> {
         let connection_id = self.sftp_record(sftp_id).await?.info.connection_id;
         let result = self
-            .exec_on_connection(&connection_id, command, Some(SFTP_FILE_OPERATION_TIMEOUT_MS))
+            .exec_on_connection(
+                &connection_id,
+                command,
+                Some(SFTP_FILE_OPERATION_TIMEOUT_MS),
+            )
             .await?;
         ensure_remote_file_command_success(result, action)
     }

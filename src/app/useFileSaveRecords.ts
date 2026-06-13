@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { getErrorMessage } from "../lib/configMapping";
 import { getBaseName as getRemoteBaseName, getParentPath as getRemoteParentPath } from "../lib/path";
-import type { AppSettings, FileSaveRecord } from "../types";
+import type { FileSaveRecord } from "../types";
 
 type UseFileSaveRecordsOptions = {
   writeRemoteTextRaw: (path: string, content: string, sessionId?: string) => Promise<void>;

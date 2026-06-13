@@ -15,6 +15,9 @@ import type { ConfigSnapshot, RemoteSession } from "../types";
 
 type TerminalInfo = { terminalId: string };
 
+const SSH_VERSION_COMMAND =
+  "sh -lc 'if command -v sshd >/dev/null 2>&1; then sshd -V 2>&1; elif [ -x /usr/sbin/sshd ]; then /usr/sbin/sshd -V 2>&1; elif [ -x /usr/local/sbin/sshd ]; then /usr/local/sbin/sshd -V 2>&1; else ssh -V 2>&1; fi'";
+
 type UseSessionRuntimeOptions = {
   sessions: RemoteSession[];
   activeSession: RemoteSession | undefined;
@@ -85,6 +88,8 @@ export function useSessionRuntime({
       ...item,
       state: "disconnected",
       connectionId: null,
+      connectedAt: null,
+      sshVersion: null,
       terminalId: null,
       sftpId: null,
       telemetryJobId: null,
@@ -123,6 +128,8 @@ export function useSessionRuntime({
         ...item,
         state: "disconnected",
         connectionId: null,
+        connectedAt: null,
+        sshVersion: null,
         terminalId: null,
         sftpId: null,
         telemetryJobId: null,
@@ -141,6 +148,8 @@ export function useSessionRuntime({
       ...item,
       state: "disconnected",
       connectionId: null,
+      connectedAt: null,
+      sshVersion: null,
       terminalId: null,
       sftpId: null,
       telemetryJobId: null,
@@ -160,6 +169,8 @@ export function useSessionRuntime({
             ...session,
             state: "disconnected",
             connectionId: null,
+            connectedAt: null,
+            sshVersion: null,
             terminalId: null,
             sftpId: null,
             telemetryJobId: null,
@@ -178,10 +189,14 @@ export function useSessionRuntime({
         ) {
           void backfillExternalConnection(session.id, payload.connectionId);
         }
+        if (payload.status === "connected" && !uiInitiatedConnectsRef.current.has(session.id) && !session.sshVersion) {
+          void fetchSshVersion(payload.connectionId, session.id);
+        }
         return {
           ...session,
           state: payload.status,
           connectionId: payload.connectionId,
+          connectedAt: payload.status === "connected" ? payload.connectedAt : session.connectedAt,
         };
       }),
     );
@@ -200,6 +215,7 @@ export function useSessionRuntime({
       appendTerminal(sessionId, "error", `终端不可用：${getErrorMessage(error)}`);
     }
     startTelemetry(connectionId, sessionId);
+    void fetchSshVersion(connectionId, sessionId);
   }
 
   async function connectSession(session = activeSession) {
@@ -211,6 +227,8 @@ export function useSessionRuntime({
       ...item,
       state: "connecting",
       connectionId: null,
+      connectedAt: null,
+      sshVersion: null,
       terminalId: null,
       sftpId: null,
       telemetryJobId: null,
@@ -236,6 +254,7 @@ export function useSessionRuntime({
         state: "connected",
         currentPath: initialPath,
         connectionId,
+        connectedAt: connection?.connectedAt ?? new Date().toISOString(),
         terminalId: terminal?.terminalId ?? null,
         sftpId: null,
         telemetryJobId: null,
@@ -247,6 +266,7 @@ export function useSessionRuntime({
       }));
       setConnectingSessionId(null);
       startTelemetry(connectionId, session.id);
+      void fetchSshVersion(connectionId, session.id);
 
       if (!terminal) throw new Error("SSH 已连接，但远端拒绝打开终端通道");
     } catch (error) {
@@ -317,6 +337,24 @@ export function useSessionRuntime({
       .catch(() => null);
   }
 
+  function fetchSshVersion(connectionId: string, sessionId: string) {
+    remoteApi
+      .execOnConnection(connectionId, SSH_VERSION_COMMAND, 3000)
+      .then((result) => {
+        const sshVersion = normalizeSshVersion(`${result.stdout}\n${result.stderr}`);
+        if (!sshVersion) return;
+        updateSession(sessionId, (item) =>
+          item.connectionId === connectionId
+            ? {
+                ...item,
+                sshVersion,
+              }
+            : item,
+        );
+      })
+      .catch(() => undefined);
+  }
+
   function appendDisconnectedTerminalEntry(entries: RemoteSession["terminal"]) {
     const entry = createTerminalEntry("system", "连接已断开");
     return shouldSkipTerminalEntry(entries, entry) ? entries : [...entries, entry];
@@ -333,4 +371,20 @@ export function useSessionRuntime({
     handleSshStatus,
     connectSession,
   };
+}
+
+function normalizeSshVersion(output: string) {
+  const line = output
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .find((item) => item && /(OpenSSH|Dropbear|SSH)/i.test(item));
+  if (!line) return "";
+
+  const openSsh = line.match(/OpenSSH[_\s-]?([^\s,]+)/i);
+  if (openSsh) return `OpenSSH ${openSsh[1]}`;
+
+  const dropbear = line.match(/Dropbear[_\s-]?([^\s,]+)/i);
+  if (dropbear) return `Dropbear ${dropbear[1]}`;
+
+  return line.replace(/^SSH-[\d.]+-/, "").split(",")[0].replace(/_/g, " ");
 }

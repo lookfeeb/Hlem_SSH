@@ -47,8 +47,9 @@ pub use remote::{
     telemetry_snapshot, telemetry_start, telemetry_stop,
 };
 pub use sessions::{
-    group_create, group_delete, group_update, session_create, session_delete, session_duplicate,
-    session_update, ssh_connect, ssh_disconnect, ssh_trust_host_key,
+    group_create, group_delete, group_update, sessionFavoriteUpdate, sessionMarkRecent,
+    session_create, session_delete, session_duplicate, session_favorite_update,
+    session_mark_recent, session_update, ssh_connect, ssh_disconnect, ssh_trust_host_key,
 };
 pub use sftp::{
     sftp_copy, sftp_create_file, sftp_delete, sftp_list, sftp_mkdir, sftp_open, sftp_read_text,

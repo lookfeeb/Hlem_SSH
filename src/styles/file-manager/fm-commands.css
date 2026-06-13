@@ -24,8 +24,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  height: 34px;
   min-height: 34px;
-  padding: 0 12px;
+  padding: 0 10px;
   border-bottom: 1px solid rgba(221, 230, 241, .6);
   background: linear-gradient(180deg, #ffffff 0%, #f8faff 100%);
 }
@@ -51,10 +52,11 @@
 
 .quickCommandDrawer .quickCommandAdd {
   width: auto;
-  min-height: 26px;
-  padding: 0 10px;
-  border: 1px solid rgba(99, 102, 241, .2);
-  border-radius: 7px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid rgba(232, 238, 246, .8);
+  border-radius: 5px;
   background: rgba(255, 255, 255, .8);
   color: var(--accent);
   font-size: 12px;
@@ -171,11 +173,46 @@
 }
 
 .fileContent .ant-table-header th {
+  height: 30px !important;
+  padding: 0 16px !important;
+  line-height: 30px;
+  border-bottom: 1px solid rgba(221, 230, 241, .8) !important;
+  border-radius: 0 !important;
   white-space: nowrap;
 }
 
+.fileTableSurface .ant-table,
+.fileTableSurface .ant-table-container,
+.fileTableSurface .ant-table-header,
+.fileTableSurface .ant-table-header table,
+.fileTableSurface .ant-table-thead,
+.fileTableSurface .ant-table-thead > tr {
+  border-radius: 0 !important;
+}
+
+.fileTableSurface .ant-table-container table > thead > tr:first-child > *:first-child,
+.fileTableSurface .ant-table-container table > thead > tr:first-child > *:last-child,
+.fileTableSurface .ant-table-thead > tr > th:first-child,
+.fileTableSurface .ant-table-thead > tr > th:last-child {
+  border-start-start-radius: 0 !important;
+  border-start-end-radius: 0 !important;
+  border-end-start-radius: 0 !important;
+  border-end-end-radius: 0 !important;
+}
+
+.fileContent .ant-table-header .ant-table-column-sorters {
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+}
+
+.fileContent .ant-table-column-sorter {
+  display: none !important;
+}
+
 .fileContent .ant-table-tbody > tr > td {
-  height: 54px;
+  height: 40px;
+  padding: 0 16px !important;
 }
 
 .fileSearchLoading {

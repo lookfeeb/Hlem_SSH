@@ -35,7 +35,7 @@
 }
 
 .sessionConfigModal .ant-modal-body {
-  padding: 24px 32px 16px;
+  padding: 0;
   background: transparent !important;
   max-height: min(560px, calc(100vh - 220px));
   overflow-y: auto;
@@ -47,6 +47,7 @@
 .sessionConfigModal .ant-modal-body > .ant-form {
   max-width: 620px;
   margin: 0 auto;
+  padding-top: 18px;
 }
 
 .sessionConfigModal .ant-modal-body::-webkit-scrollbar {
@@ -58,6 +59,20 @@
   overflow: hidden !important;
   scrollbar-width: none;
   -ms-overflow-style: none;
+}
+
+.ant-modal-container:has(.sessionConfigModal) {
+  padding: 0 !important;
+}
+
+.ant-modal-wrap:has(.sessionConfigModal) .ant-modal-container {
+  padding: 0 !important;
+}
+
+.ant-modal-wrap:has(.sessionConfigModal) .ant-modal,
+.sessionConfigModal {
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
 .ant-modal-wrap:has(.sessionConfigModal)::-webkit-scrollbar {
@@ -466,6 +481,7 @@
 
 /* ─── Footer ─────────────────────────────────────────────────────────────── */
 .sessionConfigModal .ant-modal-footer {
+  margin: 0 !important;
   padding: 16px 32px 20px;
   background: transparent !important;
   border-top: 1px solid rgba(0,0,0,0.06);
@@ -602,7 +618,7 @@
 }
 
 .sessionConfigModal .ant-modal-body {
-  padding: 24px 32px !important;
+  padding: 0 !important;
   max-height: 520px !important;
   overflow-y: auto !important;
   scrollbar-width: none !important;

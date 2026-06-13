@@ -43,7 +43,7 @@ export function MigrationGate({ open, loading, error, onMigrate, onSkip }: Migra
     >
       <div style={{ padding: "32px 28px", textAlign: "center" }}>
         <div style={{ marginBottom: 16 }}>
-          <img src="./nexus_icon.svg" alt="" aria-hidden="true" style={{ width: 48, height: 48 }} />
+          <img src="./Helm_icon.svg" alt="" aria-hidden="true" style={{ width: 48, height: 48 }} />
         </div>
         <h1 style={{ fontSize: 18, fontWeight: 600, margin: "0 0 8px" }}>数据迁移</h1>
         <p style={{ color: "var(--text-secondary)", marginBottom: 20, fontSize: 13 }}>

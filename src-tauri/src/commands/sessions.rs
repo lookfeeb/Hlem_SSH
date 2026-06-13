@@ -41,6 +41,46 @@ pub fn session_update(
 }
 
 #[tauri::command]
+pub fn session_favorite_update(
+    state: State<'_, AppState>,
+    session_id: String,
+    favorite: bool,
+) -> AppResult<ConfigSnapshot> {
+    with_store(&state, |store| {
+        store.set_session_favorite(&session_id, favorite)
+    })
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn sessionFavoriteUpdate(
+    state: State<'_, AppState>,
+    session_id: String,
+    favorite: bool,
+) -> AppResult<ConfigSnapshot> {
+    with_store(&state, |store| {
+        store.set_session_favorite(&session_id, favorite)
+    })
+}
+
+#[tauri::command]
+pub fn session_mark_recent(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> AppResult<ConfigSnapshot> {
+    with_store(&state, |store| store.mark_session_recent(&session_id))
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn sessionMarkRecent(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> AppResult<ConfigSnapshot> {
+    with_store(&state, |store| store.mark_session_recent(&session_id))
+}
+
+#[tauri::command]
 pub fn session_delete(state: State<'_, AppState>, session_id: String) -> AppResult<ConfigSnapshot> {
     with_store(&state, |store| store.delete_session(&session_id))
 }

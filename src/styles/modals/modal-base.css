@@ -2,9 +2,7 @@
 .settingsModal .ant-modal-content,
 .tunnelModal .ant-modal-content,
 .tunnelConfigModal .ant-modal-content,
-.backupModal .ant-modal-content,
-.fileEditorModal .ant-modal-content,
-.sessionListModal .ant-modal-content {
+.backupModal .ant-modal-content {
   border: 1px solid rgba(232, 238, 246, .9) !important;
   border-radius: var(--radius-xl) !important;
   background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%) !important;
@@ -19,9 +17,7 @@
 .settingsModal .ant-modal-content::before,
 .tunnelModal .ant-modal-content::before,
 .tunnelConfigModal .ant-modal-content::before,
-.backupModal .ant-modal-content::before,
-.fileEditorModal .ant-modal-content::before,
-.sessionListModal .ant-modal-content::before {
+.backupModal .ant-modal-content::before {
   content: none;
   display: none;
 }
@@ -29,9 +25,7 @@
 .settingsModal .ant-modal-content::after,
 .tunnelModal .ant-modal-content::after,
 .tunnelConfigModal .ant-modal-content::after,
-.backupModal .ant-modal-content::after,
-.fileEditorModal .ant-modal-content::after,
-.sessionListModal .ant-modal-content::after {
+.backupModal .ant-modal-content::after {
   content: "";
   position: absolute;
   left: 0; right: 0; top: 4px;
@@ -41,10 +35,23 @@
 }
 
 .settingsModal .ant-modal-header {
-  margin-bottom: 16px;
+  margin-bottom: 0;
   padding-bottom: 14px;
   border-bottom: none;
   background: transparent !important;
+  position: relative;
+  z-index: 1;
+}
+
+.backupModal .ant-modal-header {
+  margin: 0 !important;
+  border-bottom: none;
+  background: transparent !important;
+  position: relative;
+  z-index: 1;
+}
+
+.backupModal .ant-modal-body {
   position: relative;
   z-index: 1;
 }
@@ -190,9 +197,5 @@
 
 .settingsShortcutGrid .ant-btn:active {
   transform: translateY(0);
-}
-
-.aboutInfoList {
-  display: none;
 }
 

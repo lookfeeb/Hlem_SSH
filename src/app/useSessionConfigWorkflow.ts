@@ -9,31 +9,26 @@ type UseSessionConfigWorkflowOptions = {
   configSnapshot: ConfigSnapshot | undefined;
   activeSessionId: string;
   applySnapshot: (snapshot: ConfigSnapshot, preferredSessionId?: string, preserveRuntime?: boolean) => void;
-  openSessionList: () => void;
 };
 
 export function useSessionConfigWorkflow({
   configSnapshot,
   activeSessionId,
   applySnapshot,
-  openSessionList,
 }: UseSessionConfigWorkflowOptions) {
   const [sessionModal, setSessionModal] = useState<SessionModalState | null>(null);
-  const [returnToSessionListOnCancel, setReturnToSessionListOnCancel] = useState(false);
 
-  async function addSession(returnToListOnCancel = false) {
+  async function addSession() {
     if (!configSnapshot) return;
-    setReturnToSessionListOnCancel(returnToListOnCancel);
     setSessionModal({
       mode: "create",
       input: createDefaultSessionInput(configSnapshot.data.sessions.length + 1, configSnapshot.data.groups[0]?.id),
     });
   }
 
-  function editSession(id = activeSessionId, returnToListOnCancel = false) {
+  function editSession(id = activeSessionId) {
     const config = configSnapshot?.data.sessions.find((session) => session.id === id);
     if (!config) return;
-    setReturnToSessionListOnCancel(returnToListOnCancel);
     setSessionModal({ mode: "edit", sessionId: id, input: sessionConfigToInput(config) });
   }
 
@@ -56,21 +51,13 @@ export function useSessionConfigWorkflow({
 
   function closeSessionConfigModal() {
     setSessionModal(null);
-    setReturnToSessionListOnCancel(false);
-  }
-
-  function backToSessionListFromConfig() {
-    closeSessionConfigModal();
-    openSessionList();
   }
 
   return {
     sessionModal,
-    returnToSessionListOnCancel,
     addSession,
     editSession,
     saveSessionConfig,
     closeSessionConfigModal,
-    backToSessionListFromConfig,
   };
 }

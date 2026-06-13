@@ -42,7 +42,7 @@ export function FileDialogs({
       className="fileOperationModal"
     >
       {dialog?.kind === "create" && (
-        <Form layout="vertical">
+        <Form layout="vertical" className="fileCreateForm">
           <Form.Item label="类型">
             <Radio.Group
               value={dialog.entryType}

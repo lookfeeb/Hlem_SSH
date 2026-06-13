@@ -56,7 +56,11 @@
   --shadow-md: 0 12px 28px -10px rgba(15, 23, 42, 0.18), 0 4px 8px -4px rgba(15, 23, 42, 0.06);
   --shadow-lg: 0 24px 48px -12px rgba(15, 23, 42, 0.22), 0 12px 18px -10px rgba(15, 23, 42, 0.12);
   --shadow-glow:0 8px 24px -8px rgba(99, 102, 241, 0.45);
-  --sidebar-width: 280px;
+  --connection-sidebar-width: 300px;
+  --sidebar-width: calc(var(--workspace-padding) + var(--connection-sidebar-width));
+  --telemetry-sidebar-width: 280px;
+  --workspace-padding: 8px;
+  --workspace-gap: 8px;
 }
 
 
