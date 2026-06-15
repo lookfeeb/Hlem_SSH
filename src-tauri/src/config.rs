@@ -265,7 +265,7 @@ pub struct TunnelInput {
     pub target_port: u16,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SftpOptions {
     pub default_path: String,
@@ -436,18 +436,6 @@ impl SessionConfig {
         self.sftp = input.sftp;
         self.updated_at = now();
     }
-
-    pub fn duplicate(&self) -> Self {
-        let timestamp = now();
-        let mut duplicate = self.clone();
-        duplicate.id = Uuid::new_v4().to_string();
-        duplicate.name = format!("{} 副本", self.name);
-        duplicate.favorite = false;
-        duplicate.last_connected_at = None;
-        duplicate.created_at = timestamp.clone();
-        duplicate.updated_at = timestamp;
-        duplicate
-    }
 }
 
 impl AuthConfig {
@@ -480,15 +468,6 @@ impl Default for SshOptions {
             keepalive_interval_sec: 15,
             host_key_fingerprint: None,
             proxy: None,
-        }
-    }
-}
-
-impl Default for SftpOptions {
-    fn default() -> Self {
-        Self {
-            default_path: String::new(),
-            show_hidden: false,
         }
     }
 }

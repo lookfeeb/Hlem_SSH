@@ -113,7 +113,6 @@ export function SettingsModal({
           onClose={() => setReleaseNotesOpen(false)}
           updateInfo={updateInfo}
           updateDownloading={updateDownloading}
-          downloadedUpdatePath={downloadedUpdatePath}
           onDownloadUpdate={onDownloadUpdate}
           onIgnoreUpdate={onIgnoreUpdate}
         />

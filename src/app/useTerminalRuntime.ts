@@ -38,11 +38,6 @@ export function useTerminalRuntime({
     terminalSessionMapRef.current.set(terminalId, sessionId);
   }
 
-  function consumePendingTerminalEntries(terminalId: string): TerminalEntry[] {
-    void terminalId;
-    return [];
-  }
-
   function appendTerminal(sessionId: string, kind: TerminalOutputEvent["kind"] | "input", content: string) {
     const entry = createTerminalEntry(kind, content);
     if (!entry.content) return;
@@ -110,7 +105,11 @@ export function useTerminalRuntime({
           ),
         );
       })
-      .catch(() => undefined)
+      .catch((error) => {
+        if (mountedRef.current) {
+          console.warn("[helm] failed to refresh files after terminal cwd change:", getErrorMessage(error));
+        }
+      })
       .finally(() => {
         if (mountedRef.current) setSessionFilesLoading(session.id, false);
       });
@@ -136,8 +135,8 @@ export function useTerminalRuntime({
     if (!terminalId) return;
     try {
       await remoteApi.resizeTerminal(terminalId, cols, rows);
-    } catch {
-      // resize 是交互优化，失败不打断当前终端。
+    } catch (error) {
+      console.debug("[helm] failed to resize terminal:", getErrorMessage(error));
     }
   }
 
@@ -149,7 +148,6 @@ export function useTerminalRuntime({
 
   return {
     registerTerminal,
-    consumePendingTerminalEntries,
     appendTerminal,
     resetTerminalRuntime,
     handleTerminalOutput,

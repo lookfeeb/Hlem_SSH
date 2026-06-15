@@ -8,15 +8,6 @@ interface ErrorBoundaryState {
   error: Error | null;
 }
 
-/**
- * 全局 ErrorBoundary 兜底。
- * 没有它的话，渲染期间的任何异常都会把整棵 React 树卸载，
- * 表现为整个 WebView 直接白屏且无法操作（典型症状：在终端命令输入框
- * 输入字符后界面瞬间全白）。
- *
- * 出错时仍然渲染一个最小可交互界面，并把异常信息和堆栈打到 console，
- * 方便用户在 DevTools 看到真实原因，同时能点击"重试渲染"恢复。
- */
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   state: ErrorBoundaryState = { error: null };
 

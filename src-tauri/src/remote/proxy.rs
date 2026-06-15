@@ -2,6 +2,8 @@ use super::*;
 use socket2::{SockRef, TcpKeepalive};
 use std::time::Duration;
 
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// 开启 TCP 层 SO_KEEPALIVE。SSH 应用层 keepalive (russh `keepalive_interval`)
 /// 防御的是"sshd 假死"，但很多 NAT/防火墙只看 TCP 层活跃度，会把空闲连接的
 /// 表项老化掉。TCP keepalive 由内核周期性发送空 ACK 探测包，运营商设备
@@ -25,7 +27,9 @@ fn enable_tcp_keepalive(stream: &TcpStream) {
         target_os = "ios"
     ))]
     let ka = ka.with_retries(3);
-    let _ = sock.set_tcp_keepalive(&ka);
+    if let Err(error) = sock.set_tcp_keepalive(&ka) {
+        log::debug!("failed to enable tcp keepalive: {error}");
+    }
 }
 
 pub(super) async fn connect_tcp_for_ssh(
@@ -34,13 +38,9 @@ pub(super) async fn connect_tcp_for_ssh(
     proxy: Option<&SshProxyOptions>,
 ) -> AppResult<TcpStream> {
     let stream = match proxy {
-        None => TcpStream::connect((host, port))
-            .await
-            .map_err(remote_error)?,
+        None => connect_tcp_with_timeout(host, port, "SSH 直连").await?,
         Some(p) => match p.kind.as_str() {
-            "direct" => TcpStream::connect((host, port))
-                .await
-                .map_err(remote_error)?,
+            "direct" => connect_tcp_with_timeout(host, port, "SSH 直连").await?,
             "socks5" => connect_via_socks5(p, host, port).await?,
             "httpConnect" => connect_via_http_connect(p, host, port).await?,
             _ => return Err(AppError::InvalidInput("代理类型无效".to_string())),
@@ -48,6 +48,18 @@ pub(super) async fn connect_tcp_for_ssh(
     };
     enable_tcp_keepalive(&stream);
     Ok(stream)
+}
+
+pub(super) async fn connect_tcp_with_timeout(
+    host: &str,
+    port: u16,
+    label: &str,
+) -> AppResult<TcpStream> {
+    match tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect((host, port))).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(error)) => Err(remote_error(error)),
+        Err(_) => Err(AppError::Remote(format!("{label}超时: {host}:{port}"))),
+    }
 }
 
 pub(super) async fn connect_via_socks5(
@@ -58,9 +70,8 @@ pub(super) async fn connect_via_socks5(
     if target_host.len() > u8::MAX as usize {
         return Err(AppError::InvalidInput("SOCKS5 目标主机名过长".to_string()));
     }
-    let mut stream = TcpStream::connect((proxy.host.as_str(), proxy.port))
-        .await
-        .map_err(remote_error)?;
+    let mut stream =
+        connect_tcp_with_timeout(proxy.host.as_str(), proxy.port, "SOCKS5 代理连接").await?;
     stream.write_all(&[5, 1, 0]).await.map_err(remote_error)?;
     let mut response = [0u8; 2];
     stream
@@ -118,9 +129,8 @@ pub(super) async fn connect_via_http_connect(
     target_host: &str,
     target_port: u16,
 ) -> AppResult<TcpStream> {
-    let mut stream = TcpStream::connect((proxy.host.as_str(), proxy.port))
-        .await
-        .map_err(remote_error)?;
+    let mut stream =
+        connect_tcp_with_timeout(proxy.host.as_str(), proxy.port, "HTTP CONNECT 代理连接").await?;
     let request = format!(
         "CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\nProxy-Connection: keep-alive\r\n\r\n"
     );

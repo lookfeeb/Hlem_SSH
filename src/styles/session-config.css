@@ -119,7 +119,7 @@
   background: rgba(59, 130, 246, 0.08) !important;
 }
 
-/* 激活 Tab：白色卡片 + 阴影，模拟 macOS 分段选择器 */
+/* 激活 Tab：白色卡片 + 阴影，接近 macOS 分段选择器 */
 .sessionConfigModal .ant-tabs-tab-active {
   background: #ffffff !important;
   color: var(--accent) !important;

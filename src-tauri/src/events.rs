@@ -16,5 +16,7 @@ pub const API_LOG: &str = "api://log";
 pub const CONFIG_CHANGED: &str = "config://changed";
 
 pub fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
-    let _ = app.emit(event, payload);
+    if let Err(error) = app.emit(event, payload) {
+        eprintln!("[helm] failed to emit event {event}: {error}");
+    }
 }

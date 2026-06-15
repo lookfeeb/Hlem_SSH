@@ -12,6 +12,7 @@ import {
 import { Button, Drawer, Empty, Progress, Space, Tooltip } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { appApi } from "../api/appApi";
+import { getErrorMessage } from "../lib/configMapping";
 import { formatBeijingDateTime, formatBytes } from "../lib/format";
 import {
   backupKindText,
@@ -30,6 +31,10 @@ import {
 import type { BackupRecord, FileSaveRecord, RemoteSession, TransferInfo } from "../types";
 
 type LocalPathExistsMap = Record<string, boolean | undefined>;
+type TransferSessionLookup = {
+  bySessionId: Map<string, RemoteSession>;
+  bySftpId: Map<string, RemoteSession>;
+};
 
 interface TransferCenterProps {
   open: boolean;
@@ -76,6 +81,15 @@ export function TransferCenter({
 }: TransferCenterProps) {
   const total = transfers.length + saveRecords.length + backupRecords.length;
   const [localPathExistsByTransferId, setLocalPathExistsByTransferId] = useState<LocalPathExistsMap>({});
+  const sessionLookup = useMemo<TransferSessionLookup>(() => {
+    const bySessionId = new Map<string, RemoteSession>();
+    const bySftpId = new Map<string, RemoteSession>();
+    for (const session of sessions) {
+      bySessionId.set(session.id, session);
+      if (session.sftpId) bySftpId.set(session.sftpId, session);
+    }
+    return { bySessionId, bySftpId };
+  }, [sessions]);
   const localPathCheckKey = useMemo(
     () =>
       transfers
@@ -108,7 +122,8 @@ export function TransferCenter({
         if (disposed) return;
         setLocalPathExistsByTransferId(Object.fromEntries(results));
       })
-      .catch(() => {
+      .catch((error) => {
+        console.warn("[helm] failed to check local transfer paths:", getErrorMessage(error));
         if (!disposed) setLocalPathExistsByTransferId({});
       });
     return () => {
@@ -175,7 +190,7 @@ export function TransferCenter({
             transfers,
             saveRecords,
             backupRecords,
-            sessions,
+            sessionLookup,
             localPathExistsByTransferId,
             onPause,
             onResume,
@@ -198,7 +213,7 @@ interface RenderAllRecordsProps {
   transfers: TransferInfo[];
   saveRecords: FileSaveRecord[];
   backupRecords: BackupRecord[];
-  sessions: RemoteSession[];
+  sessionLookup: TransferSessionLookup;
   localPathExistsByTransferId: LocalPathExistsMap;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
@@ -353,7 +368,7 @@ function renderTransferRecord(transfer: TransferInfo, props: RenderAllRecordsPro
   const running = transfer.status === "queued" || transfer.status === "running";
   const paused = transfer.status === "paused";
   const retryable = transfer.status === "failed" || transfer.status === "canceled";
-  const targetSession = sessionForTransfer(transfer, props.sessions);
+  const targetSession = sessionForTransfer(transfer, props.sessionLookup);
   const targetConnected = Boolean(targetSession?.state === "connected" && targetSession.sftpId);
   const localMissing =
     shouldCheckTransferLocalPath(transfer) && props.localPathExistsByTransferId[transfer.transferId] === false;
@@ -481,11 +496,11 @@ function renderTransferRecord(transfer: TransferInfo, props: RenderAllRecordsPro
 
 function sessionForTransfer(
   transfer: TransferInfo,
-  sessions: RemoteSession[],
+  sessionLookup: TransferSessionLookup,
 ) {
   return (
-    sessions.find((session) => session.sftpId === transfer.sftpId) ??
-    sessions.find((session) => session.id === transfer.sessionId) ??
+    sessionLookup.bySftpId.get(transfer.sftpId) ??
+    sessionLookup.bySessionId.get(transfer.sessionId) ??
     null
   );
 }

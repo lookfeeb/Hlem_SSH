@@ -33,12 +33,11 @@ impl RemoteRuntime {
             opened_at: now(),
         };
 
-        // 尝试通过 SSH 协议层把 TMOUT 置空（zero echo，shell 启动前生效）。
-        // 多数 sshd 因 AcceptEnv 白名单会拒绝，失败静默忽略；不要再向 PTY
-        // 注入隐藏字节保活，否则某些 shell/readline 会把 NUL 显示成 @ 或 ^@。
         {
             let writer = writer.lock().await;
-            let _ = writer.set_env(false, "TMOUT", "").await;
+            if let Err(error) = writer.set_env(false, "TMOUT", "").await {
+                log::debug!("remote refused TMOUT environment override: {error}");
+            }
         }
 
         // Request shell BEFORE spawning the reader task to avoid a race where
@@ -97,6 +96,7 @@ impl RemoteRuntime {
                 .remove(&closed_terminal_id)
                 .is_some();
             if removed {
+                crate::errors::forget_resource_label(&closed_terminal_id);
                 emit_terminal_closed(&app_handle, closed_terminal_id);
             }
 
@@ -174,6 +174,7 @@ impl RemoteRuntime {
             .remove(terminal_id)
             .ok_or_else(|| AppError::missing_terminal(terminal_id))?;
         close_terminal_record(record).await?;
+        crate::errors::forget_resource_label(terminal_id);
         emit_terminal_closed(app, terminal_id.to_string());
         Ok(())
     }

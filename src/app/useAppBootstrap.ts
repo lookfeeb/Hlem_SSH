@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { appApi } from "../api/appApi";
+import { call } from "../api/bridge";
 import { isTauriRuntime } from "../api/runtime";
 import { vaultApi } from "../api/vaultApi";
 import { getErrorMessage } from "../lib/configMapping";
@@ -41,7 +41,7 @@ export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: U
       setAppReady(true);
     } catch (error) {
       const message = getErrorMessage(error);
-      console.error("[helm] Failed to load config snapshot:", error);
+      console.error("[helm] failed to load config snapshot:", message);
       if (mountedRef.current) setBootstrapError(message);
     } finally {
       signalFrontendReady();
@@ -78,8 +78,8 @@ export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: U
     try {
       const info = await appApi.info();
       if (mountedRef.current) setAppInfo(info);
-    } catch {
-      // 版本信息失败不影响主流程。
+    } catch (error) {
+      console.warn("[helm] failed to load app info:", getErrorMessage(error));
     }
     if (mountedRef.current) await initializeApiServerRuntime();
   }
@@ -89,7 +89,9 @@ export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: U
     requestSafeAnimationFrame(() => {
       requestSafeAnimationFrame(() => {
         if (!mountedRef.current) return;
-        void invoke("frontend_ready").catch(() => undefined);
+        void call<void>("frontend_ready").catch((error) => {
+          console.warn("[helm] failed to signal frontend ready:", getErrorMessage(error));
+        });
       });
     });
   }

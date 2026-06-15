@@ -3,6 +3,7 @@ import { useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { remoteApi } from "../api/remoteApi";
 import { vaultApi } from "../api/vaultApi";
 import { getErrorMessage, initialRemotePath } from "../lib/configMapping";
+import { useMountedRef } from "../lib/reactLifecycle";
 import { createEmptyTelemetry } from "../lib/remoteDefaults";
 import { createTerminalEntry } from "../lib/session";
 import {
@@ -29,7 +30,6 @@ type UseSessionRuntimeOptions = {
   applySnapshot: (snapshot: ConfigSnapshot, preferredSessionId?: string, preserveRuntime?: boolean) => void;
   applyConfigSnapshot: (snapshot: ConfigSnapshot) => void;
   registerTerminal: (terminalId: string, sessionId: string) => void;
-  consumePendingTerminalEntries: (terminalId: string) => RemoteSession["terminal"];
   appendTerminal: (sessionId: string, kind: "system" | "error", content: string) => void;
 };
 
@@ -44,10 +44,10 @@ export function useSessionRuntime({
   applySnapshot,
   applyConfigSnapshot,
   registerTerminal,
-  consumePendingTerminalEntries,
   appendTerminal,
 }: UseSessionRuntimeOptions) {
   const [connectingSessionId, setConnectingSessionId] = useState<string | null>(null);
+  const mountedRef = useMountedRef();
   const pendingConnectionIdsRef = useRef<Map<string, string>>(new Map());
   const abortedConnectSessionsRef = useRef<Set<string>>(new Set());
   const uiInitiatedConnectsRef = useRef<Set<string>>(new Set());
@@ -69,10 +69,12 @@ export function useSessionRuntime({
     if (connectingSessionId === id) {
       await cancelConnectingSession(id);
     } else if (session?.connectionId) {
-      await teardownSession(session).catch(() => undefined);
+      await teardownSession(session);
     }
+    if (!mountedRef.current) return;
     closeSessionTab(id);
-    applySnapshot(await vaultApi.sessionDelete(id));
+    const snapshot = await vaultApi.sessionDelete(id);
+    if (mountedRef.current) applySnapshot(snapshot);
   }
 
   async function cancelConnectingSession(id: string) {
@@ -81,8 +83,9 @@ export function useSessionRuntime({
     const pendingConnectionId = pendingConnectionIdsRef.current.get(id);
     if (pendingConnectionId) {
       pendingConnectionIdsRef.current.delete(id);
-      await remoteApi.disconnect(pendingConnectionId).catch(() => undefined);
+      await disconnectQuietly(pendingConnectionId, "cancel connecting session");
     }
+    if (!mountedRef.current) return;
     setConnectingSessionId((current) => (current === id ? null : current));
     updateSession(id, (item) => ({
       ...item,
@@ -103,6 +106,7 @@ export function useSessionRuntime({
     } else if (session?.connectionId) {
       await teardownSession(session);
     }
+    if (!mountedRef.current) return;
     resetClosedSessionState(id);
     closeSessionTab(id);
   }
@@ -124,6 +128,7 @@ export function useSessionRuntime({
     if (!session.connectionId) return;
     try {
       await remoteApi.disconnect(session.connectionId);
+      if (!mountedRef.current) return;
       updateSession(session.id, (item) => ({
         ...item,
         state: "disconnected",
@@ -139,7 +144,7 @@ export function useSessionRuntime({
       }));
       notifyEditorSessionDisconnected(session.id);
     } catch (error) {
-      appendTerminal(session.id, "error", formatSessionError(error, session));
+      if (mountedRef.current) appendTerminal(session.id, "error", formatSessionError(error, session));
     }
   }
 
@@ -160,6 +165,7 @@ export function useSessionRuntime({
   }
 
   function handleSshStatus(payload: Awaited<ReturnType<typeof remoteApi.connect>>) {
+    if (!mountedRef.current) return;
     setSessions((current) =>
       current.map((session) => {
         if (session.id !== payload.sessionId) return session;
@@ -209,17 +215,22 @@ export function useSessionRuntime({
     if (uiInitiatedConnectsRef.current.has(sessionId)) return;
     try {
       const terminal = await remoteApi.openTerminal(connectionId, 100, 30);
+      if (!mountedRef.current) {
+        await closeTerminalQuietly(terminal.terminalId, "unmounted external connection backfill");
+        return;
+      }
       registerTerminal(terminal.terminalId, sessionId);
       updateSession(sessionId, (item) => ({ ...item, terminalId: terminal.terminalId }));
     } catch (error) {
-      appendTerminal(sessionId, "error", `终端不可用：${getErrorMessage(error)}`);
+      if (mountedRef.current) appendTerminal(sessionId, "error", `终端不可用：${getErrorMessage(error)}`);
     }
+    if (!mountedRef.current) return;
     startTelemetry(connectionId, sessionId);
     void fetchSshVersion(connectionId, sessionId);
   }
 
   async function connectSession(session = activeSession) {
-    if (!session || connectingSessionId === session.id) return;
+    if (!mountedRef.current || !session || connectingSessionId === session.id) return;
     abortedConnectSessionsRef.current.delete(session.id);
     uiInitiatedConnectsRef.current.add(session.id);
     setConnectingSessionId(session.id);
@@ -239,16 +250,27 @@ export function useSessionRuntime({
       connection = await remoteApi.connect(session.id);
       const connectionId = connection.connectionId;
       pendingConnectionIdsRef.current.set(session.id, connectionId);
+      if (!mountedRef.current) {
+        pendingConnectionIdsRef.current.delete(session.id);
+        await disconnectQuietly(connectionId, "unmounted connect session cleanup");
+        return;
+      }
       if (await disconnectIfAborted(session.id, connectionId)) return;
 
       const initialPath = initialRemotePath(session.username, session.currentPath);
       const terminalResult = await openTerminalSafely(connectionId);
+      if (!mountedRef.current) {
+        pendingConnectionIdsRef.current.delete(session.id);
+        await disconnectQuietly(connectionId, "unmounted connect session cleanup");
+        return;
+      }
       if (await disconnectIfAborted(session.id, connectionId)) return;
 
       const terminal = terminalResult.value;
       if (terminal) attachTerminal(session.id, terminal);
 
       pendingConnectionIdsRef.current.delete(session.id);
+      if (!mountedRef.current) return;
       updateSession(session.id, (item) => ({
         ...item,
         state: "connected",
@@ -271,10 +293,11 @@ export function useSessionRuntime({
       if (!terminal) throw new Error("SSH 已连接，但远端拒绝打开终端通道");
     } catch (error) {
       if (connection?.connectionId) {
-        await remoteApi.disconnect(connection.connectionId).catch(() => undefined);
+        await disconnectQuietly(connection.connectionId, "connect session rollback");
       }
       pendingConnectionIdsRef.current.delete(session.id);
       if (abortedConnectSessionsRef.current.has(session.id)) return;
+      if (!mountedRef.current) return;
       updateSession(session.id, (item) => ({ ...item, state: "failed" }));
       const hostKey = getHostKeyPayload(error);
       if (hostKey) {
@@ -284,7 +307,9 @@ export function useSessionRuntime({
           okText: "信任并连接",
           cancelText: "取消",
           onOk: async () => {
-            applyConfigSnapshot(await remoteApi.trustHostKey(hostKey.sessionId, hostKey.algorithm, hostKey.fingerprint));
+            const snapshot = await remoteApi.trustHostKey(hostKey.sessionId, hostKey.algorithm, hostKey.fingerprint);
+            if (!mountedRef.current) return;
+            applyConfigSnapshot(snapshot);
             await connectSession(session);
           },
         });
@@ -294,15 +319,31 @@ export function useSessionRuntime({
     } finally {
       abortedConnectSessionsRef.current.delete(session.id);
       uiInitiatedConnectsRef.current.delete(session.id);
-      setConnectingSessionId((current) => (current === session.id ? null : current));
+      if (mountedRef.current) setConnectingSessionId((current) => (current === session.id ? null : current));
     }
   }
 
   async function disconnectIfAborted(sessionId: string, connectionId: string) {
     if (!abortedConnectSessionsRef.current.has(sessionId)) return false;
     pendingConnectionIdsRef.current.delete(sessionId);
-    await remoteApi.disconnect(connectionId).catch(() => undefined);
+    await disconnectQuietly(connectionId, "aborted connection cleanup");
     return true;
+  }
+
+  async function disconnectQuietly(connectionId: string, context: string) {
+    try {
+      await remoteApi.disconnect(connectionId);
+    } catch (error) {
+      console.warn(`[helm] failed to disconnect during ${context}:`, getErrorMessage(error));
+    }
+  }
+
+  async function closeTerminalQuietly(terminalId: string, context: string) {
+    try {
+      await remoteApi.closeTerminal(terminalId);
+    } catch (error) {
+      console.warn(`[helm] failed to close terminal during ${context}:`, getErrorMessage(error));
+    }
   }
 
   async function openTerminalSafely(connectionId: string): Promise<{ value: TerminalInfo | null; error: unknown }> {
@@ -314,17 +355,13 @@ export function useSessionRuntime({
 
   function attachTerminal(sessionId: string, terminal: TerminalInfo) {
     registerTerminal(terminal.terminalId, sessionId);
-    const pendingTerminalEntries = consumePendingTerminalEntries(terminal.terminalId);
-    if (pendingTerminalEntries.length) {
-      updateSession(sessionId, (item) => ({ ...item, terminal: [...item.terminal, ...pendingTerminalEntries] }));
-    }
   }
 
   function startTelemetry(connectionId: string, sessionId: string) {
     remoteApi
       .startTelemetry(connectionId, sessionId, 5000)
       .then((telemetryJob) => {
-        if (abortedConnectSessionsRef.current.has(sessionId)) return;
+        if (!mountedRef.current || abortedConnectSessionsRef.current.has(sessionId)) return;
         updateSession(sessionId, (item) =>
           item.connectionId === connectionId
             ? {
@@ -334,13 +371,16 @@ export function useSessionRuntime({
             : item,
         );
       })
-      .catch(() => null);
+      .catch((error) => {
+        console.warn("[helm] failed to start telemetry:", getErrorMessage(error));
+      });
   }
 
   function fetchSshVersion(connectionId: string, sessionId: string) {
     remoteApi
       .execOnConnection(connectionId, SSH_VERSION_COMMAND, 3000)
       .then((result) => {
+        if (!mountedRef.current) return;
         const sshVersion = normalizeSshVersion(`${result.stdout}\n${result.stderr}`);
         if (!sshVersion) return;
         updateSession(sessionId, (item) =>
@@ -352,7 +392,9 @@ export function useSessionRuntime({
             : item,
         );
       })
-      .catch(() => undefined);
+      .catch((error) => {
+        console.warn("[helm] failed to fetch ssh version:", getErrorMessage(error));
+      });
   }
 
   function appendDisconnectedTerminalEntry(entries: RemoteSession["terminal"]) {

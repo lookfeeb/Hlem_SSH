@@ -68,9 +68,9 @@ pub enum AppError {
     #[error("参数无效: {0}")]
     InvalidInput(String),
     #[error("主机密钥未信任")]
-    HostKeyUntrusted(HostKeyVerification),
+    HostKeyUntrusted(Box<HostKeyVerification>),
     #[error("主机密钥已变更")]
-    HostKeyChanged(HostKeyVerification),
+    HostKeyChanged(Box<HostKeyVerification>),
     #[error("传输需要覆盖确认: {0}")]
     TransferNeedsOverwrite(String),
     #[error("远程错误: {0}")]

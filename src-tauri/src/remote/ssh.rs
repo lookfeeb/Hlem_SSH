@@ -57,8 +57,8 @@ pub(super) async fn authenticate(
 /// 一旦超时就放锁、释放整条排队，避免一个挂死请求拖垮所有并发。
 const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// AutoClosingChannel::drop 里 spawn 的 close 任务的硬超时。若 SSH 已死，
-/// `channel.close().await` 永不返回，会泄漏 tokio task。给它套一层 5s 超时止血。
+/// AutoClosingChannel::drop 里 close 任务的硬超时。若 SSH 已死，
+/// `channel.close().await` 可能长时间不返回；超时后结束后台清理任务。
 const CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) async fn open_session_channel(handle: &SshHandle) -> AppResult<Channel<client::Msg>> {
@@ -136,11 +136,11 @@ impl AutoClosingChannel {
     }
 
     async fn exec(&self, command: String) -> Result<(), russh::Error> {
-        self.0
-            .as_ref()
-            .expect("channel exists until drop")
-            .exec(true, command)
-            .await
+        if let Some(channel) = self.0.as_ref() {
+            channel.exec(true, command).await
+        } else {
+            Ok(())
+        }
     }
 
     async fn wait(&mut self) -> Option<ChannelMsg> {
@@ -152,9 +152,11 @@ impl Drop for AutoClosingChannel {
     fn drop(&mut self) {
         if let Some(channel) = self.0.take() {
             tokio::spawn(async move {
-                // 套一层 5s 超时：SSH 已死时 close().await 永不返回，会让本任务永久挂起，
-                // 长跑场景下每次 exec 超时都泄漏一个 tokio task。
-                let _ = timeout(CHANNEL_CLOSE_TIMEOUT, channel.close()).await;
+                match timeout(CHANNEL_CLOSE_TIMEOUT, channel.close()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => log::debug!("failed to close SSH channel: {error}"),
+                    Err(_) => log::debug!("timed out while closing SSH channel"),
+                }
             });
         }
     }

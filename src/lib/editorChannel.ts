@@ -71,13 +71,4 @@ export type EditorChannelMessage =
   | EditorSessionDisconnectedMessage
   | EditorSessionReconnectedMessage;
 
-/** All FileManager instances share one global editor channel */
 export const EDITOR_CHANNEL_NAME = "helm-editor-global";
-
-/** @deprecated use EDITOR_CHANNEL_NAME instead */
-export function editorChannelName(editorId: string) {
-  return `helm-editor-${editorId}`;
-}
-
-/** 全局编辑器通道名，所有连接共享同一个编辑器窗口 */
-export const GLOBAL_EDITOR_CHANNEL = "helm-editor-global";

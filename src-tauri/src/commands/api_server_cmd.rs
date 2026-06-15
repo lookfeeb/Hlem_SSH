@@ -52,18 +52,18 @@ pub async fn api_server_start(
         normalize_allowed_session_ids(allowed_session_ids, allowed_session_id);
     let allowed_session_names = allowed_session_names_for_ids(&state, &allowed_session_ids)?;
     let log_file = state.data_dir.join("api_logs.json");
-    let server_handle = api_server::start_server(
+    let server_handle = api_server::start_server(api_server::ApiServerStartOptions {
         app,
-        state.remote.clone(),
-        state.vault.clone(),
+        remote: state.remote.clone(),
+        vault: state.vault.clone(),
         port,
-        api_key.clone(),
-        allowed_session_ids.clone(),
+        api_key: api_key.clone(),
+        allowed_session_ids: allowed_session_ids.clone(),
         allowed_session_names,
         log_file,
-    )
+    })
     .await
-    .map_err(|e| AppError::Remote(e))?;
+    .map_err(AppError::Remote)?;
     let info = ApiServerInfo {
         running: true,
         port: server_handle.port,
@@ -186,18 +186,18 @@ pub async fn api_server_regenerate_key(
         let allowed_names = handle.allowed_session_names_snapshot();
         let log_file = handle.log_file.clone();
         handle.shutdown().await;
-        let server_handle = api_server::start_server(
+        let server_handle = api_server::start_server(api_server::ApiServerStartOptions {
             app,
-            state.remote.clone(),
-            state.vault.clone(),
+            remote: state.remote.clone(),
+            vault: state.vault.clone(),
             port,
-            new_key.clone(),
-            allowed,
-            allowed_names,
+            api_key: new_key.clone(),
+            allowed_session_ids: allowed,
+            allowed_session_names: allowed_names,
             log_file,
-        )
+        })
         .await
-        .map_err(|e| AppError::Remote(e))?;
+        .map_err(AppError::Remote)?;
         let info = ApiServerInfo {
             running: true,
             port: server_handle.port,
@@ -225,7 +225,7 @@ pub async fn api_server_logs(state: State<'_, AppState>) -> AppResult<Vec<ApiLog
         }
         None => {
             let log_file = state.data_dir.join("api_logs.json");
-            match std::fs::read_to_string(&log_file) {
+            match tokio::fs::read_to_string(&log_file).await {
                 Ok(content) => Ok(serde_json::from_str(&content).unwrap_or_default()),
                 Err(_) => Ok(Vec::new()),
             }

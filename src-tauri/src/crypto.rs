@@ -325,13 +325,13 @@ mod tests {
         let mut salt = [0u8; SALT_LEN];
         OsRng.fill_bytes(&mut salt);
 
-        // 模拟旧版本：用 Argon2::default 派生 key
+        // 构造早期版本写出的 Argon2::default 派生 key
         let mut legacy_key = [0u8; KEY_LEN];
         Argon2::default()
             .hash_password_into(password.as_bytes(), &salt, &mut legacy_key)
             .unwrap();
 
-        // 模拟旧版本写出的 header
+        // 构造早期版本写出的 header
         let mut nonce = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut nonce);
         let cipher = XChaCha20Poly1305::new_from_slice(&legacy_key).unwrap();

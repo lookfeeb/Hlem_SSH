@@ -1,8 +1,10 @@
 import { ApartmentOutlined, CopyOutlined, DeleteOutlined, EditOutlined, GlobalOutlined, LinkOutlined, NodeIndexOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined, TagOutlined } from "@ant-design/icons";
 import { App as AntdApp, Button, Form, Input, InputNumber, Modal, Select, Space, Table, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { writeClipboardText } from "../lib/clipboard";
 import { getErrorMessage } from "../lib/configMapping";
+import { useMountedRef } from "../lib/reactLifecycle";
 import type { ForwardInfo, RemoteSession, TunnelConfig, TunnelInput } from "../types";
 
 interface TunnelDrawerProps {
@@ -34,18 +36,38 @@ export function TunnelDrawer({
 }: TunnelDrawerProps) {
   const { message, modal } = AntdApp.useApp();
   const [editing, setEditing] = useState<TunnelModalState | null>(null);
+  const mountedRef = useMountedRef();
+  const sessionNameById = useMemo(() => new Map(sessions.map((session) => [session.id, session.name])), [sessions]);
+  const runningForwardByTunnelId = useMemo(() => {
+    const exactForwards = new Map<string, ForwardInfo>();
+    const autoPortForwards = new Map<string, ForwardInfo>();
+    for (const forward of forwards) {
+      const exactKey = forwardExactKey(forward);
+      const autoPortKey = forwardAutoPortKey(forward);
+      if (!exactForwards.has(exactKey)) exactForwards.set(exactKey, forward);
+      if (!autoPortForwards.has(autoPortKey)) autoPortForwards.set(autoPortKey, forward);
+    }
+    const map = new Map<string, ForwardInfo>();
+    for (const tunnel of tunnels) {
+      const running = tunnel.bindPort === 0
+        ? autoPortForwards.get(tunnelAutoPortKey(tunnel))
+        : exactForwards.get(tunnelExactKey(tunnel));
+      if (running) map.set(tunnel.id, running);
+    }
+    return map;
+  }, [forwards, tunnels]);
 
   const tunnelColumns: ColumnsType<TunnelConfig> = [
     { title: "名称", dataIndex: "name", ellipsis: true },
     { title: "类型", width: 80, render: (_, tunnel) => forwardTypeLabel(tunnel.forwardType) },
-    { title: "会话", width: 120, render: (_, tunnel) => sessions.find((session) => session.id === tunnel.sessionId)?.name ?? "未知会话" },
+    { title: "会话", width: 120, render: (_, tunnel) => sessionNameById.get(tunnel.sessionId) ?? "未知会话" },
     { title: "监听", width: 150, render: (_, tunnel) => `${tunnel.bindHost}:${tunnel.bindPort}` },
     { title: "目标", width: 150, render: (_, tunnel) => tunnel.forwardType === "dynamic" ? "SOCKS5" : `${tunnel.targetHost}:${tunnel.targetPort}` },
     {
       title: "操作",
       width: 148,
       render: (_, tunnel) => {
-        const running = forwards.find((forward) => forwardMatchesTunnel(forward, tunnel));
+        const running = runningForwardByTunnelId.get(tunnel.id);
         return (
           <Space size={4}>
             {running ? (
@@ -104,9 +126,9 @@ export function TunnelDrawer({
   async function startTunnel(tunnel: TunnelConfig) {
     try {
       await onStart(tunnel);
-      message.success("隧道已启动");
+      if (mountedRef.current) message.success("隧道已启动");
     } catch (error) {
-      message.error(getErrorMessage(error));
+      if (mountedRef.current) message.error(getErrorMessage(error));
     }
   }
 
@@ -123,8 +145,10 @@ export function TunnelDrawer({
 
   async function copyBindAddress(forward: ForwardInfo) {
     const value = `${forward.bindHost}:${forward.bindPort}`;
-    await navigator.clipboard?.writeText(value);
-    message.success("监听地址已复制");
+    const copied = await writeClipboardText(value);
+    if (!mountedRef.current) return;
+    if (copied) message.success("监听地址已复制");
+    else message.error("复制监听地址失败");
   }
 
   return (
@@ -157,7 +181,7 @@ export function TunnelDrawer({
           } else {
             await onCreate(input);
           }
-          setEditing(null);
+          if (mountedRef.current) setEditing(null);
         }}
       />
     </>
@@ -326,13 +350,62 @@ function TunnelConfigModal({
   );
 }
 
-function forwardMatchesTunnel(forward: ForwardInfo, tunnel: TunnelConfig) {
-  if (forward.sessionId !== tunnel.sessionId) return false;
-  if (forward.forwardType !== tunnel.forwardType) return false;
-  if (forward.bindHost !== tunnel.bindHost) return false;
-  if (tunnel.bindPort !== 0 && forward.bindPort !== tunnel.bindPort) return false;
-  if (tunnel.forwardType === "dynamic") return true;
-  return forward.targetHost === tunnel.targetHost && forward.targetPort === tunnel.targetPort;
+function forwardExactKey(forward: ForwardInfo) {
+  return forwardKey(
+    forward.sessionId,
+    forward.forwardType,
+    forward.bindHost,
+    forward.bindPort,
+    forward.targetHost,
+    forward.targetPort,
+  );
+}
+
+function tunnelExactKey(tunnel: TunnelConfig) {
+  return forwardKey(
+    tunnel.sessionId,
+    tunnel.forwardType,
+    tunnel.bindHost,
+    tunnel.bindPort,
+    tunnel.targetHost,
+    tunnel.targetPort,
+  );
+}
+
+function forwardAutoPortKey(forward: ForwardInfo) {
+  return forwardKey(
+    forward.sessionId,
+    forward.forwardType,
+    forward.bindHost,
+    0,
+    forward.targetHost,
+    forward.targetPort,
+  );
+}
+
+function tunnelAutoPortKey(tunnel: TunnelConfig) {
+  return forwardKey(
+    tunnel.sessionId,
+    tunnel.forwardType,
+    tunnel.bindHost,
+    0,
+    tunnel.targetHost,
+    tunnel.targetPort,
+  );
+}
+
+function forwardKey(
+  sessionId: string,
+  forwardType: TunnelConfig["forwardType"] | ForwardInfo["forwardType"],
+  bindHost: string,
+  bindPort: number,
+  targetHost: string,
+  targetPort: number,
+) {
+  if (forwardType === "dynamic") {
+    return [sessionId, forwardType, bindHost, bindPort].join("\0");
+  }
+  return [sessionId, forwardType, bindHost, bindPort, targetHost, targetPort].join("\0");
 }
 
 function forwardTypeLabel(type: TunnelConfig["forwardType"] | ForwardInfo["forwardType"]) {

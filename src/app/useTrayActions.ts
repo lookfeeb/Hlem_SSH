@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { appEvents } from "../api/appEvents";
+import { getErrorMessage } from "../lib/configMapping";
 
 type UseTrayActionsOptions = {
   appReady: boolean;
@@ -30,6 +31,8 @@ export function useTrayActions(options: UseTrayActionsOptions) {
         return;
       }
       cleanup = unlisten;
+    }).catch((error) => {
+      console.warn("[helm] failed to register tray action listener:", getErrorMessage(error));
     });
     return () => {
       disposed = true;

@@ -34,18 +34,17 @@ pub(super) fn verify_session_access(
     session_id: &str,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let allowed_session_ids = allowed_session_ids_snapshot(state);
-    if !allowed_session_ids.is_empty() {
-        if !allowed_session_ids
+    if !allowed_session_ids.is_empty()
+        && !allowed_session_ids
             .iter()
             .any(|allowed| allowed == session_id)
-        {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiError {
-                    error: format!("无权访问会话 {}，仅允许访问指定会话", session_id),
-                }),
-            ));
-        }
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: format!("无权访问会话 {}，仅允许访问指定会话", session_id),
+            }),
+        ));
     }
     Ok(())
 }

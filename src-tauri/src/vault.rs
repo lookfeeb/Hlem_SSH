@@ -5,7 +5,6 @@ use std::{
 };
 
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
 use zeroize::Zeroize;
 
 use crate::{
@@ -21,9 +20,7 @@ use crate::{
 
 pub const VAULT_FILE_NAME: &str = "vault.rpvault";
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
+#[cfg(test)]
 pub struct VaultStatus {
     pub exists: bool,
     pub unlocked: bool,
@@ -122,16 +119,16 @@ impl VaultStore {
         Ok(ConfigSnapshot { data })
     }
 
-    #[allow(dead_code)]
+    pub fn vault_file_path(&self) -> PathBuf {
+        self.path.clone()
+    }
+
+    #[cfg(test)]
     pub fn status(&self) -> VaultStatus {
         VaultStatus {
             exists: self.path.exists(),
             unlocked: self.unlocked.is_some(),
         }
-    }
-
-    pub fn vault_file_path(&self) -> PathBuf {
-        self.path.clone()
     }
 
     pub fn create(&mut self, master_password: &str) -> AppResult<ConfigSnapshot> {
@@ -163,7 +160,7 @@ impl VaultStore {
         Ok(ConfigSnapshot { data })
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn lock(&mut self) {
         self.unlocked = None;
     }
@@ -480,18 +477,6 @@ impl VaultStore {
         })
     }
 
-    pub fn duplicate_session(&mut self, session_id: &str) -> AppResult<ConfigSnapshot> {
-        self.mutate(|data| {
-            let session = data
-                .sessions
-                .iter()
-                .find(|session| session.id == session_id)
-                .ok_or_else(|| AppError::NotFound(format!("会话 {}", session_id)))?;
-            data.sessions.push(session.duplicate());
-            Ok(())
-        })
-    }
-
     fn mutate(
         &mut self,
         update: impl FnOnce(&mut VaultData) -> AppResult<()>,
@@ -657,7 +642,6 @@ mod tests {
             .create_session(session_input("节点A", Some(group_id)))
             .unwrap();
         let session_id = snapshot.data.sessions.last().unwrap().id.clone();
-        store.duplicate_session(&session_id).unwrap();
         store.delete_session(&session_id).unwrap();
         store.lock();
 
@@ -667,11 +651,11 @@ mod tests {
             .groups
             .iter()
             .any(|group| group.name == "生产"));
-        assert!(snapshot
+        assert!(!snapshot
             .data
             .sessions
             .iter()
-            .any(|session| session.name == "节点A 副本"));
+            .any(|session| session.id == session_id || session.name == "节点A"));
     }
 
     #[test]

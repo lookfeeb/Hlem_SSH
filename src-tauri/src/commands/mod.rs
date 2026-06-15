@@ -39,30 +39,30 @@ pub use backup::{
     spawn_auto_backup_scheduler,
 };
 pub use desktop::{
-    check_update, download_update, fetch_text_url, install_update, local_expand_paths,
-    local_path_exists, open_database_dir, open_external_url, open_log_dir, open_path_dir,
+    check_update, download_update, install_update, local_expand_paths, local_path_exists,
+    open_database_dir, open_external_url, open_path_dir,
 };
 pub use remote::{
     forward_list, forward_start_dynamic, forward_start_local, forward_start_remote, forward_stop,
     telemetry_snapshot, telemetry_start, telemetry_stop,
 };
 pub use sessions::{
-    group_create, group_delete, group_update, sessionFavoriteUpdate, sessionMarkRecent,
-    session_create, session_delete, session_duplicate, session_favorite_update,
-    session_mark_recent, session_update, ssh_connect, ssh_disconnect, ssh_trust_host_key,
+    group_create, group_delete, group_update, session_create, session_delete,
+    session_favorite_update, session_mark_recent, session_update, ssh_connect, ssh_disconnect,
+    ssh_trust_host_key,
 };
 pub use sftp::{
-    sftp_copy, sftp_create_file, sftp_delete, sftp_list, sftp_mkdir, sftp_open, sftp_read_text,
-    sftp_rename, sftp_resolve_target, sftp_search, sftp_write_text, transfer_cancel,
-    transfer_download, transfer_history_clear_finished, transfer_history_snapshot, transfer_pause,
-    transfer_remove, transfer_resume, transfer_retry, transfer_upload,
+    sftp_close, sftp_copy, sftp_create_file, sftp_delete, sftp_list, sftp_mkdir, sftp_open,
+    sftp_read_text, sftp_rename, sftp_resolve_target, sftp_search, sftp_write_text,
+    transfer_cancel, transfer_download, transfer_history_clear_finished, transfer_history_snapshot,
+    transfer_pause, transfer_remove, transfer_resume, transfer_retry, transfer_upload,
 };
 pub use terminal::{
     ssh_exec, ssh_exec_on_connection, terminal_close, terminal_open, terminal_resize,
     terminal_write,
 };
 pub use vault::{
-    config_snapshot, settings_update, tunnel_create, tunnel_delete, tunnel_list, tunnel_update,
+    config_snapshot, settings_update, tunnel_create, tunnel_delete, tunnel_update,
     vault_backup_export, vault_backup_import, vault_migrate, vault_needs_migration,
     vault_skip_migration,
 };

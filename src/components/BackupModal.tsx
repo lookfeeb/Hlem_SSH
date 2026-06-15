@@ -5,6 +5,7 @@ import type { AppSettings, BackupRecord, BackupSettings } from "../types";
 import { defaultBackupSettings } from "../api/vaultApi";
 import { getErrorMessage } from "../lib/configMapping";
 import { formatBeijingCompactTimestamp, formatBeijingDateTime, formatBytes } from "../lib/format";
+import { useMountedRef } from "../lib/reactLifecycle";
 
 interface BackupModalProps {
   open: boolean;
@@ -47,6 +48,7 @@ export function BackupModal({
   const cloudKind = Form.useWatch(["cloud", "kind"], form);
   const activeCloudKind = cloudKind === "s3" ? "s3" : "webdav";
   const isCloudTarget = backupTarget === "cloud";
+  const mountedRef = useMountedRef();
 
   useEffect(() => {
     if (!open) return;
@@ -67,9 +69,9 @@ export function BackupModal({
       });
       if (!path) return;
       await onExport(path);
-      message.success("备份已导出");
+      if (mountedRef.current) message.success("备份已导出");
     } catch (error) {
-      message.error(getErrorMessage(error));
+      if (mountedRef.current) message.error(getErrorMessage(error));
     }
   }
 
@@ -90,11 +92,11 @@ export function BackupModal({
         okButtonProps: { danger: true },
         onOk: async () => {
           await onImport(path);
-          message.success("备份已恢复");
+          if (mountedRef.current) message.success("备份已恢复");
         },
       });
     } catch (error) {
-      message.error(getErrorMessage(error));
+      if (mountedRef.current) message.error(getErrorMessage(error));
     }
   }
 
@@ -103,10 +105,10 @@ export function BackupModal({
       const { open } = await import("@tauri-apps/plugin-dialog");
       const path = await open({ title: "选择本地备份目录", directory: true, multiple: false });
       if (typeof path === "string" && path) {
-        form.setFieldValue("localDirectory", path);
+        if (mountedRef.current) form.setFieldValue("localDirectory", path);
       }
     } catch (error) {
-      message.error(getErrorMessage(error));
+      if (mountedRef.current) message.error(getErrorMessage(error));
     }
   }
 
@@ -134,18 +136,18 @@ export function BackupModal({
           },
         },
       });
-      message.success("备份设置已保存");
+      if (mountedRef.current) message.success("备份设置已保存");
     } catch (error) {
-      message.error(getErrorMessage(error));
+      if (mountedRef.current) message.error(getErrorMessage(error));
     }
   }
 
   async function runBackupNow() {
     try {
       await onRunNow();
-      message.success("备份已完成");
+      if (mountedRef.current) message.success("备份已完成");
     } catch (error) {
-      message.error(getErrorMessage(error));
+      if (mountedRef.current) message.error(getErrorMessage(error));
     }
   }
 
@@ -158,7 +160,7 @@ export function BackupModal({
       okButtonProps: { danger: true },
       onOk: async () => {
         await onRestoreRecord(record.id);
-        message.success("备份已恢复");
+        if (mountedRef.current) message.success("备份已恢复");
       },
     });
   }

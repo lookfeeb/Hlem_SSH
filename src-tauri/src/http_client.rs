@@ -22,18 +22,20 @@ pub(crate) async fn send_with_retry(
     let mut last_error = None;
     let mut last_status = None;
 
-    for attempt in 0..=RETRY_DELAYS.len() {
+    for retry_delay in RETRY_DELAYS.iter().copied().map(Some).chain([None]) {
         match request().send().await {
-            Ok(response)
-                if should_retry_status(response.status()) && attempt < RETRY_DELAYS.len() =>
-            {
+            Ok(response) if should_retry_status(response.status()) && retry_delay.is_some() => {
                 last_status = Some(response.status());
-                tokio::time::sleep(RETRY_DELAYS[attempt]).await;
+                if let Some(delay) = retry_delay {
+                    tokio::time::sleep(delay).await;
+                }
             }
             Ok(response) => return Ok(response),
-            Err(error) if should_retry_error(&error) && attempt < RETRY_DELAYS.len() => {
+            Err(error) if should_retry_error(&error) && retry_delay.is_some() => {
                 last_error = Some(error.to_string());
-                tokio::time::sleep(RETRY_DELAYS[attempt]).await;
+                if let Some(delay) = retry_delay {
+                    tokio::time::sleep(delay).await;
+                }
             }
             Err(error) => {
                 return Err(AppError::Remote(format!("{operation}失败: {error}")));

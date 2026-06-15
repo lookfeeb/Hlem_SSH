@@ -1,7 +1,9 @@
 use tauri::{AppHandle, State};
 
 use super::{connect_session, ensure_vault_unlocked, AppResult, AppState};
-use crate::remote::{ForwardInfo, ServerTelemetry, TelemetryJobInfo};
+use crate::remote::{
+    ForwardInfo, ForwardLocalOptions, ForwardRemoteOptions, ServerTelemetry, TelemetryJobInfo,
+};
 
 #[tauri::command]
 pub async fn telemetry_start(
@@ -48,12 +50,14 @@ pub async fn forward_start_local(
         .remote
         .forward_start_local(
             &app,
-            session_id,
-            connection.connection_id,
-            bind_host,
-            bind_port,
-            remote_host,
-            remote_port,
+            ForwardLocalOptions {
+                session_id,
+                connection_id: connection.connection_id,
+                bind_host,
+                bind_port,
+                remote_host,
+                remote_port,
+            },
         )
         .await
 }
@@ -73,12 +77,14 @@ pub async fn forward_start_remote(
         .remote
         .forward_start_remote(
             &app,
-            session_id,
-            connection.connection_id,
-            remote_bind_host,
-            remote_bind_port,
-            local_host,
-            local_port,
+            ForwardRemoteOptions {
+                session_id,
+                connection_id: connection.connection_id,
+                remote_bind_host,
+                remote_bind_port,
+                local_host,
+                local_port,
+            },
         )
         .await
 }

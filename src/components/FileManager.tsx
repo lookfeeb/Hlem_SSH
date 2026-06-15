@@ -13,11 +13,12 @@ import { App as AntdApp, Button, Dropdown, Form, Input, Modal, Table, Tooltip } 
 import type { MenuProps } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { writeClipboardText } from "../lib/clipboard";
 import { formatFileSize } from "../lib/format";
 import { getErrorMessage } from "../lib/configMapping";
 import { readJsonStorage, writeJsonStorage } from "../lib/storage";
-import { editorChannelName, GLOBAL_EDITOR_CHANNEL, type EditorChannelMessage } from "../lib/editorChannel";
-import { getParentPath, joinPath, normalizePath } from "../lib/path";
+import { EDITOR_CHANNEL_NAME, type EditorChannelMessage } from "../lib/editorChannel";
+import { getBaseName, getParentPath, joinPath, normalizePath } from "../lib/path";
 import { isTauriRuntime } from "../api/runtime";
 import { useMountedRef } from "../lib/reactLifecycle";
 import { sortRemoteEntries, compareEntryGroup, compareEntryName, formatBeijingModifiedTime } from "../lib/fileClassify";
@@ -36,7 +37,6 @@ interface FileManagerProps {
   onListDirectory: (path: string) => Promise<RemoteFileEntry[]>;
   onFileOperation: (operation: FileOperation) => Promise<void>;
   onUploadFiles: (localPaths: string[], targetDirectory: string) => Promise<void>;
-  onDownloadFile: (remotePath: string, fileName: string) => Promise<void>;
   onDownloadFiles: (files: { remotePath: string; fileName: string }[]) => Promise<void>;
   onReadText: (path: string, sessionId?: string) => Promise<string>;
   onWriteText: (path: string, content: string, sessionId?: string) => Promise<void>;
@@ -113,10 +113,17 @@ const MIN_COLUMN_WIDTH = 64;
 const COLUMN_WIDTHS_KEY = "helm:fileColumnWidths";
 
 function loadColumnWidths(): Record<string, number> {
-  return readJsonStorage<Record<string, number>>(COLUMN_WIDTHS_KEY, { ...DEFAULT_COLUMN_WIDTHS }, (value) => {
-    if (!value || typeof value !== "object") return { ...DEFAULT_COLUMN_WIDTHS };
-    return { ...DEFAULT_COLUMN_WIDTHS, ...(value as Record<string, number>) };
-  });
+  return readJsonStorage<Record<string, number>>(COLUMN_WIDTHS_KEY, { ...DEFAULT_COLUMN_WIDTHS }, normalizeColumnWidths);
+}
+
+function normalizeColumnWidths(value: unknown): Record<string, number> {
+  const widths = { ...DEFAULT_COLUMN_WIDTHS };
+  if (!value || typeof value !== "object") return widths;
+  for (const [key, rawWidth] of Object.entries(value)) {
+    if (!(key in DEFAULT_COLUMN_WIDTHS) || typeof rawWidth !== "number" || !Number.isFinite(rawWidth)) continue;
+    widths[key] = Math.max(MIN_COLUMN_WIDTH, rawWidth);
+  }
+  return widths;
 }
 
 let inMemoryColumnWidths: Record<string, number> = loadColumnWidths();
@@ -146,7 +153,36 @@ function ResizableHeaderCell({ columnKey, onStartResize, children, ...rest }: Re
   );
 }
 
+function firstDetachedEditorChannel(channels: Map<string, BroadcastChannel>): BroadcastChannel | null {
+  return channels.values().next().value ?? null;
+}
+
+function droppedFilePaths(files: FileList): string[] {
+  return Array.from(files).flatMap((file) => {
+    const path = "path" in file && typeof file.path === "string" ? file.path : "";
+    return path ? [path] : [];
+  });
+}
+
 const tableComponents = { header: { cell: ResizableHeaderCell } };
+
+function fileColumnKey(column: ColumnsType<RemoteFileEntry>[number]): string | null {
+  return typeof column.key === "string" ? column.key : null;
+}
+
+function isStringKey(key: React.Key): key is string {
+  return typeof key === "string";
+}
+
+function postEditorMessage(channel: BroadcastChannel, message: EditorChannelMessage): boolean {
+  try {
+    channel.postMessage(message);
+    return true;
+  } catch (error) {
+    console.warn("[helm] failed to post editor message:", getErrorMessage(error));
+    return false;
+  }
+}
 
 export function FileManager({
   session,
@@ -156,7 +192,6 @@ export function FileManager({
   onListDirectory,
   onFileOperation,
   onUploadFiles,
-  onDownloadFile,
   onDownloadFiles,
   onReadText,
   onWriteText,
@@ -240,17 +275,19 @@ export function FileManager({
   const resizableColumns = useMemo<ColumnsType<RemoteFileEntry>>(
     () =>
       baseColumns.map((column) => {
-        const key = column.key as string;
+        const key = fileColumnKey(column);
+        if (!key) return column;
+        const headerCellProps: ResizableHeaderCellProps = {
+          columnKey: key,
+          onStartResize: handleColumnResizeStart,
+        };
         const col = {
           ...column,
           width: columnWidths[key] ?? DEFAULT_COLUMN_WIDTHS[key],
-          onHeaderCell: () => ({
-            columnKey: key,
-            onStartResize: handleColumnResizeStart,
-          } as React.ThHTMLAttributes<HTMLTableCellElement>),
+          onHeaderCell: () => headerCellProps,
         };
         if (key === "name") {
-          const dirName = path === "/" ? "/" : path.split("/").filter(Boolean).pop() || "/";
+          const dirName = path === "/" ? "/" : getBaseName(path) || "/";
           col.title = (
             <span className="fileColumnNameHeader">
               文件名
@@ -271,6 +308,7 @@ export function FileManager({
     () => Math.max(tableColumnWidth, tableSurfaceWidth > 0 ? Math.ceil(tableSurfaceWidth) + 12 : 0),
     [tableColumnWidth, tableSurfaceWidth],
   );
+  const selectedRowKeySet = useMemo(() => new Set(selectedRowKeys), [selectedRowKeys]);
 
   useEffect(() => {
     directoryExpandedKeysRef.current = directoryExpandedKeys;
@@ -376,8 +414,9 @@ export function FileManager({
           if (!mountedRef.current || searchSeq.current !== seq) return;
           setFocusedPath(targetPath);
         })
-        .catch(() => {
+        .catch((error) => {
           if (!mountedRef.current || searchSeq.current !== seq) return;
+          console.warn("[helm] remote file search failed:", getErrorMessage(error));
           setFocusedPath(null);
         })
         .finally(() => {
@@ -388,6 +427,7 @@ export function FileManager({
   }, [canUseFiles, searchText]);
 
   useEffect(() => {
+    if (!canUseFiles) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void import("@tauri-apps/api/webview")
@@ -405,9 +445,15 @@ export function FileManager({
         }),
       )
       .then((cleanup) => {
+        if (disposed) {
+          cleanup();
+          return;
+        }
         unlisten = cleanup;
       })
-      .catch(() => undefined);
+      .catch((error) => {
+        console.warn("[helm] failed to register file drag listener:", getErrorMessage(error));
+      });
     return () => {
       disposed = true;
       unlisten?.();
@@ -436,48 +482,67 @@ export function FileManager({
 
     setOpeningEditorPath(targetPath);
     const messageKey = `editor-open-${targetPath}`;
+    let createdChannel: BroadcastChannel | null = null;
     message.open({ key: messageKey, type: "loading", content: "正在读取文件...", duration: 0 });
     try {
       const content = await onReadText(targetPath, sessionId);
       if (!mountedRef.current) return;
 
-      // 如果已有编辑器窗口，直接发送 addTab
-      const existingChannel = detachedEditorsRef.current.values().next().value as BroadcastChannel | undefined;
+      const existingChannel = firstDetachedEditorChannel(detachedEditorsRef.current);
       if (existingChannel) {
-        existingChannel.postMessage({ type: "addTab", path: targetPath, content, sessionId, sessionName } satisfies EditorChannelMessage);
-        message.destroy(messageKey);
-        return;
+        if (postEditorMessage(existingChannel, { type: "addTab", path: targetPath, content, sessionId, sessionName })) {
+          message.destroy(messageKey);
+          return;
+        }
+        existingChannel.close();
+        detachedEditorsRef.current.delete(EDITOR_CHANNEL_NAME);
       }
 
-      // 没有窗口，创建新窗口
-      const editorId = GLOBAL_EDITOR_CHANNEL;
-      const channel = new BroadcastChannel(editorChannelName(editorId));
-      detachedEditorsRef.current.set(editorId, channel);
+      const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
+      createdChannel = channel;
+      detachedEditorsRef.current.set(EDITOR_CHANNEL_NAME, channel);
       channel.onmessage = (event: MessageEvent<EditorChannelMessage>) => {
         const payload = event.data;
         if (payload.type === "ready") {
-          channel.postMessage({ type: "init", path: targetPath, content, sessionId, sessionName } satisfies EditorChannelMessage);
+          postEditorMessage(channel, { type: "init", path: targetPath, content, sessionId, sessionName });
         }
         if (payload.type === "save") {
           void onWriteText(payload.path, payload.content, payload.sessionId)
             .then(() => {
-              channel.postMessage({ type: "saved", path: payload.path, sessionId: payload.sessionId } satisfies EditorChannelMessage);
+              if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
+                postEditorMessage(channel, { type: "saved", path: payload.path, sessionId: payload.sessionId });
+              }
             })
             .catch((error) => {
-              channel.postMessage({ type: "error", message: getErrorMessage(error), path: payload.path, sessionId: payload.sessionId } satisfies EditorChannelMessage);
+              if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
+                postEditorMessage(channel, { type: "error", message: getErrorMessage(error), path: payload.path, sessionId: payload.sessionId });
+              }
             });
         }
         if (payload.type === "close") {
           channel.close();
-          detachedEditorsRef.current.delete(editorId);
+          detachedEditorsRef.current.delete(EDITOR_CHANNEL_NAME);
         }
       };
 
       if (isTauriRuntime()) {
         const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+        if (!mountedRef.current) return;
         const windowLabel = `editor-global`;
+        const existingWindow = await WebviewWindow.getByLabel(windowLabel);
+        if (!mountedRef.current) return;
+        if (existingWindow) {
+          postEditorMessage(channel, { type: "addTab", path: targetPath, content, sessionId, sessionName });
+          try {
+            await existingWindow.setFocus();
+          } catch (error) {
+            console.warn("[helm] failed to focus editor window:", getErrorMessage(error));
+          }
+          if (mountedRef.current) message.destroy(messageKey);
+          return;
+        }
         const webview = new WebviewWindow(windowLabel, {
-          url: `index.html?editorWindow=${editorId}`,
+          url: `index.html?editorWindow=${encodeURIComponent(EDITOR_CHANNEL_NAME)}`,
           title: `文件编辑器`,
           width: 1100,
           height: 760,
@@ -486,13 +551,21 @@ export function FileManager({
           resizable: true,
         });
         await webview.once("tauri://error", (event) => {
-          if (mountedRef.current) message.error(String(event.payload));
+          if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
+            channel.close();
+            detachedEditorsRef.current.delete(EDITOR_CHANNEL_NAME);
+          }
+          if (mountedRef.current) message.error(getErrorMessage(event.payload));
         });
       } else {
-        window.open(`${window.location.origin}${window.location.pathname}?editorWindow=${editorId}`, `editor-global`, "width=1100,height=760");
+        window.open(`${window.location.origin}${window.location.pathname}?editorWindow=${encodeURIComponent(EDITOR_CHANNEL_NAME)}`, `editor-global`, "width=1100,height=760");
       }
       if (mountedRef.current) message.destroy(messageKey);
     } catch (error) {
+      if (createdChannel && detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === createdChannel) {
+        createdChannel.close();
+        detachedEditorsRef.current.delete(EDITOR_CHANNEL_NAME);
+      }
       if (mountedRef.current) {
         message.open({ key: messageKey, type: "error", content: getErrorMessage(error), duration: 3 });
       }
@@ -647,8 +720,8 @@ export function FileManager({
     const entry = contextMenu?.entry;
     if (!entry) return [];
     const entryKey = entry.path || joinPath(path, entry.name);
-    if (selectedRowKeys.length > 0 && selectedRowKeys.includes(entryKey)) {
-      return files.filter((f) => selectedRowKeys.includes(f.path || joinPath(path, f.name)));
+    if (selectedRowKeySet.size > 0 && selectedRowKeySet.has(entryKey)) {
+      return files.filter((f) => selectedRowKeySet.has(f.path || joinPath(path, f.name)));
     }
     return [entry];
   }
@@ -679,8 +752,10 @@ export function FileManager({
     }
     if (key === "copyPath") {
       const paths = entries.map((e) => e.path || joinPath(path, e.name)).join("\n");
-      void navigator.clipboard.writeText(paths);
-      message.success("已复制路径");
+      void writeClipboardText(paths).then((ok) => {
+        if (ok) message.success("已复制路径");
+        else message.error("复制路径失败");
+      });
     }
     if (key === "download") {
       const downloadEntries = entries.filter((e) => e.fileType !== "directory");
@@ -807,9 +882,7 @@ export function FileManager({
               if (!canUseFiles) return;
               event.preventDefault();
               setDragging(false);
-              const paths = Array.from(event.dataTransfer.files)
-                .map((file) => (file as File & { path?: string }).path)
-                .filter(Boolean) as string[];
+              const paths = droppedFilePaths(event.dataTransfer.files);
               void uploadPaths(paths);
             }}
             onContextMenu={(event) => {
@@ -828,7 +901,7 @@ export function FileManager({
               showSorterTooltip={false}
               rowSelection={{
                 selectedRowKeys,
-                onChange: (keys) => setSelectedRowKeys(keys as string[]),
+                onChange: (keys) => setSelectedRowKeys(keys.filter(isStringKey)),
                 columnWidth: 48,
               }}
               rowClassName={(entry) => (focusedPath && entry.path === focusedPath ? "fileTableRow-focused" : "")}
@@ -840,7 +913,7 @@ export function FileManager({
                   event.preventDefault();
                   event.stopPropagation();
                   const entryKey = entry.path || joinPath(path, entry.name);
-                  if (!selectedRowKeys.includes(entryKey)) {
+                  if (!selectedRowKeySet.has(entryKey)) {
                     setSelectedRowKeys([entryKey]);
                   }
                   setContextMenu(null);

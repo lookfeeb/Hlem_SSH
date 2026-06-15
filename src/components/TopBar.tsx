@@ -14,7 +14,6 @@ interface TopBarProps {
   tabSessions: RemoteSession[];
   activeSessionId: string;
   onActivate: (id: string) => void;
-  onAdd: () => void;
   onClose: (id: string) => void;
   onConnect: (session: RemoteSession) => void;
   onDisconnect: (session: RemoteSession) => void;
@@ -32,7 +31,6 @@ export function TopBar({
   tabSessions,
   activeSessionId,
   onActivate,
-  onAdd,
   onClose,
   onConnect,
   onDisconnect,
@@ -85,7 +83,8 @@ export function TopBar({
     const element = tabsViewportRef.current?.querySelector(".sessionTab-active");
     if (!(element instanceof HTMLElement)) return;
     element.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
-    window.requestAnimationFrame(updateTabScrollState);
+    const frame = window.requestAnimationFrame(updateTabScrollState);
+    return () => window.cancelAnimationFrame(frame);
   }, [activeSessionId, tabSessions.length, updateTabScrollState]);
 
   const scrollSessionTabs = useCallback((direction: -1 | 1) => {
@@ -232,5 +231,8 @@ function sessionStateText(state: ConnectionState) {
 }
 
 function activeTransferCount(transfers: TransferInfo[]) {
-  return transfers.filter((transfer) => transfer.status === "queued" || transfer.status === "running" || transfer.status === "paused").length;
+  return transfers.reduce(
+    (count, transfer) => count + (transfer.status === "queued" || transfer.status === "running" || transfer.status === "paused" ? 1 : 0),
+    0,
+  );
 }

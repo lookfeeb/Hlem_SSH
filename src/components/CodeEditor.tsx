@@ -94,7 +94,7 @@ export function CodeEditor({
     [],
   );
   const extensions = useMemo(
-    () => [languageExtension(path), EditorView.lineWrapping, keymap.of(searchKeymap), undoTracker].filter(Boolean) as Extension[],
+    () => [languageExtension(path), EditorView.lineWrapping, keymap.of(searchKeymap), undoTracker].filter(isExtension),
     [path, undoTracker],
   );
   const canFormatJson = useMemo(() => path.toLowerCase().endsWith(".json"), [path]);
@@ -397,7 +397,8 @@ export function CodeEditor({
               size="small"
               icon={copied ? <CheckOutlined style={{ color: "#52c41a" }} /> : <CopyOutlined />}
               onClick={() => {
-                void navigator.clipboard.writeText(value ?? "").then(() => {
+                void writeClipboardText(value ?? "").then((ok) => {
+                  if (!ok) return;
                   setCopied(true);
                   setSafeTimeout(() => setCopied(false), 1500);
                 });
@@ -483,6 +484,10 @@ function languageExtension(path: string): Extension | null {
   if (extension === "scala") return StreamLanguage.define(scala);
 
   return null;
+}
+
+function isExtension(extension: Extension | null): extension is Extension {
+  return extension !== null;
 }
 
 const SHELL_FILE_NAMES = new Set([

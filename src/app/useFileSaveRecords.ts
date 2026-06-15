@@ -15,6 +15,7 @@ export function useFileSaveRecords({ writeRemoteTextRaw, onSaveFailed }: UseFile
     const recordId = crypto.randomUUID();
     upsertFileSaveRecord({
       id: recordId,
+      sessionId: sessionId ?? null,
       path,
       directory: getRemoteParentPath(path),
       name: getRemoteBaseName(path),
@@ -38,7 +39,7 @@ export function useFileSaveRecords({ writeRemoteTextRaw, onSaveFailed }: UseFile
     if (!record) return;
     updateFileSaveRecord(recordId, { status: "saving", error: null, savedAt: new Date().toISOString() });
     try {
-      await writeRemoteTextRaw(record.path, record.content);
+      await writeRemoteTextRaw(record.path, record.content, record.sessionId ?? undefined);
       updateFileSaveRecord(recordId, { status: "success", error: null, savedAt: new Date().toISOString() });
     } catch (error) {
       updateFileSaveRecord(recordId, { status: "failed", error: getErrorMessage(error), savedAt: new Date().toISOString() });

@@ -11,7 +11,7 @@ use tauri::{AppHandle, Manager, State};
 use super::{with_store, AppResult, AppState};
 use crate::backup::{
     auto_backup_due_target_kinds, download_cloud_backup, merge_configured_backup_records,
-    prepare_backup_run, run_auto_backup, run_configured_backup,
+    prepare_backup_run, remove_backup_file_best_effort, run_auto_backup, run_configured_backup,
 };
 use crate::config::ConfigSnapshot;
 use crate::errors::AppError;
@@ -69,7 +69,7 @@ pub async fn backup_run_now(state: State<'_, AppState>) -> AppResult<ConfigSnaps
     let (snapshot, delete_paths) =
         with_store(&state, |store| store.replace_backup_records(records))?;
     for path in delete_paths {
-        let _ = tokio::fs::remove_file(path).await;
+        remove_backup_file_best_effort(path, "manual backup record replacement").await;
     }
     Ok(snapshot)
 }
@@ -84,7 +84,7 @@ async fn backup_run_auto(
     let (snapshot, delete_paths) =
         with_store(&state, |store| store.replace_backup_records(records))?;
     for path in delete_paths {
-        let _ = tokio::fs::remove_file(path).await;
+        remove_backup_file_best_effort(path, "auto backup record replacement").await;
     }
     Ok(snapshot)
 }
@@ -131,7 +131,7 @@ pub async fn backup_record_delete(
         store.delete_backup_record(&record_id, delete_file)
     })?;
     if let Some(path) = delete_path {
-        let _ = tokio::fs::remove_file(path).await;
+        remove_backup_file_best_effort(path, "backup record deletion").await;
     }
     Ok(snapshot)
 }

@@ -40,6 +40,23 @@ impl Stream for OrderedChunkStream {
 /// 4 worker × 4 槽 × 1MB = 最多 16MB 飞行内存，给客户端慢消费的反压预留空间。
 const PER_WORKER_QUEUE_DEPTH: usize = 4;
 
+async fn send_download_worker_error(
+    tx: &mpsc::Sender<io::Result<Bytes>>,
+    message: impl Into<String>,
+) -> bool {
+    let message = message.into();
+    if tx
+        .send(Err(io::Error::other(message.clone())))
+        .await
+        .is_ok()
+    {
+        true
+    } else {
+        log::debug!("parallel download worker could not report error: {message}");
+        false
+    }
+}
+
 impl RemoteRuntime {
     /// 由 AI API `connect-session` 调用：根据 vault 中的 SessionConfig 拉起 SSH
     /// 主连接，连接成功后顺手开 SFTP 子系统（与 UI 行为对齐）。
@@ -330,12 +347,7 @@ impl RemoteRuntime {
                 let mut file = match task_sftp.open(task_path).await {
                     Ok(f) => f,
                     Err(e) => {
-                        let _ = tx
-                            .send(Err(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!("打开远程文件失败: {}", e),
-                            )))
-                            .await;
+                        send_download_worker_error(&tx, format!("打开远程文件失败: {}", e)).await;
                         return;
                     }
                 };
@@ -343,12 +355,7 @@ impl RemoteRuntime {
                 if chunk_start > 0 {
                     use tokio::io::AsyncSeekExt;
                     if let Err(e) = file.seek(std::io::SeekFrom::Start(chunk_start)).await {
-                        let _ = tx
-                            .send(Err(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!("seek 远程文件失败: {}", e),
-                            )))
-                            .await;
+                        send_download_worker_error(&tx, format!("seek 远程文件失败: {}", e)).await;
                         return;
                     }
                 }
@@ -360,28 +367,32 @@ impl RemoteRuntime {
                     let to_read = std::cmp::min(remaining as usize, buf.len());
                     match file.read(&mut buf[..to_read]).await {
                         Ok(0) => {
-                            let _ = tx
+                            if tx
                                 .send(Err(io::Error::new(
                                     io::ErrorKind::UnexpectedEof,
                                     format!("远端文件提前结束：还差 {} 字节", remaining),
                                 )))
-                                .await;
+                                .await
+                                .is_err()
+                            {
+                                log::debug!(
+                                    "parallel download worker could not report unexpected EOF"
+                                );
+                            }
                             return;
                         }
                         Ok(n) => {
                             let chunk = Bytes::copy_from_slice(&buf[..n]);
-                            // 发送失败 → 客户端断开 / 主流被丢弃 → 静默退出。
                             if tx.send(Ok(chunk)).await.is_err() {
+                                log::debug!(
+                                    "parallel download worker stopped because receiver closed"
+                                );
                                 return;
                             }
                             remaining -= n as u64;
                         }
                         Err(e) => {
-                            let _ = tx
-                                .send(Err(io::Error::new(
-                                    io::ErrorKind::Other,
-                                    format!("读取远程文件失败: {}", e),
-                                )))
+                            send_download_worker_error(&tx, format!("读取远程文件失败: {}", e))
                                 .await;
                             return;
                         }
@@ -432,18 +443,18 @@ impl RemoteRuntime {
                 let remote_host = tunnel.target_host.clone();
                 let remote_port = tunnel.target_port;
                 let task = tokio::spawn(async move {
-                    loop {
-                        match listener.accept().await {
-                            Ok((stream, _)) => {
-                                let handle = handle.clone();
-                                let host = remote_host.clone();
-                                tokio::spawn(async move {
-                                    let _ =
-                                        pipe_local_to_ssh(stream, handle, host, remote_port).await;
-                                });
+                    while let Ok((stream, _)) = listener.accept().await {
+                        let handle = handle.clone();
+                        let host = remote_host.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) =
+                                pipe_local_to_ssh(stream, handle, host.clone(), remote_port).await
+                            {
+                                eprintln!(
+                                    "[helm] API local tunnel connection failed: {host}:{remote_port}: {error}"
+                                );
                             }
-                            Err(_) => break,
-                        }
+                        });
                     }
                 });
                 self.forwards.write().await.insert(
@@ -478,16 +489,13 @@ impl RemoteRuntime {
                 };
                 let handle = connection.handle.clone();
                 let task = tokio::spawn(async move {
-                    loop {
-                        match listener.accept().await {
-                            Ok((stream, _)) => {
-                                let handle = handle.clone();
-                                tokio::spawn(async move {
-                                    let _ = handle_socks5(stream, handle).await;
-                                });
+                    while let Ok((stream, _)) = listener.accept().await {
+                        let handle = handle.clone();
+                        tokio::spawn(async move {
+                            if let Err(error) = handle_socks5(stream, handle).await {
+                                eprintln!("[helm] API dynamic tunnel connection failed: {error}");
                             }
-                            Err(_) => break,
-                        }
+                        });
                     }
                 });
                 self.forwards.write().await.insert(
@@ -556,12 +564,18 @@ impl RemoteRuntime {
                 .await
             {
                 let handle = connection.handle.lock().await;
-                let _ = handle
+                if let Err(error) = handle
                     .cancel_tcpip_forward(
                         record.info.bind_host.clone(),
                         record.info.bind_port as u32,
                     )
-                    .await;
+                    .await
+                {
+                    eprintln!(
+                        "[helm] failed to cancel API remote tunnel: {}:{}: {error}",
+                        record.info.bind_host, record.info.bind_port
+                    );
+                }
                 connection
                     .remote_forwards
                     .write()

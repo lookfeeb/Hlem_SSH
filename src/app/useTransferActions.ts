@@ -1,5 +1,6 @@
 import { remoteApi } from "../api/remoteApi";
 import { getErrorCode, getErrorMessage } from "../lib/configMapping";
+import { useMountedRef } from "../lib/reactLifecycle";
 import type { MutableRefObject } from "react";
 import type { RemoteSession, TransferHistorySnapshot, TransferInfo } from "../types";
 
@@ -23,7 +24,10 @@ export function useTransferActions({
   activeSessionId,
   appendTerminal,
 }: UseTransferActionsOptions) {
+  const mountedRef = useMountedRef();
+
   function upsertTransfer(payload: TransferInfo) {
+    if (!mountedRef.current) return;
     setPersistedTransfers((current) => {
       const existing = current.findIndex((transfer) => transfer.transferId === payload.transferId);
       if (existing === -1) return [payload, ...current];
@@ -48,9 +52,10 @@ export function useTransferActions({
       ),
     );
     try {
-      upsertTransfer(await remoteApi.pauseTransfer(transferId));
+      const transfer = await remoteApi.pauseTransfer(transferId);
+      if (mountedRef.current) upsertTransfer(transfer);
     } catch (error) {
-      appendTerminal(activeSessionId, "error", getErrorMessage(error));
+      if (mountedRef.current) appendTerminal(activeSessionId, "error", getErrorMessage(error));
     }
   }
 
@@ -61,9 +66,10 @@ export function useTransferActions({
       ),
     );
     try {
-      upsertTransfer(await remoteApi.resumeTransfer(transferId));
+      const transfer = await remoteApi.resumeTransfer(transferId);
+      if (mountedRef.current) upsertTransfer(transfer);
     } catch (error) {
-      appendTerminal(activeSessionId, "error", getErrorMessage(error));
+      if (mountedRef.current) appendTerminal(activeSessionId, "error", getErrorMessage(error));
     }
   }
 
@@ -71,7 +77,7 @@ export function useTransferActions({
     try {
       await remoteApi.cancelTransfer(transferId);
     } catch (error) {
-      appendTerminal(activeSessionId, "error", getErrorMessage(error));
+      if (mountedRef.current) appendTerminal(activeSessionId, "error", getErrorMessage(error));
     }
   }
 
@@ -88,9 +94,10 @@ export function useTransferActions({
         targetSession.sftpId === transfer.sftpId
           ? await retryExistingTransfer(transfer)
           : await restartTransferOnSession(transfer, targetSession.sftpId);
+      if (!mountedRef.current) return;
       setPersistedTransfers((current) => [next, ...current.filter((transfer) => transfer.transferId !== transferId)]);
     } catch (error) {
-      appendTerminal(targetSession.id, "error", getErrorMessage(error));
+      if (mountedRef.current) appendTerminal(targetSession.id, "error", getErrorMessage(error));
     }
   }
 
@@ -118,9 +125,10 @@ export function useTransferActions({
   async function removeTransfer(transferId: string) {
     setPersistedTransfers((current) => current.filter((transfer) => transfer.transferId !== transferId));
     try {
-      applyTransferHistorySnapshot(await remoteApi.removeTransfer(transferId));
-    } catch {
-      // 后端清理失败不影响前端已移除的条目。
+      const snapshot = await remoteApi.removeTransfer(transferId);
+      if (mountedRef.current) applyTransferHistorySnapshot(snapshot);
+    } catch (error) {
+      if (mountedRef.current) console.warn("[helm] failed to remove transfer from runtime:", getErrorMessage(error));
     }
   }
 

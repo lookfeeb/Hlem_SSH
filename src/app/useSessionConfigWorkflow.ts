@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { vaultApi } from "../api/vaultApi";
 import { createDefaultSessionInput } from "../lib/configMapping";
+import { useMountedRef } from "../lib/reactLifecycle";
 import { createNextSessionName, sessionConfigToInput } from "./appHelpers";
 import type { SessionModalState } from "./appTypes";
 import type { ConfigSnapshot, SessionInput } from "../types";
@@ -17,12 +18,13 @@ export function useSessionConfigWorkflow({
   applySnapshot,
 }: UseSessionConfigWorkflowOptions) {
   const [sessionModal, setSessionModal] = useState<SessionModalState | null>(null);
+  const mountedRef = useMountedRef();
 
-  async function addSession() {
+  function addSession() {
     if (!configSnapshot) return;
     setSessionModal({
       mode: "create",
-      input: createDefaultSessionInput(configSnapshot.data.sessions.length + 1, configSnapshot.data.groups[0]?.id),
+      input: createDefaultSessionInput(configSnapshot.data.groups[0]?.id),
     });
   }
 
@@ -40,10 +42,12 @@ export function useSessionConfigWorkflow({
     };
     if (sessionModal.mode === "create") {
       const snapshot = await vaultApi.sessionCreate(namedInput);
+      if (!mountedRef.current) return;
       const createdId = snapshot.data.sessions[snapshot.data.sessions.length - 1]?.id;
       applySnapshot(snapshot, createdId);
     } else {
       const snapshot = await vaultApi.sessionUpdate(sessionModal.sessionId, namedInput);
+      if (!mountedRef.current) return;
       applySnapshot(snapshot, sessionModal.sessionId);
     }
     closeSessionConfigModal();

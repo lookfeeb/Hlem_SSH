@@ -14,12 +14,19 @@ import {
 } from "@ant-design/icons";
 import { Button, Form, Input, InputNumber, Modal, Radio, Select, Tooltip } from "antd";
 import { useEffect, useState } from "react";
+import { getErrorMessage } from "../lib/configMapping";
 import { getGroupNameLengthError, GROUP_COUNT_ERROR, GROUP_CUSTOM_MAX_COUNT, GROUP_NAME_MAX_CHARS } from "../lib/groupName";
+import { useMountedRef } from "../lib/reactLifecycle";
 import type { SessionGroup, SessionInput } from "../types";
 
 const GROUP_SELECT_OPTION_HEIGHT = 36;
 const GROUP_SELECT_VISIBLE_COUNT = 5;
 const GROUP_SELECT_LIST_HEIGHT = GROUP_SELECT_OPTION_HEIGHT * GROUP_SELECT_VISIBLE_COUNT;
+
+function formatGroupActionError(error: unknown, fallback: string) {
+  const message = getErrorMessage(error);
+  return message === "操作失败" ? fallback : message;
+}
 
 interface SessionConfigModalProps {
   open: boolean;
@@ -51,6 +58,12 @@ interface SessionFormValues {
   proxyKind: "socks5" | "httpConnect";
   proxyHost: string;
   proxyPort: number;
+}
+
+interface GroupSelectOption {
+  label: string;
+  value: string;
+  group: SessionGroup;
 }
 
 export function SessionConfigModal({
@@ -290,6 +303,7 @@ function GroupSelectField({
   onDeleteGroup: (groupId: string) => Promise<string | null>;
 }) {
   const form = Form.useFormInstance<SessionFormValues>();
+  const mountedRef = useMountedRef();
   const [newGroupName, setNewGroupName] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -307,7 +321,7 @@ function GroupSelectField({
   const existingGroupForNewName = groups.find((group) => getGroupDisplayName(group) === trimmedName);
   const newGroupCountError =
     trimmedName && !existingGroupForNewName && customGroupCount >= GROUP_CUSTOM_MAX_COUNT ? GROUP_COUNT_ERROR : null;
-  const groupOptions = groups.map((group) => ({
+  const groupOptions: GroupSelectOption[] = groups.map((group) => ({
     label: getGroupDisplayName(group),
     value: group.id,
     group,
@@ -358,13 +372,14 @@ function GroupSelectField({
     setCreateError(null);
     try {
       const groupId = await onCreateGroup(trimmedName);
+      if (!mountedRef.current) return;
       if (groupId) form.setFieldValue("groupId", groupId);
       setNewGroupName("");
       setGroupActionError(null);
     } catch (error) {
-      setCreateError(error instanceof Error ? error.message : "创建分组失败");
+      if (mountedRef.current) setCreateError(formatGroupActionError(error, "创建分组失败"));
     } finally {
-      setCreating(false);
+      if (mountedRef.current) setCreating(false);
     }
   }
 
@@ -394,6 +409,7 @@ function GroupSelectField({
     setGroupActionError(null);
     try {
       await onUpdateGroup(group.id, nextName);
+      if (!mountedRef.current) return;
       setGroupNameOverrides((current) => ({ ...current, [group.id]: nextName }));
       if (form.getFieldValue("groupId") === group.id) {
         form.setFieldValue("groupId", group.id);
@@ -401,9 +417,9 @@ function GroupSelectField({
       setEditingGroupId(null);
       setEditingGroupName("");
     } catch (error) {
-      setGroupActionError(error instanceof Error ? error.message : "重命名分组失败");
+      if (mountedRef.current) setGroupActionError(formatGroupActionError(error, "重命名分组失败"));
     } finally {
-      setBusyGroupId(null);
+      if (mountedRef.current) setBusyGroupId(null);
     }
   }
 
@@ -413,6 +429,7 @@ function GroupSelectField({
     setGroupActionError(null);
     try {
       const fallbackGroupId = await onDeleteGroup(group.id);
+      if (!mountedRef.current) return;
       if (form.getFieldValue("groupId") === group.id) {
         form.setFieldValue("groupId", fallbackGroupId);
       }
@@ -420,9 +437,9 @@ function GroupSelectField({
       setEditingGroupId(null);
       setEditingGroupName("");
     } catch (error) {
-      setGroupActionError(error instanceof Error ? error.message : "删除分组失败");
+      if (mountedRef.current) setGroupActionError(formatGroupActionError(error, "删除分组失败"));
     } finally {
-      setBusyGroupId(null);
+      if (mountedRef.current) setBusyGroupId(null);
     }
   }
 
@@ -612,7 +629,7 @@ function GroupSelectField({
 
   return (
     <Form.Item label="分组" name="groupId">
-      <Select
+      <Select<string, GroupSelectOption>
         key={groupSelectKey}
         allowClear
         classNames={{ popup: { root: "sessionGroupSelectPopup" } }}
@@ -622,7 +639,7 @@ function GroupSelectField({
         }}
         placeholder="不分组"
         options={groupOptions}
-        optionRender={(option) => renderGroupOption(option.data.group as SessionGroup)}
+        optionRender={(option) => renderGroupOption(option.data.group)}
         popupRender={(menu) => (
           <>
             {menu}
@@ -675,6 +692,7 @@ function GroupSelectField({
 /** 私钥路径字段：含系统文件选择器按钮（Tauri dialog） */
 function PrivateKeyPathField() {
   const form = Form.useFormInstance();
+  const mountedRef = useMountedRef();
 
   async function browse() {
     try {
@@ -688,11 +706,11 @@ function PrivateKeyPathField() {
           { name: "所有文件", extensions: ["*"] },
         ],
       });
-      if (typeof selected === "string" && selected) {
+      if (mountedRef.current && typeof selected === "string" && selected) {
         form.setFieldValue("privateKeyPath", selected);
       }
-    } catch {
-      // 插件不可用时用户可手动输入路径
+    } catch (error) {
+      console.debug("[helm] failed to open private key picker:", getErrorMessage(error));
     }
   }
 

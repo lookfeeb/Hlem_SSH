@@ -52,17 +52,20 @@ export const remoteApi = {
       timeoutMs,
     }),
   openSftp: (connectionId: string) => call<SftpInfo>("sftp_open", { connectionId }),
-  listFiles: (sftpId: string, path: string) => call<RemoteFileEntry[]>("sftp_list", { sftpId, path }),
+  closeSftp: (sftpId: string) => call<void>("sftp_close", { sftpId }),
+  listFiles: (sftpId: string, path: string) =>
+    call<RemoteFileEntry[]>("sftp_list", { sftpId, path }, { retries: 1 }),
   searchFile: (sftpId: string, basePath: string, query: string) =>
-    call<string | null>("sftp_search", { sftpId, basePath, query }),
+    call<string | null>("sftp_search", { sftpId, basePath, query }, { timeoutMs: 5 * 60_000 }),
   mkdir: (sftpId: string, path: string) => call<void>("sftp_mkdir", { sftpId, path }),
   createFile: (sftpId: string, path: string) => call<void>("sftp_create_file", { sftpId, path }),
   delete: (sftpId: string, path: string, recursive = false) =>
     call<void>("sftp_delete", { sftpId, path, recursive }),
   rename: (sftpId: string, from: string, to: string) => call<void>("sftp_rename", { sftpId, from, to }),
   copy: (sftpId: string, from: string, to: string) => call<void>("sftp_copy", { sftpId, from, to }),
-  readText: (sftpId: string, path: string) => call<string>("sftp_read_text", { sftpId, path }),
-  writeText: (sftpId: string, path: string, content: string) => call<void>("sftp_write_text", { sftpId, path, content }),
+  readText: (sftpId: string, path: string) => call<string>("sftp_read_text", { sftpId, path }, { timeoutMs: 5 * 60_000 }),
+  writeText: (sftpId: string, path: string, content: string) =>
+    call<void>("sftp_write_text", { sftpId, path, content }, { timeoutMs: 5 * 60_000 }),
   resolveTarget: (sftpId: string, currentPath: string, sourcePath: string, value: string) =>
     call<string>("sftp_resolve_target", { sftpId, currentPath, sourcePath, value }),
   upload: (
@@ -74,12 +77,14 @@ export const remoteApi = {
     resume = false,
   ) =>
     call<TransferInfo>("transfer_upload", {
-      sftpId,
-      localPath,
-      remotePath,
-      overwrite,
-      accelerated,
-      resume,
+      input: {
+        sftpId,
+        localPath,
+        remotePath,
+        overwrite,
+        accelerated,
+        resume,
+      },
     }),
   download: (sftpId: string, remotePath: string, localPath: string, overwrite = false) =>
     call<TransferInfo>("transfer_download", {
@@ -93,12 +98,13 @@ export const remoteApi = {
   resumeTransfer: (transferId: string) => call<TransferInfo>("transfer_resume", { transferId }),
   removeTransfer: (transferId: string) => call<TransferHistorySnapshot>("transfer_remove", { transferId }),
   retryTransfer: (transferId: string) => call<TransferInfo>("transfer_retry", { transferId }),
-  transferHistorySnapshot: () => call<TransferHistorySnapshot>("transfer_history_snapshot"),
+  transferHistorySnapshot: () => call<TransferHistorySnapshot>("transfer_history_snapshot", undefined, { retries: 1 }),
   clearFinishedTransferHistory: () => call<TransferHistorySnapshot>("transfer_history_clear_finished"),
   startTelemetry: (connectionId: string, sessionId: string, intervalMs = 5000) =>
     call<TelemetryJobInfo>("telemetry_start", { connectionId, sessionId, intervalMs }),
   stopTelemetry: (jobId: string) => call<void>("telemetry_stop", { jobId }),
-  telemetrySnapshot: (connectionId: string) => call<ServerTelemetry>("telemetry_snapshot", { connectionId }),
+  telemetrySnapshot: (connectionId: string) =>
+    call<ServerTelemetry>("telemetry_snapshot", { connectionId }, { retries: 1, timeoutMs: 45_000 }),
   startLocalForward: (
     sessionId: string,
     bindHost: string,
@@ -122,7 +128,7 @@ export const remoteApi = {
       bindPort,
     }),
   stopForward: (forwardId: string) => call<void>("forward_stop", { forwardId }),
-  listForwards: () => call<ForwardInfo[]>("forward_list"),
+  listForwards: () => call<ForwardInfo[]>("forward_list", undefined, { retries: 1 }),
   onForwardStatus: (handler: (payload: ForwardStatusEvent) => void) => listenEvent(EVENT_NAMES.forwardStatus, handler),
   onSshStatus: (handler: (payload: ConnectionInfo) => void) => listenEvent(EVENT_NAMES.sshStatus, handler),
   onSftpChanged: (handler: (payload: SftpChangedEvent) => void) => listenEvent(EVENT_NAMES.sftpChanged, handler),

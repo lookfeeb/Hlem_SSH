@@ -422,9 +422,7 @@ pub async fn upload_file_raw(
 
     let start = std::time::Instant::now();
 
-    let stream = body
-        .into_data_stream()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+    let stream = body.into_data_stream().map_err(std::io::Error::other);
     let mut reader = StreamReader::new(stream);
 
     let bytes_written = match state

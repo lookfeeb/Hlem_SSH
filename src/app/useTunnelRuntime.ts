@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { remoteApi } from "../api/remoteApi";
 import { vaultApi } from "../api/vaultApi";
+import { getErrorMessage } from "../lib/configMapping";
+import { useMountedRef } from "../lib/reactLifecycle";
 import type { ConfigSnapshot, ForwardInfo, ForwardStatusEvent, TunnelConfig, TunnelInput } from "../types";
 
 type UseTunnelRuntimeOptions = {
@@ -10,10 +12,19 @@ type UseTunnelRuntimeOptions = {
 
 export function useTunnelRuntime({ appReady, applyConfigSnapshot }: UseTunnelRuntimeOptions) {
   const [forwards, setForwards] = useState<ForwardInfo[]>([]);
+  const mountedRef = useMountedRef();
 
   useEffect(() => {
     if (!appReady) return;
-    void remoteApi.listForwards().then(setForwards).catch(() => undefined);
+    let disposed = false;
+    void remoteApi.listForwards().then((items) => {
+      if (!disposed) setForwards(items);
+    }).catch((error) => {
+      if (!disposed) console.warn("[helm] failed to list forwards:", getErrorMessage(error));
+    });
+    return () => {
+      disposed = true;
+    };
   }, [appReady]);
 
   function upsertForward(payload: ForwardStatusEvent) {
@@ -34,15 +45,18 @@ export function useTunnelRuntime({ appReady, applyConfigSnapshot }: UseTunnelRun
   }
 
   async function createTunnel(input: TunnelInput) {
-    applyConfigSnapshot(await vaultApi.tunnelCreate(input));
+    const snapshot = await vaultApi.tunnelCreate(input);
+    if (mountedRef.current) applyConfigSnapshot(snapshot);
   }
 
   async function updateTunnel(tunnelId: string, input: TunnelInput) {
-    applyConfigSnapshot(await vaultApi.tunnelUpdate(tunnelId, input));
+    const snapshot = await vaultApi.tunnelUpdate(tunnelId, input);
+    if (mountedRef.current) applyConfigSnapshot(snapshot);
   }
 
   async function deleteTunnel(tunnelId: string) {
-    applyConfigSnapshot(await vaultApi.tunnelDelete(tunnelId));
+    const snapshot = await vaultApi.tunnelDelete(tunnelId);
+    if (mountedRef.current) applyConfigSnapshot(snapshot);
   }
 
   async function startTunnel(tunnel: TunnelConfig) {
@@ -52,12 +66,14 @@ export function useTunnelRuntime({ appReady, applyConfigSnapshot }: UseTunnelRun
         : tunnel.forwardType === "remote"
           ? await remoteApi.startRemoteForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort, tunnel.targetHost, tunnel.targetPort)
           : await remoteApi.startDynamicForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort);
-    upsertForward(started);
+    if (mountedRef.current) upsertForward(started);
   }
 
   async function stopTunnel(forwardId: string) {
     await remoteApi.stopForward(forwardId);
-    setForwards((current) => current.filter((forward) => forward.forwardId !== forwardId));
+    if (mountedRef.current) {
+      setForwards((current) => current.filter((forward) => forward.forwardId !== forwardId));
+    }
   }
 
   return {

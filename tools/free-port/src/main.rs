@@ -11,7 +11,9 @@ fn main() {
 
 #[cfg(windows)]
 fn main() {
-    let _ = run();
+    if let Err(error) = run() {
+        eprintln!("[free-port] failed to free dev port: {error}");
+    }
 }
 
 #[cfg(windows)]
@@ -53,9 +55,15 @@ fn run() -> std::io::Result<()> {
             continue;
         }
         unsafe {
-            if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) {
-                let _ = TerminateProcess(handle, 1);
-                let _ = CloseHandle(handle);
+            let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, pid) else {
+                eprintln!("[free-port] failed to open process {pid} for termination");
+                continue;
+            };
+            if let Err(error) = TerminateProcess(handle, 1) {
+                eprintln!("[free-port] failed to terminate pid {pid}: {error}");
+            }
+            if let Err(error) = CloseHandle(handle) {
+                eprintln!("[free-port] failed to close process handle for pid {pid}: {error}");
             }
         }
     }

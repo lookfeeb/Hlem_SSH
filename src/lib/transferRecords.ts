@@ -1,8 +1,9 @@
 import type { BackupRecord, FileSaveRecord, TransferInfo } from "../types";
 import { formatBytes } from "./format";
+import { getAnyPathBaseName } from "./path";
 
 export function transferName(transfer: TransferInfo) {
-  return transfer.localPath.split(/[\\/]/).pop() || transfer.remotePath.split("/").pop() || transfer.remotePath;
+  return getAnyPathBaseName(transfer.localPath) || getAnyPathBaseName(transfer.remotePath) || transfer.remotePath;
 }
 
 export function transferSourcePath(transfer: TransferInfo) {
@@ -13,7 +14,7 @@ export function transferTargetPath(transfer: TransferInfo) {
   return transfer.direction === "upload" ? parentPath(transfer.remotePath) : parentPath(transfer.localPath);
 }
 
-export function parentPath(path: string) {
+function parentPath(path: string) {
   const normalized = path.replace(/\\/g, "/");
   const index = normalized.lastIndexOf("/");
   if (index <= 0) return normalized || "/";

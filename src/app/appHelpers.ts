@@ -1,13 +1,8 @@
 import { defaultRemoteHomePath, getErrorMessage, initialRemotePath } from "../lib/configMapping";
-import { editorChannelName, GLOBAL_EDITOR_CHANNEL, type EditorChannelMessage } from "../lib/editorChannel";
-import type {
-  HostKeyVerification,
-  RemoteSession,
-  ServerTelemetry,
-  SessionConfig,
-  SessionInput,
-  TerminalEntry,
-} from "../types";
+import { EDITOR_CHANNEL_NAME, type EditorChannelMessage } from "../lib/editorChannel";
+import type { RemoteSession, SessionConfig, SessionInput, TerminalEntry } from "../types";
+
+export { getHostKeyPayload } from "../lib/configMapping";
 
 const CWD_TRACKING_ECHO_FRAGMENTS = [
   "HELM_CWD_HOOK",
@@ -76,38 +71,17 @@ export function uploadConcurrency(count: number) {
   return Math.min(12, Math.max(4, Math.floor(cores * 0.75)));
 }
 
-function appendTerminalStreamEntry(entries: TerminalEntry[], entry: TerminalEntry) {
-  if (shouldSkipTerminalEntry(entries, entry)) return entries;
-  const last = entries[entries.length - 1];
-  if (last && entry.kind === "output" && last.kind === entry.kind && !last.dataBase64 && !entry.dataBase64) {
-    return [
-      ...entries.slice(0, -1),
-      {
-        ...last,
-        content: `${last.content}${entry.content}`,
-      },
-    ];
-  }
-  return [...entries, entry];
-}
-
-export function appendTerminalStreamEntries(entries: TerminalEntry[], nextEntries: TerminalEntry[]) {
-  return nextEntries.reduce((current, entry) => appendTerminalStreamEntry(current, entry), entries);
-}
-
 export function stripCwdMarkers(data: string) {
   let cwd: string | null = null;
-  let markerSeen = false;
   const withoutMarkers = data.replace(/\x1b\]777;cwd=([^\x07]*)\x07/g, (_, value: string) => {
     cwd = value;
-    markerSeen = true;
     return "";
   });
   const withoutCommandEcho = withoutMarkers
     .split(/(\r?\n)/)
     .filter((chunk) => !CWD_TRACKING_ECHO_FRAGMENTS.some((fragment) => chunk.includes(fragment)))
     .join("");
-  return { data: withoutCommandEcho, cwd, markerSeen };
+  return { data: withoutCommandEcho, cwd };
 }
 
 export function extractPromptCwd(data: string, username: string) {
@@ -115,7 +89,7 @@ export function extractPromptCwd(data: string, username: string) {
   const lines = cleaned
     .split("\n")
     .map((line) => line.trimEnd())
-    .filter(Boolean)
+    .filter((line) => line.length > 0)
     .slice(-8)
     .reverse();
   for (const line of lines) {
@@ -153,19 +127,6 @@ export function remoteSessionPath(session: Pick<RemoteSession, "username" | "cur
   return initialRemotePath(session.username, session.currentPath);
 }
 
-export function hasTelemetryData(telemetry: ServerTelemetry) {
-  return Boolean(
-      telemetry.uptime !== "未知" ||
-      telemetry.ip ||
-      (telemetry.ipv6 && telemetry.ipv6 !== "//") ||
-      telemetry.cpu > 0 ||
-      telemetry.memory.total > 0 ||
-      telemetry.swap.total > 0 ||
-      telemetry.processes.some((process) => process.pid > 0 && process.name !== "process") ||
-      telemetry.disks.some((disk) => disk.total > 0),
-  );
-}
-
 export function sftpUnavailableMessage(error: unknown) {
   const message = getErrorMessage(error);
   if (!message.includes("ConnectFailed")) return message;
@@ -184,14 +145,12 @@ export function formatSessionError(
 }
 
 export function notifyEditorSessionDisconnected(sessionId: string) {
-  const channel = new BroadcastChannel(editorChannelName(GLOBAL_EDITOR_CHANNEL));
-  channel.postMessage({ type: "sessionDisconnected", sessionId } satisfies EditorChannelMessage);
-  channel.close();
-}
-
-export function getHostKeyPayload(error: unknown): HostKeyVerification | null {
-  if (!error || typeof error !== "object") return null;
-  const payload = error as { code?: string; message?: unknown };
-  if (payload.code !== "hostKeyUntrusted" && payload.code !== "hostKeyChanged") return null;
-  return payload.message && typeof payload.message === "object" ? (payload.message as HostKeyVerification) : null;
+  const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
+  try {
+    channel.postMessage({ type: "sessionDisconnected", sessionId } satisfies EditorChannelMessage);
+  } catch (error) {
+    console.warn("[helm] failed to notify editor session disconnect:", getErrorMessage(error));
+  } finally {
+    channel.close();
+  }
 }

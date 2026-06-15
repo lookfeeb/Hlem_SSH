@@ -1,5 +1,25 @@
 use super::*;
 
+async fn await_progress_ticker(handle: tokio::task::JoinHandle<()>, transfer_id: &str) {
+    if let Err(error) = handle.await {
+        if !error.is_cancelled() {
+            eprintln!("[helm] transfer progress ticker failed: {transfer_id}: {error}");
+        }
+    }
+}
+
+struct ParallelTransferOptions<'a> {
+    runtime: &'a RemoteRuntime,
+    app: &'a AppHandle,
+    info: &'a TransferInfo,
+    request: &'a TransferRequest,
+    sftp_record: &'a SftpRecord,
+    total_size: u64,
+    buffer_size: usize,
+    cancel: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+}
+
 pub(super) async fn ensure_transfer_overwrite(
     sftp: &SftpSession,
     request: &TransferRequest,
@@ -86,7 +106,12 @@ pub(super) async fn run_transfer(
                 0
             };
             if request.overwrite && !request.resume {
-                let _ = sftp.remove_file(request.remote_path.clone()).await;
+                if let Err(error) = sftp.remove_file(request.remote_path.clone()).await {
+                    eprintln!(
+                        "[helm] failed to remove remote file before upload overwrite: {}: {error}",
+                        request.remote_path
+                    );
+                }
             }
 
             let should_parallel = local_size >= PARALLEL_UPLOAD_THRESHOLD
@@ -94,17 +119,17 @@ pub(super) async fn run_transfer(
                 && PARALLEL_UPLOAD_PARTS >= 2;
 
             if should_parallel {
-                run_parallel_upload(
+                run_parallel_upload(ParallelTransferOptions {
                     runtime,
                     app,
-                    &info,
-                    &request,
-                    &sftp_record,
-                    local_size,
+                    info: &info,
+                    request: &request,
+                    sftp_record: &sftp_record,
+                    total_size: local_size,
                     buffer_size,
-                    cancel.clone(),
-                    paused.clone(),
-                )
+                    cancel: cancel.clone(),
+                    paused: paused.clone(),
+                })
                 .await?;
             } else {
                 let mut local = File::open(&request.local_path)
@@ -159,7 +184,7 @@ pub(super) async fn run_transfer(
                 .await;
 
                 stop_progress.store(true, Ordering::Relaxed);
-                let _ = progress_handle.await;
+                await_progress_ticker(progress_handle, &info.transfer_id).await;
 
                 result?;
 
@@ -201,17 +226,17 @@ pub(super) async fn run_transfer(
                 && PARALLEL_DOWNLOAD_PARTS >= 2;
 
             if should_parallel {
-                run_parallel_download(
+                run_parallel_download(ParallelTransferOptions {
                     runtime,
                     app,
-                    &info,
-                    &request,
-                    &sftp_record,
-                    remote_size,
+                    info: &info,
+                    request: &request,
+                    sftp_record: &sftp_record,
+                    total_size: remote_size,
                     buffer_size,
-                    cancel.clone(),
-                    paused.clone(),
-                )
+                    cancel: cancel.clone(),
+                    paused: paused.clone(),
+                })
                 .await?;
             } else {
                 let mut remote = sftp
@@ -221,6 +246,7 @@ pub(super) async fn run_transfer(
                 let mut local = if resume_from > 0 {
                     OpenOptions::new()
                         .create(true)
+                        .truncate(false)
                         .write(true)
                         .open(&request.local_path)
                         .await
@@ -268,7 +294,7 @@ pub(super) async fn run_transfer(
                 .await;
 
                 stop_progress.store(true, Ordering::Relaxed);
-                let _ = progress_handle.await;
+                await_progress_ticker(progress_handle, &info.transfer_id).await;
 
                 result?;
 
@@ -457,18 +483,18 @@ where
 ///
 /// 限制：只用于 `resume_from == 0` 的完整上传。调用方已负责 overwrite 检查；
 /// 这里先把远端文件截断到 0，再由每个 part 按范围 seek 写入。
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn run_parallel_upload(
-    runtime: &RemoteRuntime,
-    app: &AppHandle,
-    info: &TransferInfo,
-    request: &TransferRequest,
-    sftp_record: &SftpRecord,
-    local_size: u64,
-    buffer_size: usize,
-    cancel: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
-) -> AppResult<()> {
+async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<()> {
+    let ParallelTransferOptions {
+        runtime,
+        app,
+        info,
+        request,
+        sftp_record,
+        total_size: local_size,
+        buffer_size,
+        cancel,
+        paused,
+    } = options;
     {
         let init_sftp = sftp_record.next_transfer_session().await;
         let mut remote = init_sftp
@@ -584,7 +610,7 @@ pub(super) async fn run_parallel_upload(
     }
 
     stop_progress.store(true, Ordering::Relaxed);
-    let _ = progress_handle.await;
+    await_progress_ticker(progress_handle, &info.transfer_id).await;
 
     if let Some(error) = first_error {
         return Err(error);
@@ -613,18 +639,18 @@ pub(super) async fn run_parallel_upload(
 /// 限制：调用方需保证 `remote_size > 0` 且无续传需求（resume_from == 0）。
 /// 任一 part 失败会立即 `cancel.store(true)` 让兄弟 task 自然退出，
 /// 主线程汇总并返回首个真实错误。
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn run_parallel_download(
-    runtime: &RemoteRuntime,
-    app: &AppHandle,
-    info: &TransferInfo,
-    request: &TransferRequest,
-    sftp_record: &SftpRecord,
-    remote_size: u64,
-    buffer_size: usize,
-    cancel: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
-) -> AppResult<()> {
+async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResult<()> {
+    let ParallelTransferOptions {
+        runtime,
+        app,
+        info,
+        request,
+        sftp_record,
+        total_size: remote_size,
+        buffer_size,
+        cancel,
+        paused,
+    } = options;
     // 1) 预分配本地文件：File::create 截断 + set_len 拓展到目标长度。
     //    随后 drop 原始 handle，每个 task 用 OpenOptions 各自重新打开
     //    （Windows 默认 share_mode 允许多写者，每 handle 自带 seek 位置）。
@@ -749,7 +775,7 @@ pub(super) async fn run_parallel_download(
     }
 
     stop_progress.store(true, Ordering::Relaxed);
-    let _ = progress_handle.await;
+    await_progress_ticker(progress_handle, &info.transfer_id).await;
 
     if let Some(error) = first_error {
         return Err(error);

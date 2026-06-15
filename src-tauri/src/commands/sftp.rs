@@ -1,14 +1,34 @@
+use serde::Deserialize;
 use tauri::{AppHandle, State};
 
 use crate::errors::AppResult;
-use crate::remote::{RemoteFileEntry, SftpInfo, TransferHistorySnapshot, TransferInfo};
+use crate::remote::{
+    RemoteFileEntry, SftpInfo, TransferHistorySnapshot, TransferInfo, TransferUploadOptions,
+};
 
 use super::{ensure_vault_unlocked, AppState};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferUploadInput {
+    pub sftp_id: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub overwrite: bool,
+    pub accelerated: Option<bool>,
+    pub resume: Option<bool>,
+}
 
 #[tauri::command]
 pub async fn sftp_open(state: State<'_, AppState>, connection_id: String) -> AppResult<SftpInfo> {
     ensure_vault_unlocked(&state)?;
     state.remote.open_sftp(&connection_id).await
+}
+
+#[tauri::command]
+pub async fn sftp_close(state: State<'_, AppState>, sftp_id: String) -> AppResult<()> {
+    ensure_vault_unlocked(&state)?;
+    state.remote.close_sftp(&sftp_id).await
 }
 
 #[tauri::command]
@@ -140,24 +160,21 @@ pub async fn sftp_write_text(
 pub async fn transfer_upload(
     app: AppHandle,
     state: State<'_, AppState>,
-    sftp_id: String,
-    local_path: String,
-    remote_path: String,
-    overwrite: bool,
-    accelerated: Option<bool>,
-    resume: Option<bool>,
+    input: TransferUploadInput,
 ) -> AppResult<TransferInfo> {
     ensure_vault_unlocked(&state)?;
     state
         .remote
         .transfer_upload(
             &app,
-            sftp_id,
-            local_path,
-            remote_path,
-            overwrite,
-            accelerated.unwrap_or(false),
-            resume.unwrap_or(false),
+            TransferUploadOptions {
+                sftp_id: input.sftp_id,
+                local_path: input.local_path,
+                remote_path: input.remote_path,
+                overwrite: input.overwrite,
+                accelerated: input.accelerated.unwrap_or(false),
+                resume: input.resume.unwrap_or(false),
+            },
         )
         .await
 }

@@ -1,4 +1,6 @@
 import type { RemoteFileEntry } from "../types";
+import { formatBeijingDateTimeHyphen } from "./format";
+import { getBaseName } from "./path";
 
 export type FileCategory =
   | "directory" | "archive" | "script" | "document" | "log" | "text"
@@ -64,23 +66,13 @@ export function filesBelongToDirectory(files: RemoteFileEntry[], dirPath: string
   });
 }
 
-const beijingTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: "Asia/Shanghai",
-  year: "numeric", month: "2-digit", day: "2-digit",
-  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-});
-
 export function formatBeijingModifiedTime(value: string): string {
   if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const parts = beijingTimeFormatter.formatToParts(date);
-  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
-  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
+  return formatBeijingDateTimeHyphen(value);
 }
 
 export function comparePathName(a: string, b: string): number {
-  const nameA = a.split("/").filter(Boolean).pop() || a;
-  const nameB = b.split("/").filter(Boolean).pop() || b;
+  const nameA = getBaseName(a) || a;
+  const nameB = getBaseName(b) || b;
   return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: "base" });
 }

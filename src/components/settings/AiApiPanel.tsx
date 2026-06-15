@@ -1,11 +1,13 @@
 import { CheckOutlined, CopyOutlined, FundProjectionScreenOutlined, MinusOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { Button, Input, InputNumber, Modal, Select, Switch, Tooltip, message } from "antd";
 import type { MouseEvent } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings, ConfigSnapshot } from "../../types";
 import { appApi, type ApiServerInfo, type ApiLogEntry } from "../../api/appApi";
 import { appEvents } from "../../api/appEvents";
 import { vaultApi } from "../../api/vaultApi";
+import { writeClipboardText } from "../../lib/clipboard";
+import { getErrorMessage } from "../../lib/configMapping";
 import { useMountedRef, useTimeoutRegistry } from "../../lib/reactLifecycle";
 
 interface AiApiPanelProps {
@@ -62,7 +64,12 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
   const [aiApiLogs, setAiApiLogs] = useState<ApiLogEntry[]>([]);
   const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null);
   const availableAiApiSessionIdsKey = sessions.map((session) => session.id).join("|");
-  const selectedAiApiSessionIds = compactAiApiSessionRows(aiApiSessionRows);
+  const sessionsById = useMemo(() => new Map(sessions.map((session) => [session.id, session])), [sessions]);
+  const sessionOptions = useMemo(
+    () => sessions.map((session) => ({ label: session.name, value: session.id })),
+    [sessions],
+  );
+  const selectedAiApiSessionIds = useMemo(() => compactAiApiSessionRows(aiApiSessionRows), [aiApiSessionRows]);
 
   useEffect(() => {
     if (!open) return;
@@ -78,7 +85,9 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
     let unlisten: (() => void) | null = null;
     void appApi.apiServerLogs().then((items) => {
       if (mounted) setAiApiLogs(items);
-    }).catch(() => undefined);
+    }).catch((error) => {
+      console.warn("[helm] failed to load api logs:", getErrorMessage(error));
+    });
     void refreshAiApiStatus();
     void appEvents.onApiLog((entry) => {
       if (!mounted) return;
@@ -89,6 +98,8 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
     }).then((u) => {
       if (!mounted) { u(); return; }
       unlisten = u;
+    }).catch((error) => {
+      console.warn("[helm] failed to subscribe api logs:", getErrorMessage(error));
     });
     return () => { mounted = false; if (unlisten) unlisten(); };
   }, [open]);
@@ -109,7 +120,11 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
       setAiApiInfo(info);
       onApiServerChange(info.running);
       if (info.running && info.port) setAiApiPort(info.port);
-    } catch { if (mountedRef.current) setAiApiInfo(null); }
+    } catch (error) {
+      if (!mountedRef.current) return;
+      console.warn("[helm] failed to refresh ai api status:", getErrorMessage(error));
+      setAiApiInfo(null);
+    }
   }
 
   async function startAiApi() {
@@ -119,14 +134,20 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
       if (!mountedRef.current) return;
       setAiApiInfo(info);
       onApiServerChange(true);
-      await persistAiApiSettings({
-        aiApiKey: info.apiKey,
-        aiApiPort: info.port || aiApiPort,
-        aiApiSessionId: selectedAiApiSessionIds[0] ?? null,
-        aiApiSessionIds: selectedAiApiSessionIds,
-        aiApiAutoStart,
-      }).catch(() => undefined);
-    } catch (error) { Modal.error({ title: "启动 API 服务失败", content: String(error) }); }
+      try {
+        await persistAiApiSettings({
+          aiApiKey: info.apiKey,
+          aiApiPort: info.port || aiApiPort,
+          aiApiSessionId: selectedAiApiSessionIds[0] ?? null,
+          aiApiSessionIds: selectedAiApiSessionIds,
+          aiApiAutoStart,
+        });
+      } catch (error) {
+        if (mountedRef.current) message.warning(`API 已启动，但保存设置失败：${getErrorMessage(error)}`);
+      }
+    } catch (error) {
+      if (mountedRef.current) Modal.error({ title: "启动 API 服务失败", content: getErrorMessage(error) });
+    }
     finally { if (mountedRef.current) setAiApiLoading(false); }
   }
 
@@ -143,7 +164,9 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
       }));
       onApiServerChange(false);
       message.success("AI API 已关闭");
-    } catch (error) { Modal.error({ title: "关闭 API 服务失败", content: String(error) }); }
+    } catch (error) {
+      if (mountedRef.current) Modal.error({ title: "关闭 API 服务失败", content: getErrorMessage(error) });
+    }
     finally { if (mountedRef.current) setAiApiLoading(false); }
   }
 
@@ -168,7 +191,9 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
       if (!mountedRef.current) return;
       setAiApiInfo(info);
       message.success("API Key 已重新生成");
-    } catch (error) { Modal.error({ title: "重新生成密钥失败", content: String(error) }); }
+    } catch (error) {
+      if (mountedRef.current) Modal.error({ title: "重新生成密钥失败", content: getErrorMessage(error) });
+    }
   }
 
   function addAiApiSessionRow() {
@@ -218,10 +243,13 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
         aiApiPort,
         aiApiAutoStart: nextAutoStart,
       });
-    } catch {
-      message.error("保存失败");
-      setAiApiSessionRows(previousRows);
-      setAiApiAutoStart(previousAutoStart);
+      if (!mountedRef.current) return;
+    } catch (error) {
+      if (mountedRef.current) {
+        message.error(`保存失败：${getErrorMessage(error)}`);
+        setAiApiSessionRows(previousRows);
+        setAiApiAutoStart(previousAutoStart);
+      }
       return;
     }
     if (sameSessionIds(previousSessionIds, nextSessionIds)) return;
@@ -236,7 +264,9 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
         } else {
           message.warning("API 服务已停止，仅保存会话配置");
         }
-      } catch (error) { message.error(`热更新 API 会话失败: ${String(error)}`); }
+      } catch (error) {
+        if (mountedRef.current) message.error(`热更新 API 会话失败：${getErrorMessage(error)}`);
+      }
     } else {
       message.success(nextSessionIds.length > 0 ? "指定会话已更新" : "已清除会话限制");
     }
@@ -251,8 +281,14 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
         aiApiSessionIds: selectedAiApiSessionIds,
         aiApiPort,
       });
+      if (!mountedRef.current) return;
       message.success(checked ? "已开启随应用自动启动" : "已关闭自动启动");
-    } catch { message.error("保存失败"); setAiApiAutoStart(!checked); }
+    } catch (error) {
+      if (mountedRef.current) {
+        message.error(`保存失败：${getErrorMessage(error)}`);
+        setAiApiAutoStart(!checked);
+      }
+    }
   }
 
   async function persistAiApiSettings(overrides: Partial<AppSettings>) {
@@ -273,21 +309,28 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
   async function openLogWindow() {
     try {
       const { isTauriRuntime } = await import("../../api/runtime");
+      if (!mountedRef.current) return;
       if (isTauriRuntime()) {
         const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
+        if (!mountedRef.current) return;
         const existing = await WebviewWindow.getByLabel("api-logs");
+        if (!mountedRef.current) return;
         if (existing) { await existing.setFocus(); return; }
         const webview = new WebviewWindow("api-logs", { url: "index.html?logWindow=1", title: "AI API 操作日志", width: 680, height: 480, minWidth: 480, minHeight: 320, resizable: true });
-        await webview.once("tauri://error", (event) => { message.error(String(event.payload)); });
+        await webview.once("tauri://error", (event) => {
+          if (mountedRef.current) message.error(getErrorMessage(event.payload));
+        });
       } else {
         window.open(`${window.location.origin}${window.location.pathname}?logWindow=1`, "api-logs", "width=680,height=480");
       }
-    } catch (error) { message.error(String(error)); }
+    } catch (error) {
+      if (mountedRef.current) message.error(getErrorMessage(error));
+    }
   }
 
   function findAiApiSession(sessionId: string | null) {
     if (!sessionId) return null;
-    return sessions.find((session) => session.id === sessionId) ?? null;
+    return sessionsById.get(sessionId) ?? null;
   }
 
   function aiApiSessionCopyLabel(sessionId: string | null) {
@@ -307,22 +350,26 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
     const sessionId = targetSession?.id ?? targetSessionId;
     const sessionName = targetSession?.name ?? "";
     const sessionHost = targetSession?.host ?? "";
+    const hostLabel = [sessionName, sessionHost].filter((item) => item.length > 0).join(" ");
     return [
       `curl -H "Authorization: Bearer ${apiKey}" http://127.0.0.1:${port}/api/fields`,
       "",
       `会话ID: ${sessionId}`,
-      sessionName || sessionHost ? `会话主机: ${[sessionName, sessionHost].filter(Boolean).join(" ")}` : "",
-    ].filter(Boolean).join("\n");
+      ...(hostLabel ? [`会话主机: ${hostLabel}`] : []),
+    ].join("\n");
   }
 
   function copyApiInfoForSession(targetSessionId: string | null) {
     if (!targetSessionId || !aiApiInfo?.running || !aiApiInfo.apiKey) return;
-    void navigator.clipboard.writeText(buildApiInfoText(targetSessionId)).then(() => {
+    void writeClipboardText(buildApiInfoText(targetSessionId)).then((ok) => {
+      if (!mountedRef.current) return;
+      if (!ok) {
+        message.error("复制失败");
+        return;
+      }
       setCopiedSessionId(targetSessionId);
       setSafeTimeout(() => setCopiedSessionId(null), 2000);
       message.success(`已复制${aiApiSessionCopyLabel(targetSessionId)}字段库命令`);
-    }).catch(() => {
-      message.error("复制失败");
     });
   }
 
@@ -344,10 +391,9 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
                   allowClear
                   value={sessionId}
                   onChange={(v) => void changeAiApiSession(index, v ?? null)}
-                  options={sessions.map((session) => ({
-                    label: session.name,
-                    value: session.id,
-                    disabled: aiApiSessionRows.some((row, rowIndex) => rowIndex !== index && row === session.id),
+                  options={sessionOptions.map((option) => ({
+                    ...option,
+                    disabled: aiApiSessionRows.some((row, rowIndex) => rowIndex !== index && row === option.value),
                   }))}
                 />
                 <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, justifyContent: "flex-end", width: 112 }}>
@@ -441,7 +487,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
           <>
             <div className="aiApiFormRow">
               <span className="aiApiFormLabel">API 地址</span>
-              <Input readOnly value={`http://127.0.0.1:${aiApiInfo.port}`} style={{ flex: 1 }} onClick={(e) => (e.target as HTMLInputElement).select()} />
+              <Input readOnly value={`http://127.0.0.1:${aiApiInfo.port}`} style={{ flex: 1 }} onClick={(event) => event.currentTarget.select()} />
             </div>
             <div className="aiApiFormRow">
               <span className="aiApiFormLabel">API Key</span>

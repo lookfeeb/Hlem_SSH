@@ -4,26 +4,21 @@ impl RemoteRuntime {
     pub async fn forward_start_local(
         &self,
         app: &AppHandle,
-        session_id: String,
-        connection_id: String,
-        bind_host: String,
-        bind_port: u16,
-        remote_host: String,
-        remote_port: u16,
+        options: ForwardLocalOptions,
     ) -> AppResult<ForwardInfo> {
-        let connection = self.connection(&connection_id).await?;
-        let listener = TcpListener::bind((bind_host.as_str(), bind_port))
+        let connection = self.connection(&options.connection_id).await?;
+        let listener = TcpListener::bind((options.bind_host.as_str(), options.bind_port))
             .await
             .map_err(remote_error)?;
         let actual_port = listener.local_addr().map_err(remote_error)?.port();
         let info = ForwardInfo {
             forward_id: Uuid::new_v4().to_string(),
-            session_id,
+            session_id: options.session_id,
             forward_type: ForwardType::Local,
-            bind_host,
+            bind_host: options.bind_host,
             bind_port: actual_port,
-            target_host: remote_host.clone(),
-            target_port: remote_port,
+            target_host: options.remote_host.clone(),
+            target_port: options.remote_port,
             status: TaskStatus::Running,
             started_at: now(),
             error: None,
@@ -31,6 +26,8 @@ impl RemoteRuntime {
         let app_handle = app.clone();
         let event_info = info.clone();
         let handle = connection.handle.clone();
+        let remote_host = options.remote_host;
+        let remote_port = options.remote_port;
         let task = tokio::spawn(async move {
             events::emit(&app_handle, events::FORWARD_STATUS, event_info.clone());
             loop {
@@ -39,7 +36,13 @@ impl RemoteRuntime {
                         let handle = handle.clone();
                         let host = remote_host.clone();
                         tokio::spawn(async move {
-                            let _ = pipe_local_to_ssh(stream, handle, host, remote_port).await;
+                            if let Err(error) =
+                                pipe_local_to_ssh(stream, handle, host.clone(), remote_port).await
+                            {
+                                eprintln!(
+                                    "[helm] local forward connection failed: {host}:{remote_port}: {error}"
+                                );
+                            }
                         });
                     }
                     Err(error) => {
@@ -97,7 +100,9 @@ impl RemoteRuntime {
                     Ok((stream, _)) => {
                         let handle = handle.clone();
                         tokio::spawn(async move {
-                            let _ = handle_socks5(stream, handle).await;
+                            if let Err(error) = handle_socks5(stream, handle).await {
+                                eprintln!("[helm] dynamic forward connection failed: {error}");
+                            }
                         });
                     }
                     Err(error) => {
@@ -123,42 +128,43 @@ impl RemoteRuntime {
     pub async fn forward_start_remote(
         &self,
         app: &AppHandle,
-        session_id: String,
-        connection_id: String,
-        remote_bind_host: String,
-        remote_bind_port: u16,
-        local_host: String,
-        local_port: u16,
+        options: ForwardRemoteOptions,
     ) -> AppResult<ForwardInfo> {
-        let connection = self.connection(&connection_id).await?;
+        let connection = self.connection(&options.connection_id).await?;
         let target = RemoteForwardTarget {
-            local_host,
-            local_port,
+            local_host: options.local_host,
+            local_port: options.local_port,
         };
         connection.remote_forwards.write().await.insert(
-            forward_key(&remote_bind_host, remote_bind_port),
+            forward_key(&options.remote_bind_host, options.remote_bind_port),
             target.clone(),
         );
         let assigned_port = {
             let handle = connection.handle.lock().await;
             handle
-                .tcpip_forward(remote_bind_host.clone(), remote_bind_port as u32)
+                .tcpip_forward(
+                    options.remote_bind_host.clone(),
+                    options.remote_bind_port as u32,
+                )
                 .await
                 .map_err(remote_error)? as u16
         };
-        if assigned_port != remote_bind_port {
+        if assigned_port != options.remote_bind_port {
             let mut forwards = connection.remote_forwards.write().await;
-            forwards.remove(&forward_key(&remote_bind_host, remote_bind_port));
+            forwards.remove(&forward_key(
+                &options.remote_bind_host,
+                options.remote_bind_port,
+            ));
             forwards.insert(
-                forward_key(&remote_bind_host, assigned_port),
+                forward_key(&options.remote_bind_host, assigned_port),
                 target.clone(),
             );
         }
         let info = ForwardInfo {
             forward_id: Uuid::new_v4().to_string(),
-            session_id,
+            session_id: options.session_id,
             forward_type: ForwardType::Remote,
-            bind_host: remote_bind_host,
+            bind_host: options.remote_bind_host,
             bind_port: assigned_port,
             target_host: "local".to_string(),
             target_port: target.local_port,
@@ -237,7 +243,8 @@ impl RemoteRuntime {
             .read()
             .await
             .iter()
-            .filter_map(|(id, record)| (record.info.session_id == session_id).then(|| id.clone()))
+            .filter(|(_, record)| record.info.session_id == session_id)
+            .map(|(id, _)| id.clone())
             .collect();
         let mut records = Vec::new();
         let mut forwards = self.forwards.write().await;
@@ -252,12 +259,18 @@ impl RemoteRuntime {
             if matches!(record.info.forward_type, ForwardType::Remote) {
                 if let Some(connection) = connection {
                     let handle = connection.handle.lock().await;
-                    let _ = handle
+                    if let Err(error) = handle
                         .cancel_tcpip_forward(
                             record.info.bind_host.clone(),
                             record.info.bind_port as u32,
                         )
-                        .await;
+                        .await
+                    {
+                        eprintln!(
+                            "[helm] failed to cancel remote forward: {}:{}: {error}",
+                            record.info.bind_host, record.info.bind_port
+                        );
+                    }
                     connection
                         .remote_forwards
                         .write()

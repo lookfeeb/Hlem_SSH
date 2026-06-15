@@ -5,6 +5,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use base64::{engine::general_purpose, Engine as _};
 use rsa::{
     pkcs8::DecodePublicKey,
@@ -27,6 +30,8 @@ const HELM_UPDATE_REPO_ENV: &str = "HELM_UPDATE_REPO";
 const VITE_UPDATE_REPO_ENV: &str = "VITE_HELM_UPDATE_REPO";
 const HELM_UPDATE_PUBLIC_KEY_ENV: &str = "HELM_UPDATE_PUBLIC_KEY_PEM";
 const VITE_UPDATE_PUBLIC_KEY_ENV: &str = "VITE_HELM_UPDATE_PUBLIC_KEY_PEM";
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,11 +164,6 @@ pub async fn local_expand_paths(paths: Vec<String>) -> AppResult<Vec<LocalExpand
 }
 
 #[tauri::command]
-pub async fn fetch_text_url(url: String) -> AppResult<String> {
-    fetch_text_url_inner(&url).await
-}
-
-#[tauri::command]
 pub async fn check_update(
     current_version: String,
     current_arch: String,
@@ -177,7 +177,9 @@ pub async fn check_update(
             .await
             .map(Some)
     } else {
-        check_github_release(&repo, current_version).await.map(Some)
+        check_github_release(&repo, current_version, current_arch)
+            .await
+            .map(Some)
     }
 }
 
@@ -249,7 +251,11 @@ async fn check_signed_manifest(
     })
 }
 
-async fn check_github_release(repo: &str, current_version: String) -> AppResult<UpdateInfo> {
+async fn check_github_release(
+    repo: &str,
+    current_version: String,
+    current_arch: String,
+) -> AppResult<UpdateInfo> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let release: GitHubRelease = serde_json::from_str(&fetch_text_url_inner(&url).await?)?;
     let tag_name = release.tag_name.or(release.name).unwrap_or_default();
@@ -267,7 +273,7 @@ async fn check_github_release(repo: &str, current_version: String) -> AppResult<
             .unwrap_or_else(|| format!("https://github.com/{repo}/releases/latest")),
         body: release.body.unwrap_or_default(),
         published_at: release.published_at.unwrap_or_default(),
-        asset: select_windows_asset(release.assets.unwrap_or_default()),
+        asset: select_windows_asset(release.assets.unwrap_or_default(), &current_arch),
         signature_verified: false,
     })
 }
@@ -354,18 +360,6 @@ pub fn open_database_dir(app: AppHandle) -> AppResult<()> {
 }
 
 #[tauri::command]
-pub fn open_log_dir(app: AppHandle) -> AppResult<()> {
-    let directory = app
-        .path()
-        .app_log_dir()
-        .map_err(|e| AppError::Io(format!("无法获取日志目录: {}", e)))?;
-    if !directory.exists() {
-        std::fs::create_dir_all(&directory)?;
-    }
-    open_directory(&directory)
-}
-
-#[tauri::command]
 pub fn open_path_dir(path: String) -> AppResult<()> {
     let target = PathBuf::from(path.trim());
     let directory = if target.is_dir() {
@@ -401,16 +395,27 @@ pub fn open_external_url(url: String) -> AppResult<()> {
 fn configured_update_repo() -> Option<String> {
     env_value(HELM_UPDATE_REPO_ENV)
         .or_else(|| env_value(VITE_UPDATE_REPO_ENV))
+        .or_else(|| build_env_value(option_env!("HELM_UPDATE_REPO")))
+        .or_else(|| build_env_value(option_env!("VITE_HELM_UPDATE_REPO")))
         .or_else(|| Some(DEFAULT_UPDATE_REPO.to_string()))
 }
 
 fn configured_update_public_key() -> Option<String> {
-    env_value(HELM_UPDATE_PUBLIC_KEY_ENV).or_else(|| env_value(VITE_UPDATE_PUBLIC_KEY_ENV))
+    env_value(HELM_UPDATE_PUBLIC_KEY_ENV)
+        .or_else(|| env_value(VITE_UPDATE_PUBLIC_KEY_ENV))
+        .or_else(|| build_env_value(option_env!("HELM_UPDATE_PUBLIC_KEY_PEM")))
+        .or_else(|| build_env_value(option_env!("VITE_HELM_UPDATE_PUBLIC_KEY_PEM")))
 }
 
 fn env_value(name: &str) -> Option<String> {
     env::var(name)
         .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn build_env_value(value: Option<&'static str>) -> Option<String> {
+    value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
@@ -467,7 +472,8 @@ fn select_manifest_asset(
     }))
 }
 
-fn select_windows_asset(assets: Vec<GitHubAsset>) -> Option<UpdateAsset> {
+fn select_windows_asset(assets: Vec<GitHubAsset>, current_arch: &str) -> Option<UpdateAsset> {
+    let arch = normalize_arch(current_arch);
     let mut candidates: Vec<_> = assets
         .into_iter()
         .filter(|asset| {
@@ -478,7 +484,10 @@ fn select_windows_asset(assets: Vec<GitHubAsset>) -> Option<UpdateAsset> {
         })
         .filter(|asset| asset.browser_download_url.is_some())
         .collect();
-    candidates.sort_by_key(|asset| asset_rank(asset.name.as_deref().unwrap_or_default()));
+    candidates.sort_by_key(|asset| {
+        let name = asset.name.as_deref().unwrap_or_default();
+        (asset_arch_rank(name, &arch), asset_rank(name))
+    });
     let asset = candidates.into_iter().next()?;
     Some(UpdateAsset {
         name: asset.name?,
@@ -486,6 +495,14 @@ fn select_windows_asset(assets: Vec<GitHubAsset>) -> Option<UpdateAsset> {
         size: asset.size.unwrap_or(0),
         sha256: None,
     })
+}
+
+fn asset_arch_rank(name: &str, current_arch: &str) -> u8 {
+    match asset_name_arch(name).as_deref() {
+        Some(arch) if arch == current_arch => 0,
+        None => 1,
+        Some(_) => 9,
+    }
 }
 
 fn asset_rank(name: &str) -> u8 {
@@ -497,6 +514,55 @@ fn asset_rank(name: &str) -> u8 {
     } else {
         9
     }
+}
+
+fn asset_name_arch(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    if contains_arch_alias(&lower, &["arm64", "aarch64"]) {
+        return Some("arm64".to_string());
+    }
+    if contains_arch_alias(&lower, &["x86_64", "amd64", "x64"]) {
+        return Some("x64".to_string());
+    }
+    if contains_arch_alias(&lower, &["i686", "ia32", "win32", "x86"]) {
+        return Some("x86".to_string());
+    }
+    None
+}
+
+fn contains_arch_alias(name: &str, aliases: &[&str]) -> bool {
+    aliases.iter().any(|alias| {
+        let alias = alias.to_lowercase();
+        let variants = if alias.contains('_') {
+            vec![alias.clone(), alias.replace('_', "-")]
+        } else {
+            vec![alias.clone()]
+        };
+        variants
+            .iter()
+            .any(|variant| contains_token_like(name, variant))
+    })
+}
+
+fn contains_token_like(value: &str, token: &str) -> bool {
+    let mut start = 0;
+    while let Some(index) = value[start..].find(token) {
+        let absolute = start + index;
+        let before = value[..absolute]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric());
+        let after_index = absolute + token.len();
+        let after = value[after_index..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric());
+        if before && after {
+            return true;
+        }
+        start = after_index;
+    }
+    false
 }
 
 fn normalize_arch(value: &str) -> String {
@@ -578,7 +644,7 @@ fn verify_manifest_signature(
         .is_ok())
 }
 
-fn launch_update_installer(app: &AppHandle, installer: &Path) -> AppResult<()> {
+fn launch_update_installer(_app: &AppHandle, installer: &Path) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     {
         let current_pid = std::process::id();
@@ -601,7 +667,7 @@ Start-Sleep -Milliseconds 800
 Get-Process -Name $processName -ErrorAction SilentlyContinue |
   Where-Object {{ $_.Id -ne $PID }} |
   Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Process -FilePath $installer
+Start-Process -FilePath $installer -ArgumentList '/S' -Wait
 "#
         );
         let encoded = general_purpose::STANDARD.encode(
@@ -610,24 +676,26 @@ Start-Process -FilePath $installer
                 .flat_map(u16::to_le_bytes)
                 .collect::<Vec<_>>(),
         );
-        Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-WindowStyle",
-                "Hidden",
-                "-EncodedCommand",
-                &encoded,
-            ])
+        let mut command = Command::new("powershell");
+        command.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-EncodedCommand",
+            &encoded,
+        ]);
+        #[cfg(target_os = "windows")]
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
             .spawn()
             .map_err(|error| AppError::Io(error.to_string()))?;
-        app.exit(0);
-        return Ok(());
+        _app.exit(0);
+        Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = app;
         Command::new(installer)
             .spawn()
             .map_err(|error| AppError::Io(error.to_string()))?;
@@ -650,7 +718,7 @@ fn open_directory(path: &PathBuf) -> AppResult<()> {
             .arg(path)
             .spawn()
             .map_err(|error| AppError::Io(error.to_string()))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "macos")]
     {
@@ -658,7 +726,7 @@ fn open_directory(path: &PathBuf) -> AppResult<()> {
             .arg(path)
             .spawn()
             .map_err(|error| AppError::Io(error.to_string()))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -673,11 +741,13 @@ fn open_directory(path: &PathBuf) -> AppResult<()> {
 fn open_url(url: &str) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
-            .args(["/C", "start", "", url])
+        let mut command = Command::new("explorer");
+        command.arg(url);
+        command
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|error| AppError::Io(error.to_string()))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "macos")]
     {
@@ -685,7 +755,7 @@ fn open_url(url: &str) -> AppResult<()> {
             .arg(url)
             .spawn()
             .map_err(|error| AppError::Io(error.to_string()))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -700,7 +770,7 @@ fn open_url(url: &str) -> AppResult<()> {
 pub fn friendly_os_name() -> String {
     #[cfg(target_os = "windows")]
     {
-        return windows_version_name();
+        windows_version_name()
     }
     #[cfg(target_os = "macos")]
     {
@@ -712,8 +782,10 @@ pub fn friendly_os_name() -> String {
     {
         return linux_pretty_name().unwrap_or_else(|| "Linux".to_string());
     }
-    #[allow(unreachable_code)]
-    env::consts::OS.to_string()
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    {
+        env::consts::OS.to_string()
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -781,18 +853,63 @@ mod tests {
 
     #[test]
     fn selects_setup_exe_from_github_assets() {
-        let asset = select_windows_asset(vec![
-            GitHubAsset {
-                name: Some("HelM-portable.exe".to_string()),
-                browser_download_url: Some("https://example.com/portable.exe".to_string()),
-                size: Some(1),
-            },
-            GitHubAsset {
-                name: Some("HelM-setup.exe".to_string()),
-                browser_download_url: Some("https://example.com/setup.exe".to_string()),
-                size: Some(2),
-            },
-        ])
+        let asset = select_windows_asset(
+            vec![
+                GitHubAsset {
+                    name: Some("HelM-portable.exe".to_string()),
+                    browser_download_url: Some("https://example.com/portable.exe".to_string()),
+                    size: Some(1),
+                },
+                GitHubAsset {
+                    name: Some("HelM-setup.exe".to_string()),
+                    browser_download_url: Some("https://example.com/setup.exe".to_string()),
+                    size: Some(2),
+                },
+            ],
+            "x64",
+        )
+        .expect("asset");
+        assert_eq!(asset.name, "HelM-setup.exe");
+    }
+
+    #[test]
+    fn selects_matching_arch_from_github_assets() {
+        let asset = select_windows_asset(
+            vec![
+                GitHubAsset {
+                    name: Some("HelM-0.0.40-arm64-setup.exe".to_string()),
+                    browser_download_url: Some("https://example.com/arm64.exe".to_string()),
+                    size: Some(1),
+                },
+                GitHubAsset {
+                    name: Some("HelM-0.0.40-x64-setup.exe".to_string()),
+                    browser_download_url: Some("https://example.com/x64.exe".to_string()),
+                    size: Some(2),
+                },
+            ],
+            "x86_64",
+        )
+        .expect("asset");
+        assert_eq!(asset.name, "HelM-0.0.40-x64-setup.exe");
+    }
+
+    #[test]
+    fn falls_back_to_arch_agnostic_github_asset() {
+        let asset = select_windows_asset(
+            vec![
+                GitHubAsset {
+                    name: Some("HelM-0.0.40-arm64-setup.exe".to_string()),
+                    browser_download_url: Some("https://example.com/arm64.exe".to_string()),
+                    size: Some(1),
+                },
+                GitHubAsset {
+                    name: Some("HelM-setup.exe".to_string()),
+                    browser_download_url: Some("https://example.com/setup.exe".to_string()),
+                    size: Some(2),
+                },
+            ],
+            "x86_64",
+        )
         .expect("asset");
         assert_eq!(asset.name, "HelM-setup.exe");
     }

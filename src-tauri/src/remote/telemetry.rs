@@ -44,6 +44,8 @@ pub(super) fn merge_telemetry(
                 interface_name: item.interface_name.clone(),
                 upload_kbps: 0.0,
                 download_kbps: 0.0,
+                rx_bytes: item.rx_bytes,
+                tx_bytes: item.tx_bytes,
                 link_speed_mbps: item.link_speed_mbps,
             })
             .collect::<Vec<_>>();
@@ -166,8 +168,8 @@ pub(super) fn parse_linux_telemetry(
             }
             Some("NET") => {
                 let interface_name = parts.next().unwrap_or("ssh").to_string();
-                let _rx_bytes = parts.next();
-                let _tx_bytes = parts.next();
+                let rx_bytes = parse_u64(parts.next());
+                let tx_bytes = parse_u64(parts.next());
                 if telemetry.network.interface_name == "ssh" {
                     telemetry.network.interface_name = interface_name.clone();
                 }
@@ -175,6 +177,8 @@ pub(super) fn parse_linux_telemetry(
                     interface_name,
                     upload_kbps: 0.0,
                     download_kbps: 0.0,
+                    rx_bytes,
+                    tx_bytes,
                     link_speed_mbps: parse_link_speed_mbps(parts.next()),
                 });
             }

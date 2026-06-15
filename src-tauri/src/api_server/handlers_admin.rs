@@ -324,7 +324,7 @@ pub async fn rest_backup_run(
         delete_paths
     };
     for path in delete_paths {
-        let _ = tokio::fs::remove_file(path).await;
+        crate::backup::remove_backup_file_best_effort(path, "REST backup record replacement").await;
     }
     push_log(&state, "rest/backup.run", "OK", true, elapsed_ms(start)).await;
     Ok(json_value(outcomes))
@@ -353,7 +353,7 @@ pub async fn rest_backup_record_delete(
             .map_err(map_err_500)?
     };
     if let Some(path) = delete_path {
-        let _ = tokio::fs::remove_file(path).await;
+        crate::backup::remove_backup_file_best_effort(path, "REST backup record deletion").await;
     }
     push_log(
         &state,

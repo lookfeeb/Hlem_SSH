@@ -65,7 +65,8 @@ export function TerminalPanel({ session, onSendData, onResize, onClear }: Termin
     if (!terminal || !fitAddon) return;
     try {
       fitAddon.fit();
-    } catch {
+    } catch (error) {
+      console.debug("[helm] failed to fit terminal:", error);
       return;
     }
     const { cols, rows } = terminal;
@@ -434,7 +435,8 @@ function terminalWriteDataText(value: TerminalWriteData) {
   if (typeof value === "string") return value;
   try {
     return new TextDecoder().decode(value);
-  } catch {
+  } catch (error) {
+    console.debug("[helm] failed to decode terminal write data:", error);
     return "";
   }
 }

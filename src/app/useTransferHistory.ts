@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { remoteApi } from "../api/remoteApi";
+import { useMountedRef } from "../lib/reactLifecycle";
 import type { TransferHistorySnapshot, TransferInfo } from "../types";
 
 const TRANSFER_HISTORY_LIMIT = 100;
@@ -7,10 +8,12 @@ const TRANSFER_HISTORY_LIMIT = 100;
 export function useTransferHistory() {
   const [transfers, setTransfersState] = useState<TransferInfo[]>([]);
   const transfersRef = useRef(transfers);
+  const mountedRef = useMountedRef();
 
   function setTransfers(nextTransfers: TransferInfo[]) {
     const next = limitTransferHistory(nextTransfers);
     transfersRef.current = next;
+    if (!mountedRef.current) return;
     setTransfersState(next);
   }
 

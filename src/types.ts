@@ -66,6 +66,8 @@ export interface NetworkInterfaceMetric {
   interfaceName: string;
   uploadKbps: number;
   downloadKbps: number;
+  rxBytes: number;
+  txBytes: number;
   linkSpeedMbps?: number | null;
 }
 
@@ -320,6 +322,7 @@ export interface TransferHistorySnapshot {
 
 export interface FileSaveRecord {
   id: string;
+  sessionId?: string | null;
   path: string;
   directory: string;
   name: string;

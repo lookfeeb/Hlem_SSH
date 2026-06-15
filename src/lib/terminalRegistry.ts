@@ -36,11 +36,6 @@ export function clearTerminalDirect(terminalId: string) {
   sinks.get(terminalId)?.clear?.();
 }
 
-export function resetTerminalDirect(terminalId: string) {
-  pendingEntries.delete(terminalId);
-  sinks.get(terminalId)?.reset?.();
-}
-
 export function forgetTerminalDirect(terminalId: string) {
   pendingEntries.delete(terminalId);
   sinks.delete(terminalId);

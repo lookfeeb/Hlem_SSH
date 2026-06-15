@@ -1,5 +1,15 @@
 use super::*;
 
+async fn close_terminal_record_best_effort(
+    record: TerminalRecord,
+    terminal_id: &str,
+    context: &str,
+) {
+    if let Err(error) = close_terminal_record(record).await {
+        eprintln!("[helm] failed to close terminal during {context}: {terminal_id}: {error}");
+    }
+}
+
 impl RemoteRuntime {
     pub(super) async fn connection(&self, connection_id: &str) -> AppResult<ConnectionRecord> {
         self.connections
@@ -66,7 +76,7 @@ impl RemoteRuntime {
         reclaim_telemetry: bool,
     ) -> AppResult<Channel<client::Msg>> {
         match open_session_channel(&connection.handle).await {
-            Ok(channel) => return Ok(channel),
+            Ok(channel) => Ok(channel),
             Err(first_error) => {
                 if self
                     .compact_sftp_transfer_pool_for_connection(&connection.info.connection_id)
@@ -129,14 +139,13 @@ impl RemoteRuntime {
             .read()
             .await
             .iter()
-            .filter_map(|(id, record)| {
-                (record.info.connection_id == connection_id).then(|| id.clone())
-            })
+            .filter(|(_, record)| record.info.connection_id == connection_id)
+            .map(|(id, _)| id.clone())
             .collect();
         for id in terminal_ids {
             if let Some(record) = self.terminals.write().await.remove(&id) {
                 let terminal_id = record.info.terminal_id.clone();
-                let _ = close_terminal_record(record).await;
+                close_terminal_record_best_effort(record, &terminal_id, "connection cleanup").await;
                 crate::errors::forget_resource_label(&terminal_id);
                 emit_terminal_closed(app, terminal_id);
             }
@@ -163,32 +172,46 @@ impl RemoteRuntime {
             .collect();
         for record in terminal_records {
             let terminal_id = record.info.terminal_id.clone();
-            let _ = close_terminal_record(record).await;
+            close_terminal_record_best_effort(record, &terminal_id, "orphan cleanup").await;
+            crate::errors::forget_resource_label(&terminal_id);
             emit_terminal_closed(app, terminal_id);
         }
 
-        self.sftp_sessions.write().await.clear();
+        let sftp_ids: Vec<String> = self
+            .sftp_sessions
+            .write()
+            .await
+            .drain()
+            .map(|(id, _)| id)
+            .collect();
+        for id in sftp_ids {
+            crate::errors::forget_resource_label(&id);
+        }
 
         let transfer_ids: Vec<String> = self
             .transfers
             .read()
             .await
             .iter()
-            .filter_map(|(id, record)| {
+            .filter(|(_, record)| {
                 matches!(
                     record.info.status,
                     TaskStatus::Queued | TaskStatus::Running | TaskStatus::Paused
                 )
-                .then(|| id.clone())
             })
+            .map(|(id, _)| id.clone())
             .collect();
         for id in transfer_ids {
-            let _ = self
+            if let Err(error) = self
                 .cancel_transfer_in_place(app, &id, "工作区已锁定")
-                .await;
+                .await
+            {
+                eprintln!("[helm] failed to cancel orphan transfer: {id}: {error}");
+            }
         }
         self.prune_transfer_history().await;
-        let _ = self.persist_transfer_history().await;
+        self.persist_transfer_history_best_effort("clear orphans")
+            .await;
 
         let telemetry_records: Vec<TelemetryJobRecord> = self
             .telemetry_jobs
@@ -220,15 +243,22 @@ impl RemoteRuntime {
             .map(|(_, record)| record)
             .collect();
         for record in connection_records {
-            let _ = record
+            let connection_id = record.info.connection_id.clone();
+            if let Err(error) = record
                 .handle
                 .lock()
                 .await
                 .disconnect(Disconnect::ByApplication, "HelM shutdown", "zh-CN")
-                .await;
+                .await
+            {
+                eprintln!(
+                    "[helm] failed to disconnect orphan connection: {connection_id}: {error}"
+                );
+            }
             let mut info = record.info;
             info.status = RuntimeStatus::Disconnected;
             events::emit(app, events::SSH_STATUS, info);
+            crate::errors::forget_resource_label(&connection_id);
         }
     }
 
@@ -241,9 +271,8 @@ impl RemoteRuntime {
             .read()
             .await
             .iter()
-            .filter_map(|(id, record)| {
-                (record.info.connection_id == connection_id).then(|| id.clone())
-            })
+            .filter(|(_, record)| record.info.connection_id == connection_id)
+            .map(|(id, _)| id.clone())
             .collect();
         let mut sessions = self.sftp_sessions.write().await;
         for id in &sftp_ids {
@@ -264,19 +293,22 @@ impl RemoteRuntime {
             .read()
             .await
             .iter()
-            .filter_map(|(id, record)| {
-                (sftp_ids.contains(&record.info.sftp_id)
+            .filter(|(_, record)| {
+                sftp_ids.contains(&record.info.sftp_id)
                     && matches!(
                         record.info.status,
                         TaskStatus::Queued | TaskStatus::Running | TaskStatus::Paused
-                    ))
-                .then(|| id.clone())
+                    )
             })
+            .map(|(id, _)| id.clone())
             .collect();
         for id in transfer_ids {
-            let _ = self.cancel_transfer_in_place(app, &id, reason).await;
+            if let Err(error) = self.cancel_transfer_in_place(app, &id, reason).await {
+                eprintln!("[helm] failed to cancel transfer for removed sftp: {id}: {error}");
+            }
         }
         self.prune_transfer_history().await;
-        let _ = self.persist_transfer_history().await;
+        self.persist_transfer_history_best_effort("cancel transfers for sftp")
+            .await;
     }
 }

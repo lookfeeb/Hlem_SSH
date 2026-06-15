@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::{io::ErrorKind, path::PathBuf};
 
 use tauri::{AppHandle, State};
 
 use super::{with_store, AppError, AppResult, AppState};
 use crate::backup::build_backup_package;
-use crate::config::{AppSettings, ConfigSnapshot, TunnelConfig, TunnelInput};
+use crate::config::{AppSettings, ConfigSnapshot, TunnelInput};
 use crate::vault::{VaultStore, AUTO_PASSWORD};
 
 #[tauri::command]
@@ -26,7 +26,16 @@ pub fn vault_migrate(
 pub fn vault_skip_migration(state: State<'_, AppState>) -> AppResult<ConfigSnapshot> {
     let mut store = state.vault.lock().map_err(super::lock_poisoned)?;
     let path = store.vault_file_path();
-    let _ = std::fs::remove_file(&path);
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(AppError::Io(format!(
+                "删除旧本机数据失败: {}: {error}",
+                path.display()
+            )));
+        }
+    }
     *store = VaultStore::new(path);
     let snapshot = store.create(AUTO_PASSWORD)?;
     state.clear_migration_needed();
@@ -63,11 +72,6 @@ pub fn tunnel_update(
 #[tauri::command]
 pub fn tunnel_delete(state: State<'_, AppState>, tunnel_id: String) -> AppResult<ConfigSnapshot> {
     with_store(&state, |store| store.delete_tunnel(&tunnel_id))
-}
-
-#[tauri::command]
-pub fn tunnel_list(state: State<'_, AppState>) -> AppResult<Vec<TunnelConfig>> {
-    with_store(&state, |store| store.tunnels())
 }
 
 #[tauri::command]

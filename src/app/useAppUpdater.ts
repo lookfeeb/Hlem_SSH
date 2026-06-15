@@ -27,6 +27,7 @@ export function useAppUpdater({
   const [updateDownloading, setUpdateDownloading] = useState(false);
   const [downloadedUpdatePath, setDownloadedUpdatePath] = useState<string | null>(null);
   const autoUpdateTimerRef = useRef<number | null>(null);
+  const autoUpdateIdleCancelRef = useRef<(() => void) | null>(null);
   const autoUpdateScheduledRef = useRef(false);
   const mountedRef = useMountedRef();
 
@@ -35,6 +36,7 @@ export function useAppUpdater({
       if (autoUpdateTimerRef.current !== null) {
         window.clearTimeout(autoUpdateTimerRef.current);
       }
+      autoUpdateIdleCancelRef.current?.();
     };
   }, []);
 
@@ -48,7 +50,10 @@ export function useAppUpdater({
     autoUpdateScheduledRef.current = true;
     autoUpdateTimerRef.current = window.setTimeout(() => {
       autoUpdateTimerRef.current = null;
-      runWhenBrowserIdle(() => void checkForUpdate(false, info));
+      autoUpdateIdleCancelRef.current = runWhenBrowserIdle(() => {
+        autoUpdateIdleCancelRef.current = null;
+        void checkForUpdate(false, info);
+      });
     }, 8000);
   }
 
@@ -72,8 +77,9 @@ export function useAppUpdater({
       setUpdateInfo(next.hasUpdate && candidate && ignored.includes(candidate) ? { ...next, hasUpdate: false } : next);
     } catch (error) {
       const message = getErrorMessage(error);
+      if (!mountedRef.current) return;
       if (manual) {
-        if (mountedRef.current) setUpdateError(message);
+        setUpdateError(message);
         Modal.error({ title: "检查更新失败", content: message });
       } else {
         console.warn("[helm] auto update check failed:", message);
@@ -91,7 +97,9 @@ export function useAppUpdater({
       if (!mountedRef.current) return;
       setDownloadedUpdatePath(path);
     } catch (error) {
-      Modal.error({ title: "下载更新失败", content: getErrorMessage(error) });
+      if (mountedRef.current) {
+        Modal.error({ title: "下载更新失败", content: getErrorMessage(error) });
+      }
     } finally {
       if (mountedRef.current) setUpdateDownloading(false);
     }
@@ -102,7 +110,9 @@ export function useAppUpdater({
     try {
       await appApi.installUpdate(downloadedUpdatePath);
     } catch (error) {
-      Modal.error({ title: "启动安装程序失败", content: getErrorMessage(error) });
+      if (mountedRef.current) {
+        Modal.error({ title: "启动安装程序失败", content: getErrorMessage(error) });
+      }
     }
   }
 
@@ -126,7 +136,9 @@ export function useAppUpdater({
       applyConfigSnapshot(next);
       setUpdateInfo({ ...target, hasUpdate: false });
     } catch (error) {
-      Modal.error({ title: "忽略版本失败", content: getErrorMessage(error) });
+      if (mountedRef.current) {
+        Modal.error({ title: "忽略版本失败", content: getErrorMessage(error) });
+      }
     }
   }
 
@@ -143,15 +155,17 @@ export function useAppUpdater({
   };
 }
 
-function runWhenBrowserIdle(task: () => void) {
+function runWhenBrowserIdle(task: () => void): () => void {
   const idleWindow = window as Window & {
     requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+    cancelIdleCallback?: (handle: number) => void;
   };
   if (idleWindow.requestIdleCallback) {
-    idleWindow.requestIdleCallback(task, { timeout: 15_000 });
-    return;
+    const handle = idleWindow.requestIdleCallback(task, { timeout: 15_000 });
+    return () => idleWindow.cancelIdleCallback?.(handle);
   }
-  window.setTimeout(task, 0);
+  const timer = window.setTimeout(task, 0);
+  return () => window.clearTimeout(timer);
 }
 
 function normalizeIgnoredVersion(latestVersion: string | undefined, tagName: string | undefined) {

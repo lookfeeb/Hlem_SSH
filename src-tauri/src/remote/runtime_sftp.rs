@@ -49,6 +49,16 @@ impl RemoteRuntime {
         Ok(info)
     }
 
+    pub async fn close_sftp(&self, sftp_id: &str) -> AppResult<()> {
+        self.sftp_sessions
+            .write()
+            .await
+            .remove(sftp_id)
+            .ok_or_else(|| AppError::missing_sftp(sftp_id))?;
+        crate::errors::forget_resource_label(sftp_id);
+        Ok(())
+    }
+
     pub async fn sftp_list(&self, sftp_id: &str, path: String) -> AppResult<Vec<RemoteFileEntry>> {
         let sftp_record = self.sftp_record(sftp_id).await?;
         let sftp = sftp_record.session.clone();

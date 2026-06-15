@@ -507,6 +507,8 @@ pub struct NetworkInterfaceMetric {
     pub interface_name: String,
     pub upload_kbps: f64,
     pub download_kbps: f64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
     pub link_speed_mbps: Option<u64>,
 }
 
@@ -634,6 +636,33 @@ struct ForwardRecord {
     handle: Option<JoinHandle<()>>,
 }
 
+pub struct TransferUploadOptions {
+    pub sftp_id: String,
+    pub local_path: String,
+    pub remote_path: String,
+    pub overwrite: bool,
+    pub accelerated: bool,
+    pub resume: bool,
+}
+
+pub struct ForwardLocalOptions {
+    pub session_id: String,
+    pub connection_id: String,
+    pub bind_host: String,
+    pub bind_port: u16,
+    pub remote_host: String,
+    pub remote_port: u16,
+}
+
+pub struct ForwardRemoteOptions {
+    pub session_id: String,
+    pub connection_id: String,
+    pub remote_bind_host: String,
+    pub remote_bind_port: u16,
+    pub local_host: String,
+    pub local_port: u16,
+}
+
 #[derive(Clone)]
 struct TransferRequest {
     sftp_id: String,
@@ -700,18 +729,29 @@ impl Handler for RemoteClient {
         match target {
             Some(target) => {
                 tokio::spawn(async move {
-                    if let Ok(mut local) =
-                        TcpStream::connect((target.local_host.as_str(), target.local_port)).await
+                    if let Ok(mut local) = connect_tcp_with_timeout(
+                        target.local_host.as_str(),
+                        target.local_port,
+                        "远程转发回连本地服务",
+                    )
+                    .await
                     {
                         let mut remote = channel.into_stream();
-                        let _ = io::copy_bidirectional(&mut local, &mut remote).await;
-                    } else {
-                        let _ = channel.close().await;
+                        if let Err(error) = io::copy_bidirectional(&mut local, &mut remote).await {
+                            eprintln!(
+                                "[helm] remote forward stream failed: {}:{}: {error}",
+                                target.local_host, target.local_port
+                            );
+                        }
+                    } else if let Err(error) = channel.close().await {
+                        eprintln!("[helm] failed to close remote forward channel: {error}");
                     }
                 });
             }
             None => {
-                let _ = channel.close().await;
+                if let Err(error) = channel.close().await {
+                    eprintln!("[helm] failed to close unknown remote forward channel: {error}");
+                }
             }
         }
         Ok(())
@@ -735,6 +775,7 @@ SWAP 2048 128
 CPU 12.5
 IP 10.0.0.5
 IPV6 2604:a880:400:d0::1
+NET eth0 1048576 2097152 0
 DISK / 100 200
 PROC 42 sshd 1.5 20.0
 ";
@@ -748,6 +789,10 @@ PROC 42 sshd 1.5 20.0
         assert_eq!(telemetry.disks[0].mount, "/");
         assert_eq!(telemetry.processes[0].pid, 42);
         assert_eq!(telemetry.network.latency_ms, 33);
+        assert_eq!(telemetry.network.interfaces[0].interface_name, "eth0");
+        assert_eq!(telemetry.network.interfaces[0].rx_bytes, 1_048_576);
+        assert_eq!(telemetry.network.interfaces[0].tx_bytes, 2_097_152);
+        assert_eq!(telemetry.network.interfaces[0].link_speed_mbps, None);
     }
 
     #[test]

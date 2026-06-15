@@ -2,6 +2,34 @@ import type { RemoteFileEntry, UsageMetric } from "../types";
 
 const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"];
 
+const beijingDateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
+const beijingDateFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+const beijingMonthDayTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
 type ByteFormatOptions = {
   zeroText?: string;
   invalidText?: string;
@@ -15,10 +43,6 @@ export function formatBytes(bytes: number, options: ByteFormatOptions = {}): str
   return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)} ${BYTE_UNITS[unitIndex]}`;
 }
 
-export function formatUsage(metric: UsageMetric): string {
-  return `${formatBytes(metric.used)} / ${formatBytes(metric.total)}`;
-}
-
 export function percent(metric: UsageMetric): number {
   if (metric.total === 0) return 0;
   return Math.round((metric.used / metric.total) * 100);
@@ -29,29 +53,31 @@ export function formatFileSize(entry: RemoteFileEntry): string {
 }
 
 export function formatBeijingDateTime(value: string, fallback = value): string {
-  const date = new Date(value);
+  const date = parseDateValue(value);
   if (Number.isNaN(date.getTime())) return fallback;
-  return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
+  return beijingDateTimeFormatter.format(date);
+}
+
+export function formatBeijingDateTimeHyphen(value: string, fallback = value): string {
+  const date = parseDateValue(value);
+  if (Number.isNaN(date.getTime())) return fallback;
+  const parts = beijingDateTimeFormatter.formatToParts(date);
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
 export function formatBeijingDate(value: string, fallback = value): string {
-  const date = new Date(value);
+  const date = parseDateValue(value);
   if (Number.isNaN(date.getTime())) return fallback;
-  return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
+  return beijingDateFormatter.format(date);
+}
+
+export function formatBeijingMonthDayTime(value: string, fallback = value, plainIsUtc = false): string {
+  const date = parseDateValue(value, plainIsUtc);
+  if (Number.isNaN(date.getTime())) return fallback;
+  const parts = beijingMonthDayTimeFormatter.formatToParts(date);
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
 }
 
 export function formatBeijingCompactTimestamp(date = new Date()): string {
@@ -63,4 +89,9 @@ export function formatBeijingCompactTimestamp(date = new Date()): string {
   const minute = String(beijing.getUTCMinutes()).padStart(2, "0");
   const second = String(beijing.getUTCSeconds()).padStart(2, "0");
   return `${year}${month}${day}-${hour}${minute}${second}`;
+}
+
+function parseDateValue(value: string, plainIsUtc = false): Date {
+  if (!plainIsUtc || value.includes("T") || value.includes("Z")) return new Date(value);
+  return new Date(`${value}Z`);
 }

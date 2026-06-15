@@ -47,6 +47,12 @@ impl RemoteRuntime {
         Ok(snapshot)
     }
 
+    pub(super) async fn persist_transfer_history_best_effort(&self, context: &str) {
+        if let Err(error) = self.persist_transfer_history().await {
+            eprintln!("[helm] failed to persist transfer history after {context}: {error}");
+        }
+    }
+
     async fn ensure_transfer_history_loaded(&self) -> AppResult<()> {
         if self.transfer_history_loaded.load(Ordering::Relaxed) {
             return Ok(());
@@ -104,7 +110,7 @@ impl RemoteRuntime {
             .collect();
         transfers.sort_by(|left, right| {
             transfer_timestamp(right)
-                .cmp(&transfer_timestamp(left))
+                .cmp(transfer_timestamp(left))
                 .then_with(|| right.transfer_id.cmp(&left.transfer_id))
         });
         transfers.truncate(MAX_TRANSFER_HISTORY);

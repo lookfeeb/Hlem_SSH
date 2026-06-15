@@ -9,7 +9,8 @@ export function readJsonStorage<T>(
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as unknown;
     return normalize ? normalize(parsed) : (parsed as T);
-  } catch {
+  } catch (error) {
+    console.debug(`[helm] failed to read localStorage key ${key}:`, error);
     return fallback;
   }
 }
@@ -19,17 +20,8 @@ export function writeJsonStorage(key: string, value: unknown): boolean {
   try {
     window.localStorage.setItem(key, JSON.stringify(value));
     return true;
-  } catch {
-    return false;
-  }
-}
-
-export function removeStorage(key: string): boolean {
-  if (typeof window === "undefined") return false;
-  try {
-    window.localStorage.removeItem(key);
-    return true;
-  } catch {
+  } catch (error) {
+    console.debug(`[helm] failed to write localStorage key ${key}:`, error);
     return false;
   }
 }

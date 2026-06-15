@@ -9,9 +9,9 @@ pub(super) fn map_connect_error(
     if let Ok(guard) = observed.lock() {
         if let Some(verification) = guard.clone() {
             if verification.expected_fingerprint.is_some() {
-                return AppError::HostKeyChanged(verification);
+                return AppError::HostKeyChanged(Box::new(verification));
             }
-            return AppError::HostKeyUntrusted(verification);
+            return AppError::HostKeyUntrusted(Box::new(verification));
         }
     }
     remote_error(error)

@@ -296,8 +296,7 @@ pub(super) fn join_remote_path(parent: &str, name: &str) -> String {
 pub(super) fn remote_base_name(path: &str) -> String {
     normalize_remote_path(path)
         .split('/')
-        .filter(|part| !part.is_empty())
-        .last()
+        .rfind(|part| !part.is_empty())
         .unwrap_or_default()
         .to_string()
 }

@@ -4,23 +4,18 @@ impl RemoteRuntime {
     pub async fn transfer_upload(
         &self,
         app: &AppHandle,
-        sftp_id: String,
-        local_path: String,
-        remote_path: String,
-        overwrite: bool,
-        accelerated: bool,
-        resume: bool,
+        options: TransferUploadOptions,
     ) -> AppResult<TransferInfo> {
         self.start_transfer(
             app,
             TransferRequest {
-                sftp_id,
+                sftp_id: options.sftp_id,
                 direction: TransferDirection::Upload,
-                local_path,
-                remote_path,
-                overwrite,
-                accelerated,
-                resume,
+                local_path: options.local_path,
+                remote_path: options.remote_path,
+                overwrite: options.overwrite,
+                accelerated: options.accelerated,
+                resume: options.resume,
             },
         )
         .await
@@ -53,7 +48,8 @@ impl RemoteRuntime {
         self.cancel_transfer_in_place(app, transfer_id, "传输已取消")
             .await?;
         self.prune_transfer_history().await;
-        let _ = self.persist_transfer_history().await;
+        self.persist_transfer_history_best_effort("cancel transfer")
+            .await;
         Ok(())
     }
 
@@ -76,7 +72,8 @@ impl RemoteRuntime {
         let info = record.info.clone();
         events::emit(app, events::TRANSFER_PROGRESS, info.clone());
         drop(transfers);
-        let _ = self.persist_transfer_history().await;
+        self.persist_transfer_history_best_effort("pause transfer")
+            .await;
         Ok(info)
     }
 
@@ -98,7 +95,8 @@ impl RemoteRuntime {
         let info = record.info.clone();
         events::emit(app, events::TRANSFER_PROGRESS, info.clone());
         drop(transfers);
-        let _ = self.persist_transfer_history().await;
+        self.persist_transfer_history_best_effort("resume transfer")
+            .await;
         Ok(info)
     }
 
@@ -117,6 +115,7 @@ impl RemoteRuntime {
                     handle.abort();
                 }
             }
+            crate::errors::forget_resource_label(transfer_id);
         }
         self.persist_transfer_history().await
     }
@@ -137,7 +136,9 @@ impl RemoteRuntime {
         request.resume = true;
         let next = self.start_transfer(app, request).await?;
         self.transfers.write().await.remove(transfer_id);
-        let _ = self.persist_transfer_history().await;
+        crate::errors::forget_resource_label(transfer_id);
+        self.persist_transfer_history_best_effort("retry transfer")
+            .await;
         Ok(next)
     }
 
@@ -230,7 +231,8 @@ impl RemoteRuntime {
             },
         );
         events::emit(app, events::TRANSFER_PROGRESS, info.clone());
-        let _ = self.persist_transfer_history().await;
+        self.persist_transfer_history_best_effort("start transfer")
+            .await;
         Ok(info)
     }
 
@@ -278,7 +280,8 @@ impl RemoteRuntime {
             events::emit(app, events::TRANSFER_COMPLETED, record.info.clone());
         }
         self.prune_transfer_history().await;
-        let _ = self.persist_transfer_history().await;
+        self.persist_transfer_history_best_effort("complete transfer")
+            .await;
     }
 
     pub(super) async fn mark_transfer_failed(
@@ -295,20 +298,21 @@ impl RemoteRuntime {
             events::emit(app, events::TRANSFER_FAILED, record.info.clone());
         }
         self.prune_transfer_history().await;
-        let _ = self.persist_transfer_history().await;
+        self.persist_transfer_history_best_effort("fail transfer")
+            .await;
     }
 
     pub(super) async fn prune_transfer_history(&self) {
         let mut transfers = self.transfers.write().await;
         let mut finished: Vec<(String, String)> = transfers
             .iter()
-            .filter_map(|(id, record)| {
+            .filter(|(_, record)| {
                 matches!(
                     record.info.status,
                     TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Canceled
                 )
-                .then(|| (id.clone(), record.info.updated_at.clone()))
             })
+            .map(|(id, record)| (id.clone(), record.info.updated_at.clone()))
             .collect();
         if finished.len() <= MAX_TRANSFER_HISTORY {
             return;
@@ -317,6 +321,7 @@ impl RemoteRuntime {
         finished.sort_by(|a, b| a.1.cmp(&b.1));
         for (id, _) in finished.into_iter().take(remove_count) {
             transfers.remove(&id);
+            crate::errors::forget_resource_label(&id);
         }
     }
 }

@@ -2,6 +2,7 @@ import { Form, Input, Modal, Radio, Tree } from "antd";
 import { ArrowRightOutlined, CopyOutlined, EditOutlined, FolderAddOutlined, InfoCircleOutlined, SwapOutlined } from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
 import type { RemoteFileEntry } from "../../types";
+import { getBaseName } from "../../lib/path";
 
 export type FileDialogState =
   | { kind: "create"; entryType: "file" | "directory"; name: string }
@@ -92,7 +93,7 @@ export function FileDialogs({
             <div className="flowNode targetNode" key={dialog.value}>
               <span className="nodeIcon">📁</span>
               <span className="nodeText" title={dialog.value || "/"}>
-                {dialog.value.split("/").filter(Boolean).pop() || "根目录"}
+                {getBaseName(dialog.value) || "根目录"}
               </span>
             </div>
           </div>

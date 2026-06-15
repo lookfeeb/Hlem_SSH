@@ -1,9 +1,10 @@
 use std::{
-    io::{Cursor, Read, Write},
+    io::{Cursor, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
+use bytes::Bytes;
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, TimeZone, Utc};
 use hmac::{Hmac, Mac};
 use reqwest::{
@@ -31,10 +32,22 @@ const CLOUD_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOUD_TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub fn backup_file_name() -> String {
-    let beijing = FixedOffset::east_opt(8 * 3600)
-        .expect("valid Beijing timezone offset")
-        .from_utc_datetime(&Utc::now().naive_utc());
+    let beijing = beijing_now();
     format!("HelM-backup-{}-BJT.zip", beijing.format("%Y%m%d-%H%M%S"))
+}
+
+pub async fn remove_backup_file_best_effort(path: impl AsRef<Path>, context: &str) {
+    let path = path.as_ref();
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => {
+            eprintln!(
+                "[helm] failed to remove backup file after {context}: {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -245,10 +258,7 @@ fn build_backup_package_sync(vault_bytes: &[u8]) -> AppResult<Vec<u8>> {
     let options = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
         .unix_permissions(0o600);
-    let created_at = FixedOffset::east_opt(8 * 3600)
-        .expect("valid Beijing timezone offset")
-        .from_utc_datetime(&Utc::now().naive_utc())
-        .to_rfc3339();
+    let created_at = beijing_now().to_rfc3339();
     let manifest = BackupManifest {
         app: "HelM",
         format: "helm-backup-package",
@@ -269,6 +279,13 @@ fn build_backup_package_sync(vault_bytes: &[u8]) -> AppResult<Vec<u8>> {
         .finish()
         .map_err(|error| AppError::Io(error.to_string()))
         .map(|cursor| cursor.into_inner())
+}
+
+fn beijing_now() -> DateTime<FixedOffset> {
+    let now = Utc::now();
+    FixedOffset::east_opt(8 * 3600)
+        .map(|offset| offset.from_utc_datetime(&now.naive_utc()))
+        .unwrap_or_else(|| now.fixed_offset())
 }
 
 pub fn extract_backup_payload(bytes: &[u8]) -> AppResult<Vec<u8>> {
@@ -416,8 +433,9 @@ async fn upload_webdav(
     let client = http_client(CLOUD_TRANSFER_TIMEOUT)?;
     let username = config.username.trim().to_string();
     let password = config.password.clone();
+    let body = Bytes::from(bytes);
     let response = send_with_retry("WebDAV 上传", || {
-        let request = client.put(&target).body(bytes.clone());
+        let request = client.put(&target).body(body.clone());
         if username.is_empty() {
             request
         } else {
@@ -525,7 +543,8 @@ async fn upload_s3(config: &S3BackupConfig, file_name: &str, bytes: Vec<u8>) -> 
     let now = Utc::now();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
     let short_date = now.format("%Y%m%d").to_string();
-    let payload_hash = hex::encode(Sha256::digest(&bytes));
+    let body = Bytes::from(bytes);
+    let payload_hash = hex::encode(Sha256::digest(&body));
     let canonical_headers = format!(
         "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
         host, payload_hash, amz_date
@@ -577,7 +596,7 @@ async fn upload_s3(config: &S3BackupConfig, file_name: &str, bytes: Vec<u8>) -> 
         client
             .put(url.as_str())
             .headers(headers.clone())
-            .body(bytes.clone())
+            .body(body.clone())
     })
     .await?;
     if !response.status().is_success() {

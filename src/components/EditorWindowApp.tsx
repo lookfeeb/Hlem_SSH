@@ -3,9 +3,12 @@ import { SaveOutlined } from "@ant-design/icons";
 import zhCN from "antd/locale/zh_CN";
 import { useEffect, useRef, useState } from "react";
 import { CodeEditor } from "./CodeEditor";
-import { editorChannelName, type EditorChannelMessage } from "../lib/editorChannel";
+import { EDITOR_CHANNEL_NAME, type EditorChannelMessage } from "../lib/editorChannel";
+import { getErrorMessage } from "../lib/configMapping";
+import { getAnyPathBaseName } from "../lib/path";
 
 interface EditorTab {
+  key: string;
   path: string;
   content: string;
   originalContent: string;
@@ -16,33 +19,61 @@ interface EditorTab {
 }
 
 function getFileName(path: string) {
-  return path.split(/[/\\]/).pop() || path;
+  return getAnyPathBaseName(path) || path;
+}
+
+function editorTabKey(sessionId: string, path: string) {
+  return `${encodeURIComponent(sessionId)}:${encodeURIComponent(path)}`;
+}
+
+function createEditorTab(payload: { path: string; content: string; sessionId?: string; sessionName?: string }): EditorTab {
+  const sessionId = payload.sessionId ?? "";
+  return {
+    key: editorTabKey(sessionId, payload.path),
+    path: payload.path,
+    content: payload.content,
+    originalContent: payload.content,
+    saving: false,
+    sessionId,
+    sessionName: payload.sessionName ?? "",
+  };
+}
+
+function postEditorMessage(channel: BroadcastChannel, message: EditorChannelMessage): boolean {
+  try {
+    channel.postMessage(message);
+    return true;
+  } catch (error) {
+    console.warn("[helm] failed to post editor message:", getErrorMessage(error));
+    return false;
+  }
 }
 
 export function EditorWindowApp() {
-  const editorId = new URLSearchParams(window.location.search).get("editorWindow") ?? "";
+  const editorChannel = new URLSearchParams(window.location.search).get("editorWindow") ?? EDITOR_CHANNEL_NAME;
   const [tabs, setTabs] = useState<EditorTab[]>([]);
   const [activeKey, setActiveKey] = useState("");
   const [ready, setReady] = useState(false);
   const channelRef = useRef<BroadcastChannel | null>(null);
 
   useEffect(() => {
-    if (!editorId) return;
-    const channel = new BroadcastChannel(editorChannelName(editorId));
+    const channel = new BroadcastChannel(editorChannel);
     channelRef.current = channel;
     channel.onmessage = (event: MessageEvent<EditorChannelMessage>) => {
       const payload = event.data;
       if (payload.type === "init") {
-        setTabs([{ path: payload.path, content: payload.content, originalContent: payload.content, saving: false, sessionId: payload.sessionId ?? "", sessionName: payload.sessionName ?? "" }]);
-        setActiveKey(payload.path);
+        const tab = createEditorTab(payload);
+        setTabs([tab]);
+        setActiveKey(tab.key);
         setReady(true);
       }
       if (payload.type === "addTab") {
+        const tab = createEditorTab(payload);
         setTabs((prev) => {
-          if (prev.some((t) => t.path === payload.path && t.sessionId === payload.sessionId)) return prev;
-          return [...prev, { path: payload.path, content: payload.content, originalContent: payload.content, saving: false, sessionId: payload.sessionId ?? "", sessionName: payload.sessionName ?? "" }];
+          if (prev.some((item) => item.key === tab.key)) return prev;
+          return [...prev, tab];
         });
-        setActiveKey(payload.path);
+        setActiveKey(tab.key);
       }
       if (payload.type === "saved") {
         setTabs((prev) => prev.map((t) => (t.path === payload.path && t.sessionId === (payload.sessionId ?? "")) ? { ...t, saving: false, originalContent: t.content } : t));
@@ -59,11 +90,9 @@ export function EditorWindowApp() {
         setTabs((prev) => prev.map((t) => t.sessionId === payload.sessionId ? { ...t, disconnected: false } : t));
       }
     };
-    channel.postMessage({ type: "ready" } satisfies EditorChannelMessage);
+    postEditorMessage(channel, { type: "ready" });
     const close = () => {
-      try {
-        channel.postMessage({ type: "close" } satisfies EditorChannelMessage);
-      } catch { /* ignore */ }
+      postEditorMessage(channel, { type: "close" });
     };
     window.addEventListener("beforeunload", close);
     return () => {
@@ -71,35 +100,37 @@ export function EditorWindowApp() {
       if (channelRef.current === channel) channelRef.current = null;
       channel.close();
     };
-  }, [editorId]);
+  }, [editorChannel]);
 
-  function updateContent(path: string, value: string) {
-    setTabs((prev) => prev.map((t) => t.path === path ? { ...t, content: value } : t));
+  function updateContent(key: string, value: string) {
+    setTabs((prev) => prev.map((t) => t.key === key ? { ...t, content: value } : t));
   }
 
   function save() {
-    const tab = tabs.find((t) => t.path === activeKey);
+    const tab = tabs.find((t) => t.key === activeKey);
     if (!tab || tab.disconnected) return;
-    setTabs((prev) => prev.map((t) => t.path === activeKey ? { ...t, saving: true } : t));
-    channelRef.current?.postMessage({ type: "save", path: tab.path, content: tab.content, sessionId: tab.sessionId } satisfies EditorChannelMessage);
+    setTabs((prev) => prev.map((t) => t.key === activeKey ? { ...t, saving: true } : t));
+    if (channelRef.current) {
+      postEditorMessage(channelRef.current, { type: "save", path: tab.path, content: tab.content, sessionId: tab.sessionId });
+    }
   }
 
-  function closeTab(targetPath: string) {
-    const tab = tabs.find((t) => t.path === targetPath);
+  function closeTab(targetKey: string) {
+    const tab = tabs.find((t) => t.key === targetKey);
     if (tab && tab.content !== tab.originalContent) {
-      if (!window.confirm(`"${getFileName(targetPath)}" 已修改但未保存，确定关闭？`)) return;
+      if (!window.confirm(`"${getFileName(tab.path)}" 已修改但未保存，确定关闭？`)) return;
     }
     setTabs((prev) => {
-      const next = prev.filter((t) => t.path !== targetPath);
-      if (activeKey === targetPath) {
-        const idx = prev.findIndex((t) => t.path === targetPath);
-        setActiveKey(next[Math.min(idx, next.length - 1)]?.path ?? "");
+      const next = prev.filter((t) => t.key !== targetKey);
+      if (activeKey === targetKey) {
+        const idx = prev.findIndex((t) => t.key === targetKey);
+        setActiveKey(next[Math.min(idx, next.length - 1)]?.key ?? "");
       }
       return next;
     });
   }
 
-  const activeTab = tabs.find((t) => t.path === activeKey);
+  const activeTab = tabs.find((t) => t.key === activeKey);
 
   const sessionColor = (id?: string) => {
     if (!id) return "#4f6ef7";
@@ -145,10 +176,12 @@ export function EditorWindowApp() {
                   hideAdd
                   activeKey={activeKey}
                   onChange={setActiveKey}
-                  onEdit={(targetKey, action) => { if (action === "remove") closeTab(targetKey as string); }}
+                  onEdit={(targetKey, action) => {
+                    if (action === "remove" && typeof targetKey === "string") closeTab(targetKey);
+                  }}
                   className="detachedEditorTabs"
                   items={tabs.map((t) => ({
-                    key: t.path,
+                    key: t.key,
                     label: (
                       <span className={t.disconnected ? "editorTabDisconnected" : undefined}>
                         {getFileName(t.path)}
@@ -159,13 +192,13 @@ export function EditorWindowApp() {
               )}
               <div className="detachedEditorContent">
                 {tabs.map((t) => (
-                  <div key={t.path} style={{ display: t.path === activeKey ? "flex" : "none", flexDirection: "column", height: "100%" }}>
+                  <div key={t.key} style={{ display: t.key === activeKey ? "flex" : "none", flexDirection: "column", height: "100%" }}>
                     <CodeEditor
                       path={t.path}
                       value={t.content}
                       height="100%"
-                      onChange={(v) => updateContent(t.path, v)}
-                      onFormatJson={(v) => updateContent(t.path, v)}
+                      onChange={(v) => updateContent(t.key, v)}
+                      onFormatJson={(v) => updateContent(t.key, v)}
                     />
                   </div>
                 ))}

@@ -201,7 +201,6 @@
   background: linear-gradient(180deg, rgba(248, 251, 255, .58) 0%, rgba(241, 245, 249, .42) 100%);
 }
 
-.sessionTabs::before,
 .sessionTabs::after {
   content: "";
   position: absolute;
@@ -214,17 +213,11 @@
   transition: opacity .18s ease;
 }
 
-.sessionTabs::before {
-  left: 32px;
-  background: linear-gradient(90deg, rgba(248, 251, 255, .96), rgba(248, 251, 255, 0));
-}
-
 .sessionTabs::after {
   right: 32px;
   background: linear-gradient(270deg, rgba(248, 251, 255, .96), rgba(248, 251, 255, 0));
 }
 
-.sessionTabs-scrollable::before,
 .sessionTabs-scrollable::after {
   opacity: 1;
 }
@@ -299,13 +292,13 @@
   height: var(--session-tab-height);
   overflow: hidden;
   position: relative;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .92) 0%, rgba(248, 250, 252, .86) 100%);
-  border: 1px solid rgba(203, 213, 225, .72);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .78) 0%, rgba(241, 245, 249, .74) 100%);
+  border: 1px solid rgba(203, 213, 225, .64);
   border-radius: 7px;
-  color: #475569;
+  color: #64748b;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, .8),
-    0 1px 2px rgba(15, 23, 42, .04);
+    inset 0 1px 0 rgba(255, 255, 255, .68),
+    0 1px 2px rgba(15, 23, 42, .03);
   transition: background .18s ease, border-color .18s ease, color .18s ease, box-shadow .18s ease, transform .18s ease;
   backdrop-filter: blur(8px);
 }
@@ -321,13 +314,20 @@
 }
 
 .sessionTab-active {
-  background: #ffffff;
-  border-color: rgba(37, 99, 235, .42);
+  background: linear-gradient(180deg, #f8fbff 0%, #dbeafe 100%);
+  border-color: rgba(37, 99, 235, .82);
   color: #1d4ed8;
   font-weight: 700;
   box-shadow:
-    0 8px 20px -13px rgba(37, 99, 235, .55),
-    inset 0 1px 0 rgba(255, 255, 255, .95);
+    0 0 0 2px rgba(37, 99, 235, .14),
+    0 8px 18px -13px rgba(37, 99, 235, .72),
+    inset 0 1px 0 rgba(255, 255, 255, .96);
+}
+
+.sessionTab-active:hover {
+  background: linear-gradient(180deg, #ffffff 0%, #dbeafe 100%);
+  border-color: rgba(37, 99, 235, .86);
+  color: #1d4ed8;
 }
 
 .sessionTab-connected {

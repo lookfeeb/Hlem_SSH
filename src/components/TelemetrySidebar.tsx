@@ -9,9 +9,9 @@ import { Popover } from "antd";
 import { useEffect, useState, useRef } from "react";
 import { writeClipboardText } from "../lib/clipboard";
 import { formatElapsedSince } from "../lib/duration";
-import { percent } from "../lib/format";
+import { formatBytes, percent } from "../lib/format";
 import { createEmptyTelemetry } from "../lib/remoteDefaults";
-import { useTimeoutRegistry } from "../lib/reactLifecycle";
+import { useMountedRef, useTimeoutRegistry } from "../lib/reactLifecycle";
 import type { DiskMetric, NetworkInterfaceMetric, RemoteSession } from "../types";
 
 interface TelemetrySidebarProps {
@@ -61,6 +61,7 @@ function formatCompactUsage(metric: { used: number; total: number }): string {
 export function TelemetrySidebar({ session }: TelemetrySidebarProps) {
   const [copiedKey, setCopiedKey] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const mountedRef = useMountedRef();
   const setSafeTimeout = useTimeoutRegistry();
   const isConnected = session.state === "connected";
   const telemetry = isConnected ? session.telemetry : createEmptyTelemetry(session.host);
@@ -88,6 +89,7 @@ export function TelemetrySidebar({ session }: TelemetrySidebarProps) {
   async function copyValue(key: string, value: string) {
     if (!value || value === "-" || value === "//") return;
     if (!(await writeClipboardText(value))) return;
+    if (!mountedRef.current) return;
     setCopiedKey(key);
     setSafeTimeout(() => setCopiedKey(""), 900);
   }
@@ -229,6 +231,8 @@ function normalizedNetworkInterfaces(
       interfaceName: primary.interfaceName,
       uploadKbps: primary.uploadKbps,
       downloadKbps: primary.downloadKbps,
+      rxBytes: 0,
+      txBytes: 0,
       linkSpeedMbps: null,
     },
   ];
@@ -238,24 +242,49 @@ function NetworkInterfacesPanel({ interfaces }: { interfaces: NetworkInterfaceMe
   if (interfaces.length === 0) {
     return <div className="networkInterfacesEmpty">暂无网卡数据</div>;
   }
+  const total = interfaces.reduce(
+    (sum, item) => ({
+      rxBytes: sum.rxBytes + (item.rxBytes ?? 0),
+      txBytes: sum.txBytes + (item.txBytes ?? 0),
+    }),
+    { rxBytes: 0, txBytes: 0 },
+  );
   return (
     <div className="networkInterfacesPanel">
+      <div className="networkInterfacesSummary">
+        <div className="networkInterfaceSummaryItem networkInterfaceSummaryUpload">
+          <span>
+            <ArrowUpOutlined />
+            上传总量
+          </span>
+          <strong>{formatBytes(total.txBytes)}</strong>
+        </div>
+        <div className="networkInterfaceSummaryItem networkInterfaceSummaryDownload">
+          <span>
+            <ArrowDownOutlined />
+            下载总量
+          </span>
+          <strong>{formatBytes(total.rxBytes)}</strong>
+        </div>
+      </div>
       {interfaces.map((item) => {
         const linkSpeed = formatLinkSpeed(item.linkSpeedMbps);
         return (
           <div className="networkInterfaceRow" key={item.interfaceName}>
             <span className="networkInterfaceName" title={item.interfaceName}>{item.interfaceName}</span>
+            <div className="networkInterfaceMetrics">
+              <span className="networkInterfaceRate" title="上传速率">
+                <ArrowUpOutlined /> {formatNetworkRate(item.uploadKbps)}
+              </span>
+              <span className="networkInterfaceRate" title="下载速率">
+                <ArrowDownOutlined /> {formatNetworkRate(item.downloadKbps)}
+              </span>
+            </div>
             {linkSpeed ? (
               <span className="networkInterfaceSpeed" title="接口链路速率">
                 {linkSpeed}
               </span>
             ) : null}
-            <span className="networkInterfaceRate">
-              <ArrowUpOutlined /> {formatNetworkRate(item.uploadKbps)}
-            </span>
-            <span className="networkInterfaceRate">
-              <ArrowDownOutlined /> {formatNetworkRate(item.downloadKbps)}
-            </span>
           </div>
         );
       })}

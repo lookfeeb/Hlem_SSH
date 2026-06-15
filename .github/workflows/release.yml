@@ -112,12 +112,15 @@ jobs:
       - name: Build Windows exe with LTO
         shell: pwsh
         env:
-          VITE_HELM_UPDATE_REPO: ${{ github.repository }}
-          VITE_HELM_UPDATE_PUBLIC_KEY_PEM: ${{ vars.HELM_UPDATE_PUBLIC_KEY_PEM }}
+          HELM_UPDATE_REPO: ${{ github.repository }}
+          HELM_UPDATE_PUBLIC_KEY_PEM: ${{ vars.HELM_UPDATE_PUBLIC_KEY_PEM }}
           CARGO_PROFILE_RELEASE_LTO: thin
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
           CARGO_PROFILE_RELEASE_STRIP: symbols
         run: |
+          if (-not $env:HELM_UPDATE_PUBLIC_KEY_PEM) {
+            throw "Missing GitHub variable HELM_UPDATE_PUBLIC_KEY_PEM."
+          }
           $maxAttempts = 3
           for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
             npm run tauri -- build --target ${{ matrix.rust_target }} --bundles nsis

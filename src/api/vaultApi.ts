@@ -1,15 +1,16 @@
-import type { AppSettings, BackupSettings, ConfigSnapshot, GroupInput, SessionInput, SshOptions, TunnelConfig, TunnelInput } from "../types";
+import type { AppSettings, BackupSettings, ConfigSnapshot, GroupInput, SessionInput, SshOptions, TunnelInput } from "../types";
 import { call } from "./bridge";
 
 export const vaultApi = {
   needsMigration: () => call<boolean>("vault_needs_migration"),
   migrate: (oldPassword: string) => call<ConfigSnapshot>("vault_migrate", { oldPassword }),
   skipMigration: () => call<ConfigSnapshot>("vault_skip_migration"),
-  snapshot: () => call<ConfigSnapshot>("config_snapshot"),
-  backupExport: (path: string) => call<void>("vault_backup_export", { path }),
-  backupImport: (path: string) => call<ConfigSnapshot>("vault_backup_import", { path }),
-  backupRunNow: () => call<ConfigSnapshot>("backup_run_now"),
-  backupRecordRestore: (recordId: string) => call<ConfigSnapshot>("backup_record_restore", { recordId }),
+  snapshot: () => call<ConfigSnapshot>("config_snapshot", undefined, { retries: 1 }),
+  backupExport: (path: string) => call<void>("vault_backup_export", { path }, { timeoutMs: 15 * 60_000 }),
+  backupImport: (path: string) => call<ConfigSnapshot>("vault_backup_import", { path }, { timeoutMs: 15 * 60_000 }),
+  backupRunNow: () => call<ConfigSnapshot>("backup_run_now", undefined, { timeoutMs: 15 * 60_000 }),
+  backupRecordRestore: (recordId: string) =>
+    call<ConfigSnapshot>("backup_record_restore", { recordId }, { timeoutMs: 15 * 60_000 }),
   backupRecordDelete: (recordId: string, deleteFile = false) =>
     call<ConfigSnapshot>("backup_record_delete", { recordId, deleteFile }),
   backupRecordsClear: () => call<ConfigSnapshot>("backup_records_clear"),
@@ -20,15 +21,13 @@ export const vaultApi = {
   sessionCreate: (input: SessionInput) => call<ConfigSnapshot>("session_create", { input }),
   sessionUpdate: (sessionId: string, input: SessionInput) => call<ConfigSnapshot>("session_update", { sessionId, input }),
   sessionFavoriteUpdate: (sessionId: string, favorite: boolean) =>
-    callWithCommandFallback<ConfigSnapshot>("session_favorite_update", "sessionFavoriteUpdate", { sessionId, favorite }),
+    call<ConfigSnapshot>("session_favorite_update", { sessionId, favorite }),
   sessionMarkRecent: (sessionId: string) =>
-    callWithCommandFallback<ConfigSnapshot>("session_mark_recent", "sessionMarkRecent", { sessionId }),
+    call<ConfigSnapshot>("session_mark_recent", { sessionId }),
   sessionDelete: (sessionId: string) => call<ConfigSnapshot>("session_delete", { sessionId }),
-  sessionDuplicate: (sessionId: string) => call<ConfigSnapshot>("session_duplicate", { sessionId }),
   tunnelCreate: (input: TunnelInput) => call<ConfigSnapshot>("tunnel_create", { input }),
   tunnelUpdate: (tunnelId: string, input: TunnelInput) => call<ConfigSnapshot>("tunnel_update", { tunnelId, input }),
   tunnelDelete: (tunnelId: string) => call<ConfigSnapshot>("tunnel_delete", { tunnelId }),
-  tunnelList: () => call<TunnelConfig[]>("tunnel_list"),
 };
 
 export function emptyPasswordAuth() {
@@ -93,26 +92,4 @@ export function defaultBackupSettings(): BackupSettings {
       },
     },
   };
-}
-
-async function callWithCommandFallback<T>(
-  command: string,
-  fallbackCommand: string,
-  args: Record<string, unknown>,
-) {
-  try {
-    return await call<T>(command, args);
-  } catch (error) {
-    if (!isCommandNotFound(error)) throw error;
-    try {
-      return await call<T>(fallbackCommand, args);
-    } catch (fallbackError) {
-      throw isCommandNotFound(fallbackError) ? error : fallbackError;
-    }
-  }
-}
-
-function isCommandNotFound(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return /command .* not found/i.test(message);
 }

@@ -113,14 +113,16 @@ impl TelemetryStream {
 
 impl Drop for TelemetryStream {
     fn drop(&mut self) {
-        // Signal the remote loop to exit; ignore any send error since the
-        // channel may already be down.
         let mut writer = self.writer.make_writer();
         tokio::spawn(async move {
-            let _ = writer.write_all(b"quit\n").await;
-            let _ = writer.flush().await;
+            if let Err(error) = writer.write_all(b"quit\n").await {
+                log::debug!("failed to signal telemetry stream shutdown: {error}");
+                return;
+            }
+            if let Err(error) = writer.flush().await {
+                log::debug!("failed to flush telemetry stream shutdown signal: {error}");
+            }
         });
-        // Ensure the reader task does not outlive the stream.
         self.reader.abort();
     }
 }
@@ -364,7 +366,8 @@ impl RemoteRuntime {
             .read()
             .await
             .iter()
-            .filter_map(|(id, record)| (record.info.session_id == session_id).then(|| id.clone()))
+            .filter(|(_, record)| record.info.session_id == session_id)
+            .map(|(id, _)| id.clone())
             .collect();
         let mut jobs = self.telemetry_jobs.write().await;
         let mut stopped = 0usize;
@@ -387,7 +390,8 @@ impl RemoteRuntime {
             .read()
             .await
             .iter()
-            .filter_map(|(id, record)| (record.info.session_id == session_id).then(|| id.clone()))
+            .filter(|(_, record)| record.info.session_id == session_id)
+            .map(|(id, _)| id.clone())
             .collect();
         let mut jobs = self.telemetry_jobs.write().await;
         for id in job_ids {

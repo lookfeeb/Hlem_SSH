@@ -71,7 +71,7 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
     }
 
     // 3. find -delete / find -exec rm
-    let mentions_find = parts.iter().any(|p| *p == "find") || squeezed.contains(" find ");
+    let mentions_find = parts.contains(&"find") || squeezed.contains(" find ");
     if mentions_find {
         if squeezed.contains(" -delete") || squeezed.ends_with(" -delete") {
             return Some("禁止 find -delete");
@@ -82,15 +82,14 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
     }
 
     // 4. Disk format / wipe / shred on block devices
-    if squeezed.contains("mkfs.") || squeezed.starts_with("mkfs ") || squeezed.contains(" mkfs ") {
-        if normalized.contains("/dev/sd")
+    if (squeezed.contains("mkfs.") || squeezed.starts_with("mkfs ") || squeezed.contains(" mkfs "))
+        && (normalized.contains("/dev/sd")
             || normalized.contains("/dev/nvme")
             || normalized.contains("/dev/vd")
             || normalized.contains("/dev/hd")
-            || normalized.contains("/dev/mmc")
-        {
-            return Some("禁止格式化磁盘");
-        }
+            || normalized.contains("/dev/mmc"))
+    {
+        return Some("禁止格式化磁盘");
     }
     if squeezed.contains("wipefs ") || squeezed.starts_with("wipefs") {
         return Some("禁止 wipefs");

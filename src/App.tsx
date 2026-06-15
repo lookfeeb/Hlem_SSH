@@ -122,7 +122,6 @@ function App() {
   });
   const {
     registerTerminal,
-    consumePendingTerminalEntries,
     appendTerminal,
     resetTerminalRuntime,
     handleTerminalOutput,
@@ -173,9 +172,13 @@ function App() {
     activeSessionId,
     applySnapshot,
   });
+  const sessionsById = useMemo(() => new Map(sessions.map((session) => [session.id, session])), [sessions]);
   const openSessions = useMemo(
-    () => openSessionIds.map((id) => sessions.find((session) => session.id === id)).filter(Boolean) as RemoteSession[],
-    [openSessionIds, sessions],
+    () => openSessionIds.flatMap((id) => {
+      const session = sessionsById.get(id);
+      return session ? [session] : [];
+    }),
+    [openSessionIds, sessionsById],
   );
   const activeSession = useMemo(
     () => openSessions.find((session) => session.id === activeSessionId) ?? openSessions[0],
@@ -186,7 +189,6 @@ function App() {
     refreshActiveFiles,
     runFileOperation,
     uploadLocalFiles,
-    downloadRemoteFile,
     downloadRemoteFiles,
     readRemoteText,
     writeRemoteTextRaw,
@@ -227,7 +229,6 @@ function App() {
     applySnapshot,
     applyConfigSnapshot,
     registerTerminal,
-    consumePendingTerminalEntries,
     appendTerminal: (sessionId, kind, content) => appendTerminal(sessionId, kind, content),
   });
   const {
@@ -321,7 +322,7 @@ function App() {
     if (!appReady) return;
     let disposed = false;
     let cleanups: Array<() => void> = [];
-    void Promise.all([
+    void Promise.allSettled([
       remoteApi.onSshStatus(handleSshStatus),
       remoteApi.onSftpChanged(handleSftpChanged),
       remoteApi.onTerminalOutput(handleTerminalOutput),
@@ -347,7 +348,12 @@ function App() {
       remoteApi.onHostKeyVerify((payload) => {
         appendTerminal(payload.sessionId, "system", `主机密钥待确认：${payload.fingerprint}`);
       }),
-    ]).then((items) => {
+    ]).then((results) => {
+      const items = results.flatMap((result) => {
+        if (result.status === "fulfilled") return [result.value];
+        console.warn("[helm] failed to register app event listener:", getErrorMessage(result.reason));
+        return [];
+      });
       if (disposed) {
         items.forEach((cleanup) => cleanup());
         return;
@@ -382,8 +388,8 @@ function App() {
 
   function applySnapshot(snapshot: ConfigSnapshot, preferredSessionId?: string, preserveRuntime = true) {
     const mappedSessions = snapshot.data.sessions.map(configToRemoteSession);
-    const mappedIds = mappedSessions.map((session) => session.id);
-    const preferredId = preferredSessionId && mappedIds.includes(preferredSessionId) ? preferredSessionId : "";
+    const mappedIdSet = new Set(mappedSessions.map((session) => session.id));
+    const preferredId = preferredSessionId && mappedIdSet.has(preferredSessionId) ? preferredSessionId : "";
     configSnapshotRef.current = snapshot;
     setConfigSnapshot(snapshot);
     if (preserveRuntime) {
@@ -392,11 +398,11 @@ function App() {
       setSessions(mappedSessions);
     }
     setOpenSessionIds((current) => {
-      const validIds = current.filter((id) => mappedIds.includes(id));
+      const validIds = current.filter((id) => mappedIdSet.has(id));
       if (preferredId && !validIds.includes(preferredId)) validIds.push(preferredId);
       return validIds;
     });
-    setActiveSessionId((current) => (preferredId || (mappedIds.includes(current) ? current : "")));
+    setActiveSessionId((current) => (preferredId || (mappedIdSet.has(current) ? current : "")));
   }
 
   function mergeSnapshotSessions(nextSessions: RemoteSession[], currentSessions: RemoteSession[]) {
@@ -455,7 +461,7 @@ function App() {
     try {
       applySnapshot(await vaultApi.sessionMarkRecent(sessionId));
     } catch (error) {
-      console.warn("记录最近连接失败", error);
+      console.warn("[helm] failed to mark recent session:", getErrorMessage(error));
     }
   }
 
@@ -512,7 +518,6 @@ function App() {
                   tabSessions={openSessions}
                   activeSessionId={activeSession?.id ?? ""}
                   onActivate={activateSession}
-                  onAdd={() => void addSession()}
                   onClose={closeSession}
                   onConnect={(session) => void connectSessionWithRecent(session)}
                   onDisconnect={(session) => void disconnectSession(session)}
@@ -575,7 +580,6 @@ function App() {
                             onListDirectory={listRemoteDirectory}
                             onFileOperation={runFileOperation}
                             onUploadFiles={uploadLocalFiles}
-                            onDownloadFile={downloadRemoteFile}
                             onDownloadFiles={downloadRemoteFiles}
                             onReadText={readRemoteText}
                             onWriteText={writeRemoteText}

@@ -5,8 +5,8 @@ export async function writeClipboardText(text: string): Promise<boolean> {
       await navigator.clipboard.writeText(text);
       return true;
     }
-  } catch {
-    // fall through to textarea fallback
+  } catch (error) {
+    console.debug("[helm] navigator clipboard write failed, using fallback:", error);
   }
   const textarea = document.createElement("textarea");
   textarea.value = text;
@@ -19,7 +19,8 @@ export async function writeClipboardText(text: string): Promise<boolean> {
   textarea.select();
   try {
     return document.execCommand("copy");
-  } catch {
+  } catch (error) {
+    console.debug("[helm] document.execCommand clipboard fallback failed:", error);
     return false;
   } finally {
     document.body.removeChild(textarea);
@@ -31,8 +32,8 @@ export async function readClipboardText(): Promise<string> {
     if (navigator.clipboard?.readText) {
       return await navigator.clipboard.readText();
     }
-  } catch {
-    // ignore — webview may block clipboard reads
+  } catch (error) {
+    console.debug("[helm] navigator clipboard read failed:", error);
   }
   return "";
 }

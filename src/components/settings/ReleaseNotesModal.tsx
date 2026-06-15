@@ -9,12 +9,11 @@ interface ReleaseNotesModalProps {
   onClose: () => void;
   updateInfo: UpdateInfo | null;
   updateDownloading: boolean;
-  downloadedUpdatePath: string | null;
   onDownloadUpdate: () => Promise<void>;
   onIgnoreUpdate: () => Promise<void>;
 }
 
-export function ReleaseNotesModal({ open, onClose, updateInfo, updateDownloading, downloadedUpdatePath, onDownloadUpdate, onIgnoreUpdate }: ReleaseNotesModalProps) {
+export function ReleaseNotesModal({ open, onClose, updateInfo, updateDownloading, onDownloadUpdate, onIgnoreUpdate }: ReleaseNotesModalProps) {
   const canDownloadUpdate = Boolean(updateInfo?.hasUpdate && updateInfo.asset);
 
   return (

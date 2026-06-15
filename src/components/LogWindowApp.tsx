@@ -4,32 +4,38 @@ import zhCN from "antd/locale/zh_CN";
 import { useEffect, useRef, useState } from "react";
 import { appApi, type ApiLogEntry } from "../api/appApi";
 import { appEvents } from "../api/appEvents";
-import { useTimeoutRegistry } from "../lib/reactLifecycle";
+import { writeClipboardText } from "../lib/clipboard";
+import { getErrorMessage } from "../lib/configMapping";
+import { formatBeijingMonthDayTime } from "../lib/format";
+import { useMountedRef, useTimeoutRegistry } from "../lib/reactLifecycle";
 
 export function LogWindowApp() {
   const [logs, setLogs] = useState<ApiLogEntry[]>([]);
   const [copied, setCopied] = useState(false);
-  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [detailCopied, setDetailCopied] = useState(false);
   const [selectedLog, setSelectedLog] = useState<ApiLogEntry | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const mountedRef = useMountedRef();
   const setSafeTimeout = useTimeoutRegistry();
 
   useEffect(() => {
     let mounted = true;
     let unlisten: (() => void) | null = null;
-    let fallbackTimer: number | null = null;
+    let pollingTimer: number | null = null;
     const load = () => {
       void appApi.apiServerLogs()
         .then((items) => {
           if (mounted) setLogs(items);
         })
-        .catch(() => undefined);
+        .catch((error) => {
+          console.warn("[helm] failed to load api logs:", getErrorMessage(error));
+        });
     };
     load();
     void appEvents.onApiLog((entry) => {
       if (!mounted) return;
-      if (fallbackTimer !== null) { clearInterval(fallbackTimer); fallbackTimer = null; }
+      if (pollingTimer !== null) { clearInterval(pollingTimer); pollingTimer = null; }
       setLogs((prev) => {
         const next = [...prev, entry];
         return next.length > 100 ? next.slice(next.length - 100) : next;
@@ -37,22 +43,21 @@ export function LogWindowApp() {
     }).then((u) => {
       if (!mounted) { u(); return; }
       unlisten = u;
-      // 注册成功后启动 fallback：如果 5s 内没收到任何事件，开始轮询
-      fallbackTimer = window.setInterval(load, 5000);
-    }).catch(() => {
-      // listen 失败，直接用轮询
-      if (mounted) fallbackTimer = window.setInterval(load, 3000);
+      pollingTimer = window.setInterval(load, 5000);
+    }).catch((error) => {
+      console.warn("[helm] failed to subscribe api logs:", getErrorMessage(error));
+      if (mounted) pollingTimer = window.setInterval(load, 3000);
     });
     return () => {
       mounted = false;
       if (unlisten) unlisten();
-      if (fallbackTimer !== null) clearInterval(fallbackTimer);
+      if (pollingTimer !== null) clearInterval(pollingTimer);
     };
   }, []);
 
   const reversed = [...logs].reverse();
 
-  function copyLogs() {
+  async function copyLogs() {
     if (logs.length === 0) return;
     const text = reversed.map((log) => {
       const lines = [
@@ -61,25 +66,24 @@ export function LogWindowApp() {
       ];
       return lines.join("\n");
     }).join("\n\n");
-    void navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      setSafeTimeout(() => setCopied(false), 2000);
-    });
+    if (!(await writeClipboardText(text))) return;
+    if (!mountedRef.current) return;
+    setCopied(true);
+    setSafeTimeout(() => setCopied(false), 2000);
   }
 
-  function copySingleLog(log: ApiLogEntry, index: number) {
-    const lines = [
-      `时间: ${formatLogTime(log.timestamp)}`,
-      `状态: ${log.success ? "成功" : "失败"}`,
-      `类型: ${log.action}`,
-      `命令: ${log.detail}`,
-      `耗时: ${log.durationMs}ms`,
-      ...(log.response ? [`\n--- 响应 ---\n${log.response}`] : []),
-    ];
-    void navigator.clipboard.writeText(lines.join("\n")).then(() => {
-      setCopiedIndex(index);
-      setSafeTimeout(() => setCopiedIndex(null), 1500);
-    });
+  async function copySingleLog(log: ApiLogEntry) {
+    if (!(await writeClipboardText(formatLogDetail(log)))) return;
+    if (!mountedRef.current) return;
+    setCopiedKey(logKey(log));
+    setSafeTimeout(() => setCopiedKey(null), 1500);
+  }
+
+  async function copySelectedLog(log: ApiLogEntry) {
+    if (!(await writeClipboardText(formatLogDetail(log)))) return;
+    if (!mountedRef.current) return;
+    setDetailCopied(true);
+    setSafeTimeout(() => setDetailCopied(false), 1500);
   }
 
   function handleClick(log: ApiLogEntry) {
@@ -99,7 +103,7 @@ export function LogWindowApp() {
                 type="text"
                 icon={copied ? <CheckOutlined style={{ color: "#10b981" }} /> : <CopyOutlined />}
                 disabled={logs.length === 0}
-                onClick={copyLogs}
+                onClick={() => void copyLogs()}
               />
             </Tooltip>
           </div>
@@ -111,9 +115,11 @@ export function LogWindowApp() {
             </div>
           ) : (
             <div className="logWindowList">
-              {reversed.map((log, i) => (
+              {reversed.map((log) => {
+                const key = logKey(log);
+                return (
                 <div
-                  key={i}
+                  key={key}
                   className={`aiApiLogItem aiApiLogItem-${log.success ? "ok" : "err"}`}
                   onClick={() => handleClick(log)}
                   style={{ cursor: "pointer" }}
@@ -123,17 +129,18 @@ export function LogWindowApp() {
                   <span className="aiApiLogDetail">{log.detail}</span>
                   <span className="aiApiLogDuration">{log.durationMs}ms</span>
                   <span
-                    className={`aiApiLogCopy${copiedIndex === i ? " aiApiLogCopy-done" : ""}`}
+                    className={`aiApiLogCopy${copiedKey === key ? " aiApiLogCopy-done" : ""}`}
                     role="button"
                     tabIndex={0}
                     title="复制此条"
-                    onClick={(e) => { e.stopPropagation(); copySingleLog(log, i); }}
-                    onKeyDown={(e) => { if (e.key === "Enter") copySingleLog(log, i); }}
+                    onClick={(e) => { e.stopPropagation(); void copySingleLog(log); }}
+                    onKeyDown={(e) => { if (e.key === "Enter") void copySingleLog(log); }}
                   >
-                    {copiedIndex === i ? <CheckOutlined /> : <CopyOutlined />}
+                    {copiedKey === key ? <CheckOutlined /> : <CopyOutlined />}
                   </span>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
           {selectedLog && (
@@ -161,20 +168,7 @@ export function LogWindowApp() {
                       tabIndex={0}
                       title="复制此条"
                       style={{ opacity: 1 }}
-                      onClick={() => {
-                        const lines = [
-                          `时间: ${formatLogTime(selectedLog.timestamp)}`,
-                          `状态: ${selectedLog.success ? "成功" : "失败"}`,
-                          `类型: ${selectedLog.action}`,
-                          `命令: ${selectedLog.detail}`,
-                          `耗时: ${selectedLog.durationMs}ms`,
-                          ...(selectedLog.response ? [`\n--- 响应 ---\n${selectedLog.response}`] : []),
-                        ];
-                        void navigator.clipboard.writeText(lines.join("\n")).then(() => {
-                          setDetailCopied(true);
-                          setSafeTimeout(() => setDetailCopied(false), 1500);
-                        });
-                      }}
+                      onClick={() => void copySelectedLog(selectedLog)}
                       onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.click(); }}
                     >
                       {detailCopied ? <CheckOutlined /> : <CopyOutlined />}
@@ -204,19 +198,21 @@ export function LogWindowApp() {
   );
 }
 
-/** 将 UTC 时间戳转为北京时间，格式：05-14 15:40:43 */
 function formatLogTime(timestamp: string): string {
-  // 后端格式: "2025-05-14 07:40:43" (UTC)
-  // 加 Z 后缀让 Date 识别为 UTC
-  const normalized = timestamp.includes("T") || timestamp.includes("Z") ? timestamp : timestamp + "Z";
-  const date = new Date(normalized);
-  if (Number.isNaN(date.getTime())) return timestamp;
-  // 转北京时间 (UTC+8)
-  const bjt = new Date(date.getTime() + 8 * 60 * 60 * 1000);
-  const mm = String(bjt.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(bjt.getUTCDate()).padStart(2, "0");
-  const hh = String(bjt.getUTCHours()).padStart(2, "0");
-  const mi = String(bjt.getUTCMinutes()).padStart(2, "0");
-  const ss = String(bjt.getUTCSeconds()).padStart(2, "0");
-  return `${mm}-${dd} ${hh}:${mi}:${ss}`;
+  return formatBeijingMonthDayTime(timestamp, timestamp, true);
+}
+
+function formatLogDetail(log: ApiLogEntry) {
+  return [
+    `时间: ${formatLogTime(log.timestamp)}`,
+    `状态: ${log.success ? "成功" : "失败"}`,
+    `类型: ${log.action}`,
+    `命令: ${log.detail}`,
+    `耗时: ${log.durationMs}ms`,
+    ...(log.response ? [`\n--- 响应 ---\n${log.response}`] : []),
+  ].join("\n");
+}
+
+function logKey(log: ApiLogEntry) {
+  return `${log.timestamp}|${log.action}|${log.durationMs}|${log.success ? 1 : 0}|${log.detail}`;
 }

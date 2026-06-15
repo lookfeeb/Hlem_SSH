@@ -83,16 +83,27 @@ export function ConnectionSidebar({
     }
 
     const groupIds = new Set(groups.map((group) => group.id));
+    const sessionsByGroup = new Map<string, RemoteSession[]>();
+    const ungroupedSessions: RemoteSession[] = [];
+    for (const session of matchedSessions) {
+      if (session.groupId && groupIds.has(session.groupId)) {
+        const groupedSessions = sessionsByGroup.get(session.groupId) ?? [];
+        groupedSessions.push(session);
+        sessionsByGroup.set(session.groupId, groupedSessions);
+      } else {
+        ungroupedSessions.push(session);
+      }
+    }
     const grouped = [...groups]
       .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
       .map((group) => ({
         id: group.id,
         name: group.name || "未命名分组",
-        sessions: sortSessionList(matchedSessions.filter((session) => session.groupId === group.id)),
+        sessions: sortSessionList(sessionsByGroup.get(group.id) ?? []),
       }))
       .filter((section) => section.sessions.length > 0);
 
-    const ungrouped = sortSessionList(matchedSessions.filter((session) => !session.groupId || !groupIds.has(session.groupId)));
+    const ungrouped = sortSessionList(ungroupedSessions);
     if (ungrouped.length > 0) {
       grouped.unshift({ id: "ungrouped", name: "我的主机", sessions: ungrouped });
     }

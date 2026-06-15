@@ -50,8 +50,6 @@ pub struct ApiServerState {
     pub allowed_session_ids: Arc<StdRwLock<Vec<String>>>,
     pub allowed_session_names: Arc<StdRwLock<Vec<(String, String)>>>,
     pub logs: Arc<RwLock<Vec<ApiLogEntry>>>,
-    #[allow(dead_code)]
-    pub log_file: PathBuf,
     pub log_dirty: Arc<Notify>,
 }
 
@@ -78,6 +76,7 @@ pub struct ApiServerInfo {
 pub struct ApiServerHandle {
     shutdown_tx: watch::Sender<bool>,
     server_task: JoinHandle<()>,
+    log_task: JoinHandle<()>,
     pub port: u16,
     pub api_key: String,
     pub allowed_session_ids: Arc<StdRwLock<Vec<String>>>,
@@ -86,21 +85,28 @@ pub struct ApiServerHandle {
     pub logs: Arc<RwLock<Vec<ApiLogEntry>>>,
 }
 
+pub struct ApiServerStartOptions {
+    pub app: AppHandle,
+    pub remote: RemoteRuntime,
+    pub vault: Arc<Mutex<VaultStore>>,
+    pub port: u16,
+    pub api_key: String,
+    pub allowed_session_ids: Vec<String>,
+    pub allowed_session_names: Vec<(String, String)>,
+    pub log_file: PathBuf,
+}
+
 impl ApiServerHandle {
     pub fn is_finished(&self) -> bool {
         self.server_task.is_finished()
     }
 
     pub async fn shutdown(self) {
-        let _ = self.shutdown_tx.send(true);
-        let mut server_task = self.server_task;
-        if timeout(SERVER_SHUTDOWN_TIMEOUT, &mut server_task)
-            .await
-            .is_err()
-        {
-            server_task.abort();
-            let _ = server_task.await;
+        if let Err(error) = self.shutdown_tx.send(true) {
+            eprintln!("[helm] failed to signal API server shutdown: {error}");
         }
+        shutdown_task(self.server_task, "API server").await;
+        shutdown_task(self.log_task, "API log flusher").await;
     }
 
     pub fn update_allowed_sessions(
@@ -134,14 +140,30 @@ impl ApiServerHandle {
     }
 }
 
+async fn shutdown_task(mut task: JoinHandle<()>, label: &str) {
+    match timeout(SERVER_SHUTDOWN_TIMEOUT, &mut task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error.is_cancelled() => {}
+        Ok(Err(error)) => eprintln!("[helm] {label} task failed during shutdown: {error}"),
+        Err(_) => {
+            task.abort();
+            if let Err(error) = task.await {
+                if !error.is_cancelled() {
+                    eprintln!("[helm] {label} task failed after abort: {error}");
+                }
+            }
+        }
+    }
+}
+
 #[derive(Serialize)]
-pub(self) struct ApiError {
+struct ApiError {
     error: String,
 }
 
 // ─── Shared helpers (used by handler sub-modules) ──────────────────────────────
 
-pub(self) async fn push_log(
+async fn push_log(
     state: &ApiServerState,
     action: &str,
     detail: &str,
@@ -151,7 +173,7 @@ pub(self) async fn push_log(
     push_log_with_response(state, action, detail, success, duration_ms, None).await;
 }
 
-pub(self) async fn push_log_with_response(
+async fn push_log_with_response(
     state: &ApiServerState,
     action: &str,
     detail: &str,
@@ -175,18 +197,29 @@ pub(self) async fn push_log_with_response(
             logs.drain(0..remove_count);
         }
     }
-    let _ = state.app.emit(app_events::API_LOG, &entry);
+    if let Err(error) = state.app.emit(app_events::API_LOG, &entry) {
+        eprintln!("[helm] failed to emit api log event: {error}");
+    }
     state.log_dirty.notify_one();
 }
 
-fn load_logs_from_file(path: &PathBuf) -> Vec<ApiLogEntry> {
-    match std::fs::read_to_string(path) {
+async fn load_logs_from_file(path: &PathBuf) -> Vec<ApiLogEntry> {
+    match tokio::fs::read_to_string(path).await {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
         Err(_) => Vec::new(),
     }
 }
 
-pub(self) fn map_remote_error(e: String, state: &ApiServerState) -> (StatusCode, Json<ApiError>) {
+async fn flush_logs_to_file(logs: &Arc<RwLock<Vec<ApiLogEntry>>>, path: &PathBuf) {
+    let snapshot = logs.read().await.clone();
+    if let Ok(json) = serde_json::to_string(&snapshot) {
+        if let Err(error) = tokio::fs::write(path, json).await {
+            eprintln!("[helm] failed to flush api logs: {error}");
+        }
+    }
+}
+
+fn map_remote_error(e: String, state: &ApiServerState) -> (StatusCode, Json<ApiError>) {
     if e.contains("未连接") {
         let allowed_session_names = allowed_session_names_snapshot(state);
         let display_name = if allowed_session_names.is_empty() {
@@ -215,7 +248,7 @@ pub(self) fn map_remote_error(e: String, state: &ApiServerState) -> (StatusCode,
     }
 }
 
-pub(self) fn friendly_error_detail(detail: &str, state: &ApiServerState) -> String {
+fn friendly_error_detail(detail: &str, state: &ApiServerState) -> String {
     let mut output = detail.to_string();
     for (sid, name) in allowed_session_names_snapshot(state) {
         output = output.replace(sid.as_str(), name.as_str());
@@ -223,7 +256,7 @@ pub(self) fn friendly_error_detail(detail: &str, state: &ApiServerState) -> Stri
     output
 }
 
-pub(self) fn allowed_session_ids_snapshot(state: &ApiServerState) -> Vec<String> {
+fn allowed_session_ids_snapshot(state: &ApiServerState) -> Vec<String> {
     state
         .allowed_session_ids
         .read()
@@ -231,7 +264,7 @@ pub(self) fn allowed_session_ids_snapshot(state: &ApiServerState) -> Vec<String>
         .unwrap_or_default()
 }
 
-pub(self) fn allowed_session_names_snapshot(state: &ApiServerState) -> Vec<(String, String)> {
+fn allowed_session_names_snapshot(state: &ApiServerState) -> Vec<(String, String)> {
     state
         .allowed_session_names
         .read()
@@ -239,7 +272,7 @@ pub(self) fn allowed_session_names_snapshot(state: &ApiServerState) -> Vec<(Stri
         .unwrap_or_default()
 }
 
-pub(self) fn truncate_for_log(value: &str, max_chars: usize) -> String {
+fn truncate_for_log(value: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for (idx, ch) in value.chars().enumerate() {
         if idx >= max_chars {
@@ -251,23 +284,24 @@ pub(self) fn truncate_for_log(value: &str, max_chars: usize) -> String {
     out
 }
 
-pub(self) fn take_chars(value: &str, max_chars: usize) -> String {
+fn take_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
 // ─── Server startup ────────────────────────────────────────────────────────────
 
-pub async fn start_server(
-    app: AppHandle,
-    remote: RemoteRuntime,
-    vault: Arc<Mutex<VaultStore>>,
-    port: u16,
-    api_key: String,
-    allowed_session_ids: Vec<String>,
-    allowed_session_names: Vec<(String, String)>,
-    log_file: PathBuf,
-) -> Result<ApiServerHandle, String> {
-    let existing_logs = load_logs_from_file(&log_file);
+pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHandle, String> {
+    let ApiServerStartOptions {
+        app,
+        remote,
+        vault,
+        port,
+        api_key,
+        allowed_session_ids,
+        allowed_session_names,
+        log_file,
+    } = options;
+    let existing_logs = load_logs_from_file(&log_file).await;
     let logs = Arc::new(RwLock::new(existing_logs));
     let log_dirty = Arc::new(Notify::new());
     let allowed_session_ids = Arc::new(StdRwLock::new(allowed_session_ids));
@@ -280,7 +314,6 @@ pub async fn start_server(
         allowed_session_ids: allowed_session_ids.clone(),
         allowed_session_names: allowed_session_names.clone(),
         logs: logs.clone(),
-        log_file: log_file.clone(),
         log_dirty: log_dirty.clone(),
     };
 
@@ -375,8 +408,7 @@ pub async fn start_server(
 
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-    // Background log flusher
-    {
+    let log_task = {
         let logs_for_flusher = logs.clone();
         let log_file_for_flusher = log_file.clone();
         let dirty = log_dirty.clone();
@@ -386,27 +418,21 @@ pub async fn start_server(
                 tokio::select! {
                     _ = dirty.notified() => {
                         tokio::time::sleep(LOG_FLUSH_DEBOUNCE).await;
-                        let snapshot = logs_for_flusher.read().await.clone();
-                        if let Ok(json) = serde_json::to_string(&snapshot) {
-                            let _ = tokio::fs::write(&log_file_for_flusher, json).await;
-                        }
+                        flush_logs_to_file(&logs_for_flusher, &log_file_for_flusher).await;
                     }
                     _ = flusher_shutdown.changed() => {
                         if *flusher_shutdown.borrow_and_update() {
-                            let snapshot = logs_for_flusher.read().await.clone();
-                            if let Ok(json) = serde_json::to_string(&snapshot) {
-                                let _ = tokio::fs::write(&log_file_for_flusher, json).await;
-                            }
+                            flush_logs_to_file(&logs_for_flusher, &log_file_for_flusher).await;
                             break;
                         }
                     }
                 }
             }
-        });
-    }
+        })
+    };
 
     let server_task = tokio::spawn(async move {
-        axum::serve(listener, app_router)
+        if let Err(error) = axum::serve(listener, app_router)
             .with_graceful_shutdown(async move {
                 while !*shutdown_rx.borrow_and_update() {
                     if shutdown_rx.changed().await.is_err() {
@@ -415,12 +441,15 @@ pub async fn start_server(
                 }
             })
             .await
-            .ok();
+        {
+            eprintln!("[helm] api server stopped with error: {error}");
+        }
     });
 
     Ok(ApiServerHandle {
         shutdown_tx,
         server_task,
+        log_task,
         port: actual_port,
         api_key,
         allowed_session_ids,

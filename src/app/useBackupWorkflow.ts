@@ -23,7 +23,7 @@ export function useBackupWorkflow({
     try {
       await vaultApi.backupExport(path);
     } finally {
-      setBackupBusy(false);
+      if (mountedRef.current) setBackupBusy(false);
     }
   }
 
