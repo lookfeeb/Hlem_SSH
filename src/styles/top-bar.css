@@ -330,6 +330,13 @@
   color: #1d4ed8;
 }
 
+.sessionTab-active.sessionTab-disconnected,
+.sessionTab-active.sessionTab-disconnected:hover,
+.sessionTab-active.sessionTab-failed,
+.sessionTab-active.sessionTab-failed:hover {
+  color: #1e293b;
+}
+
 .sessionTab-connected {
   --session-state-color: #10b981;
   --session-state-bg: rgba(16, 185, 129, .14);

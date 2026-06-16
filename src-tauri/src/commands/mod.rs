@@ -47,7 +47,7 @@ pub use remote::{
     telemetry_snapshot, telemetry_start, telemetry_stop,
 };
 pub use sessions::{
-    group_create, group_delete, group_update, session_create, session_delete,
+    group_create, group_delete, group_update, session_clear_recent, session_create, session_delete,
     session_favorite_update, session_mark_recent, session_update, ssh_connect, ssh_disconnect,
     ssh_trust_host_key,
 };

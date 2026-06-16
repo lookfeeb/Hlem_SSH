@@ -465,6 +465,14 @@ function App() {
     }
   }
 
+  async function clearSessionRecent(sessionId: string) {
+    try {
+      applySnapshot(await vaultApi.sessionClearRecent(sessionId));
+    } catch (error) {
+      Modal.error({ title: "移除最近连接失败", content: getErrorMessage(error) });
+    }
+  }
+
   async function connectSessionWithRecent(session: RemoteSession) {
     void markSessionRecent(session.id);
     await connectSession(session);
@@ -548,6 +556,7 @@ function App() {
                       onCancelConnect={(id) => void cancelConnectingSession(id)}
                       onFavoriteChange={(id, favorite) => void updateSessionFavorite(id, favorite)}
                       onMarkRecent={(id) => void markSessionRecent(id)}
+                      onClearRecent={(id) => void clearSessionRecent(id)}
                     />
                     <section className="mainSurface">
                       <SplitPane
@@ -609,6 +618,7 @@ function App() {
                       onCancelConnect={(id) => void cancelConnectingSession(id)}
                       onFavoriteChange={(id, favorite) => void updateSessionFavorite(id, favorite)}
                       onMarkRecent={(id) => void markSessionRecent(id)}
+                      onClearRecent={(id) => void clearSessionRecent(id)}
                     />
                     <EmptyWorkspace
                       sessionCount={sessions.length}

@@ -24,6 +24,8 @@ export const vaultApi = {
     call<ConfigSnapshot>("session_favorite_update", { sessionId, favorite }),
   sessionMarkRecent: (sessionId: string) =>
     call<ConfigSnapshot>("session_mark_recent", { sessionId }),
+  sessionClearRecent: (sessionId: string) =>
+    call<ConfigSnapshot>("session_clear_recent", { sessionId }),
   sessionDelete: (sessionId: string) => call<ConfigSnapshot>("session_delete", { sessionId }),
   tunnelCreate: (input: TunnelInput) => call<ConfigSnapshot>("tunnel_create", { input }),
   tunnelUpdate: (tunnelId: string, input: TunnelInput) => call<ConfigSnapshot>("tunnel_update", { tunnelId, input }),

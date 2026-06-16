@@ -60,6 +60,14 @@ pub fn session_mark_recent(
 }
 
 #[tauri::command]
+pub fn session_clear_recent(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> AppResult<ConfigSnapshot> {
+    with_store(&state, |store| store.clear_session_recent(&session_id))
+}
+
+#[tauri::command]
 pub fn session_delete(state: State<'_, AppState>, session_id: String) -> AppResult<ConfigSnapshot> {
     with_store(&state, |store| store.delete_session(&session_id))
 }

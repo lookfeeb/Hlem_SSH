@@ -1,2 +1,4 @@
 {
+  "github-actions.remote-name": "origin",
+  "github-actions.use-enterprise": false
 }

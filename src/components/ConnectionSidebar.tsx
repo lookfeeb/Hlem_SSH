@@ -29,6 +29,7 @@ interface ConnectionSidebarProps {
   onCancelConnect: (id: string) => void;
   onFavoriteChange: (sessionId: string, favorite: boolean) => void;
   onMarkRecent: (sessionId: string) => void;
+  onClearRecent: (sessionId: string) => void;
 }
 
 type SessionSection = {
@@ -37,7 +38,7 @@ type SessionSection = {
   sessions: RemoteSession[];
 };
 
-const MAX_RECENT_SESSIONS = 5;
+const MAX_RECENT_SESSIONS = 10;
 
 export function ConnectionSidebar({
   sessions,
@@ -53,6 +54,7 @@ export function ConnectionSidebar({
   onCancelConnect,
   onFavoriteChange,
   onMarkRecent,
+  onClearRecent,
 }: ConnectionSidebarProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [collapsedSectionIds, setCollapsedSectionIds] = useState<Set<string>>(new Set());
@@ -148,6 +150,16 @@ export function ConnectionSidebar({
     });
   }
 
+  function confirmClearRecent(session: RemoteSession) {
+    Modal.confirm({
+      title: "移除最近连接",
+      content: `确定将「${session.name}」从最近连接中移除吗？`,
+      okText: "移除",
+      cancelText: "取消",
+      onOk: () => onClearRecent(session.id),
+    });
+  }
+
   return (
     <aside className="connectionSidebar">
       <div className="connectionSidebarHeader">
@@ -195,6 +207,7 @@ export function ConnectionSidebar({
                       const connecting = state === "connecting";
                       const active = session.id === activeSessionId;
                       const favorite = session.favorite;
+                      const recentSection = section.id === "recent";
 
                       return (
                         <div
@@ -261,15 +274,19 @@ export function ConnectionSidebar({
                                 }}
                               />
                             </Tooltip>
-                            <Tooltip title="删除">
+                            <Tooltip title={recentSection ? "从最近连接移除" : "删除"}>
                               <Button
-                                aria-label={`删除 ${session.name}`}
+                                aria-label={recentSection ? `从最近连接移除 ${session.name}` : `删除 ${session.name}`}
                                 icon={<DeleteOutlined />}
                                 size="small"
-                                danger
+                                danger={!recentSection}
                                 onClick={(event) => {
                                   event.stopPropagation();
-                                  confirmDelete(session);
+                                  if (recentSection) {
+                                    confirmClearRecent(session);
+                                  } else {
+                                    confirmDelete(session);
+                                  }
                                 }}
                               />
                             </Tooltip>
