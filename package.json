@@ -1,7 +1,7 @@
 {
   "name": "helm",
   "private": true,
-  "version": "0.0.41",
+  "version": "0.0.42",
   "type": "module",
   "scripts": {
     "predev": "cargo run --quiet --release --manifest-path tools/free-port/Cargo.toml",

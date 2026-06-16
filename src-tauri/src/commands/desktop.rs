@@ -667,8 +667,9 @@ Start-Sleep -Milliseconds 800
 Get-Process -Name $processName -ErrorAction SilentlyContinue |
   Where-Object {{ $_.Id -ne $PID }} |
   Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Process -FilePath $installer -ArgumentList '/S' -Wait
-"#
+Start-Process -FilePath $installer -ArgumentList '{installer_args}' -Wait
+"#,
+            installer_args = windows_update_installer_args().replace('\'', "''")
         );
         let encoded = general_purpose::STANDARD.encode(
             script
@@ -701,6 +702,11 @@ Start-Process -FilePath $installer -ArgumentList '/S' -Wait
             .map_err(|error| AppError::Io(error.to_string()))?;
         Ok(())
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_update_installer_args() -> &'static str {
+    "/S /R"
 }
 
 fn validate_http_url(value: &str) -> AppResult<&str> {
@@ -943,5 +949,13 @@ mod tests {
         let verified = verify_manifest_signature("manifest", &invalid_signature, &public_key)
             .expect("verification result");
         assert!(!verified);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_update_installer_args_restart_after_silent_install() {
+        let args = windows_update_installer_args();
+        assert!(args.split_whitespace().any(|arg| arg.eq_ignore_ascii_case("/S")));
+        assert!(args.split_whitespace().any(|arg| arg.eq_ignore_ascii_case("/R")));
     }
 }

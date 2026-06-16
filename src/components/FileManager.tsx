@@ -103,12 +103,16 @@ const baseColumns: ColumnsType<RemoteFileEntry> = [
 const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   name: 260,
   size: 88,
-  type: 80,
+  type: 98,
   modifiedAt: 190,
   permissions: 112,
   owner: 96,
 };
 const MIN_COLUMN_WIDTH = 64;
+const TYPE_COLUMN_MIN_WIDTH = 98;
+const TYPE_COLUMN_MAX_WIDTH = 150;
+const TYPE_COLUMN_LABEL_MIN_CHARS = 5;
+const TYPE_COLUMN_CELL_CHROME = 34;
 
 const COLUMN_WIDTHS_KEY = "helm:fileColumnWidths";
 
@@ -121,9 +125,23 @@ function normalizeColumnWidths(value: unknown): Record<string, number> {
   if (!value || typeof value !== "object") return widths;
   for (const [key, rawWidth] of Object.entries(value)) {
     if (!(key in DEFAULT_COLUMN_WIDTHS) || typeof rawWidth !== "number" || !Number.isFinite(rawWidth)) continue;
-    widths[key] = Math.max(MIN_COLUMN_WIDTH, rawWidth);
+    widths[key] = Math.max(columnMinWidth(key), rawWidth);
   }
   return widths;
+}
+
+function columnMinWidth(key: string) {
+  return key === "type" ? TYPE_COLUMN_MIN_WIDTH : MIN_COLUMN_WIDTH;
+}
+
+function typeLabelTextWidth(label: string) {
+  return Array.from(label).reduce((sum, char) => sum + (char.charCodeAt(0) <= 0x7f ? 7 : 13), 0);
+}
+
+function autoTypeColumnWidth(entries: RemoteFileEntry[]) {
+  const minLabelWidth = TYPE_COLUMN_LABEL_MIN_CHARS * 13;
+  const labelWidth = entries.reduce((max, entry) => Math.max(max, typeLabelTextWidth(fileCategoryMeta(entry).label)), minLabelWidth);
+  return Math.min(TYPE_COLUMN_MAX_WIDTH, Math.max(TYPE_COLUMN_MIN_WIDTH, Math.ceil(labelWidth + TYPE_COLUMN_CELL_CHROME)));
 }
 
 let inMemoryColumnWidths: Record<string, number> = loadColumnWidths();
@@ -221,6 +239,7 @@ export function FileManager({
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => ({ ...inMemoryColumnWidths }));
   const [tableSurfaceWidth, setTableSurfaceWidth] = useState(0);
   const columnWidthsRef = useRef(columnWidths);
+  const effectiveColumnWidthsRef = useRef(columnWidths);
   const mountedRef = useMountedRef();
   useEffect(() => {
     columnWidthsRef.current = columnWidths;
@@ -242,6 +261,16 @@ export function FileManager({
     () => (lowerSearchText ? allFiles.filter((f) => f.name.toLowerCase().includes(lowerSearchText)) : allFiles),
     [allFiles, lowerSearchText],
   );
+  const effectiveColumnWidths = useMemo<Record<string, number>>(
+    () => ({
+      ...columnWidths,
+      type: Math.max(columnWidths.type ?? DEFAULT_COLUMN_WIDTHS.type, autoTypeColumnWidth(files)),
+    }),
+    [columnWidths, files],
+  );
+  useEffect(() => {
+    effectiveColumnWidthsRef.current = effectiveColumnWidths;
+  }, [effectiveColumnWidths]);
   const filesMatchCurrentPath = filesBelongToDirectory(allFiles, path);
   const directoryChanging = canUseFiles && (filesLoading || !filesMatchCurrentPath);
   const tableLoading = searching || refreshing || directoryChanging;
@@ -255,9 +284,9 @@ export function FileManager({
 
   const handleColumnResizeStart = useCallback((key: string, startX: number) => {
     columnResizeCleanupRef.current?.();
-    const startWidth = columnWidthsRef.current[key] ?? DEFAULT_COLUMN_WIDTHS[key] ?? 100;
+    const startWidth = effectiveColumnWidthsRef.current[key] ?? columnWidthsRef.current[key] ?? DEFAULT_COLUMN_WIDTHS[key] ?? 100;
     function onMove(event: MouseEvent) {
-      const next = Math.max(MIN_COLUMN_WIDTH, Math.round(startWidth + event.clientX - startX));
+      const next = Math.max(columnMinWidth(key), Math.round(startWidth + event.clientX - startX));
       setColumnWidths((prev) => (prev[key] === next ? prev : { ...prev, [key]: next }));
     }
     const cleanup = () => {
@@ -283,7 +312,7 @@ export function FileManager({
         };
         const col = {
           ...column,
-          width: columnWidths[key] ?? DEFAULT_COLUMN_WIDTHS[key],
+          width: effectiveColumnWidths[key] ?? DEFAULT_COLUMN_WIDTHS[key],
           onHeaderCell: () => headerCellProps,
         };
         if (key === "name") {
@@ -297,12 +326,12 @@ export function FileManager({
         }
         return col;
       }),
-    [columnWidths, handleColumnResizeStart, path],
+    [effectiveColumnWidths, handleColumnResizeStart, path],
   );
 
   const tableColumnWidth = useMemo(
-    () => 48 + Object.keys(DEFAULT_COLUMN_WIDTHS).reduce((sum, key) => sum + (columnWidths[key] ?? DEFAULT_COLUMN_WIDTHS[key]), 0),
-    [columnWidths],
+    () => 48 + Object.keys(DEFAULT_COLUMN_WIDTHS).reduce((sum, key) => sum + (effectiveColumnWidths[key] ?? DEFAULT_COLUMN_WIDTHS[key]), 0),
+    [effectiveColumnWidths],
   );
   const tableScrollX = useMemo(
     () => Math.max(tableColumnWidth, tableSurfaceWidth > 0 ? Math.ceil(tableSurfaceWidth) + 12 : 0),
