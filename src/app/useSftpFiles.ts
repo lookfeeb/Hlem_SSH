@@ -2,7 +2,7 @@ import { useRef, type MutableRefObject } from "react";
 import { appApi } from "../api/appApi";
 import { remoteApi } from "../api/remoteApi";
 import type { FileOperation } from "../components/FileManager";
-import { defaultRemoteHomePath, getErrorMessage, initialRemotePath } from "../lib/configMapping";
+import { defaultRemoteHomePath, getErrorMessage } from "../lib/configMapping";
 import { getParentPath as getRemoteParentPath, joinPath as joinRemotePath, normalizePath as normalizeRemotePath } from "../lib/path";
 import { useMountedRef } from "../lib/reactLifecycle";
 import {
@@ -50,7 +50,7 @@ export function useSftpFiles({
   const lastDownloadDirRef = useRef("");
   const mountedRef = useMountedRef();
 
-  async function openSftpWithFiles(connectionId: string, initialPath: string, username: string): Promise<OpenSftpResult> {
+  async function openSftpWithFiles(connectionId: string, initialPath: string, username: string, loginPath?: string | null): Promise<OpenSftpResult> {
     let sftp: { sftpId: string } | null = null;
     try {
       sftp = await remoteApi.openSftp(connectionId);
@@ -58,7 +58,7 @@ export function useSftpFiles({
         const files = await listFiles(sftp.sftpId, initialPath);
         return { sftp, path: initialPath, files, error: null };
       } catch (error) {
-        const homePath = defaultRemoteHomePath(username);
+        const homePath = loginPath ? normalizeRemotePath(loginPath) : defaultRemoteHomePath(username);
         if (normalizeRemotePath(initialPath) === homePath) throw error;
         const files = await listFiles(sftp.sftpId, homePath);
         return { sftp, path: homePath, files, error: null };
@@ -99,8 +99,9 @@ export function useSftpFiles({
 
       const sftpResult = await openSftpWithFiles(
         session.connectionId,
-        initialRemotePath(session.username, session.currentPath),
+        remoteSessionPath(session),
         session.username,
+        session.loginPath,
       );
       if (!sftpResult.sftp) {
         throw new Error(`SFTP 不可用：${sftpUnavailableMessage(sftpResult.error)}`);

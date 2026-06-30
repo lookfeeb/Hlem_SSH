@@ -55,6 +55,9 @@ export type FileOperation =
   | { kind: "deleteMany"; sourcePaths: string[] };
 
 type ContextMenuState = { entry: RemoteFileEntry; x: number; y: number };
+type DetachedEditorTabPayload = { path: string; content: string; sessionId: string; sessionName: string };
+
+const DETACHED_EDITOR_WINDOW_LABEL = "editor-global";
 
 const baseColumns: ColumnsType<RemoteFileEntry> = [
   {
@@ -171,10 +174,6 @@ function ResizableHeaderCell({ columnKey, onStartResize, children, ...rest }: Re
   );
 }
 
-function firstDetachedEditorChannel(channels: Map<string, BroadcastChannel>): BroadcastChannel | null {
-  return channels.values().next().value ?? null;
-}
-
 function droppedFilePaths(files: FileList): string[] {
   return Array.from(files).flatMap((file) => {
     const path = "path" in file && typeof file.path === "string" ? file.path : "";
@@ -251,6 +250,7 @@ export function FileManager({
   const searchSeq = useRef(0);
   const directoryExpandedKeysRef = useRef<string[]>(["/"]);
   const detachedEditorsRef = useRef<Map<string, BroadcastChannel>>(new Map());
+  const detachedEditorWindowRef = useRef<Window | null>(null);
   const columnResizeCleanupRef = useRef<(() => void) | null>(null);
   const path = normalizePath(session.currentPath);
   const canUseFiles = session.state === "connected" && Boolean(session.sftpId);
@@ -339,6 +339,48 @@ export function FileManager({
   );
   const selectedRowKeySet = useMemo(() => new Set(selectedRowKeys), [selectedRowKeys]);
 
+  function closeDetachedEditorChannel(channel?: BroadcastChannel) {
+    const current = detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME);
+    if (channel && current !== channel) return;
+    const target = channel ?? current;
+    if (!target) return;
+    target.close();
+    detachedEditorsRef.current.delete(EDITOR_CHANNEL_NAME);
+    detachedEditorWindowRef.current = null;
+  }
+
+  function createDetachedEditorChannel(initialTab: DetachedEditorTabPayload) {
+    const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
+    detachedEditorsRef.current.set(EDITOR_CHANNEL_NAME, channel);
+    channel.onmessage = (event: MessageEvent<EditorChannelMessage>) => {
+      const payload = event.data;
+      if (payload.type === "ready") {
+        postEditorMessage(channel, { type: "init", ...initialTab });
+      }
+      if (payload.type === "save") {
+        void onWriteText(payload.path, payload.content, payload.sessionId)
+          .then(() => {
+            if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
+              postEditorMessage(channel, { type: "saved", path: payload.path, sessionId: payload.sessionId });
+            }
+          })
+          .catch((error) => {
+            if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
+              postEditorMessage(channel, { type: "error", message: getErrorMessage(error), path: payload.path, sessionId: payload.sessionId });
+            }
+          });
+      }
+      if (payload.type === "close") {
+        closeDetachedEditorChannel(channel);
+      }
+    };
+    return channel;
+  }
+
+  function getOrCreateDetachedEditorChannel(initialTab: DetachedEditorTabPayload) {
+    return detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) ?? createDetachedEditorChannel(initialTab);
+  }
+
   useEffect(() => {
     directoryExpandedKeysRef.current = directoryExpandedKeys;
   }, [directoryExpandedKeys]);
@@ -349,6 +391,7 @@ export function FileManager({
       columnResizeCleanupRef.current = null;
       detachedEditorsRef.current.forEach((channel) => channel.close());
       detachedEditorsRef.current.clear();
+      detachedEditorWindowRef.current = null;
     };
   }, []);
 
@@ -517,50 +560,15 @@ export function FileManager({
       const content = await onReadText(targetPath, sessionId);
       if (!mountedRef.current) return;
 
-      const existingChannel = firstDetachedEditorChannel(detachedEditorsRef.current);
-      if (existingChannel) {
-        if (postEditorMessage(existingChannel, { type: "addTab", path: targetPath, content, sessionId, sessionName })) {
-          message.destroy(messageKey);
-          return;
-        }
-        existingChannel.close();
-        detachedEditorsRef.current.delete(EDITOR_CHANNEL_NAME);
-      }
-
-      const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
-      createdChannel = channel;
-      detachedEditorsRef.current.set(EDITOR_CHANNEL_NAME, channel);
-      channel.onmessage = (event: MessageEvent<EditorChannelMessage>) => {
-        const payload = event.data;
-        if (payload.type === "ready") {
-          postEditorMessage(channel, { type: "init", path: targetPath, content, sessionId, sessionName });
-        }
-        if (payload.type === "save") {
-          void onWriteText(payload.path, payload.content, payload.sessionId)
-            .then(() => {
-              if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
-                postEditorMessage(channel, { type: "saved", path: payload.path, sessionId: payload.sessionId });
-              }
-            })
-            .catch((error) => {
-              if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
-                postEditorMessage(channel, { type: "error", message: getErrorMessage(error), path: payload.path, sessionId: payload.sessionId });
-              }
-            });
-        }
-        if (payload.type === "close") {
-          channel.close();
-          detachedEditorsRef.current.delete(EDITOR_CHANNEL_NAME);
-        }
-      };
+      const initialTab = { path: targetPath, content, sessionId, sessionName };
 
       if (isTauriRuntime()) {
         const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
         if (!mountedRef.current) return;
-        const windowLabel = `editor-global`;
-        const existingWindow = await WebviewWindow.getByLabel(windowLabel);
+        const existingWindow = await WebviewWindow.getByLabel(DETACHED_EDITOR_WINDOW_LABEL);
         if (!mountedRef.current) return;
         if (existingWindow) {
+          const channel = getOrCreateDetachedEditorChannel(initialTab);
           postEditorMessage(channel, { type: "addTab", path: targetPath, content, sessionId, sessionName });
           try {
             await existingWindow.setFocus();
@@ -570,7 +578,11 @@ export function FileManager({
           if (mountedRef.current) message.destroy(messageKey);
           return;
         }
-        const webview = new WebviewWindow(windowLabel, {
+
+        closeDetachedEditorChannel();
+        const channel = createDetachedEditorChannel(initialTab);
+        createdChannel = channel;
+        const webview = new WebviewWindow(DETACHED_EDITOR_WINDOW_LABEL, {
           url: `index.html?editorWindow=${encodeURIComponent(EDITOR_CHANNEL_NAME)}`,
           title: `文件编辑器`,
           width: 1100,
@@ -579,21 +591,44 @@ export function FileManager({
           minHeight: 520,
           resizable: true,
         });
-        await webview.once("tauri://error", (event) => {
-          if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
-            channel.close();
-            detachedEditorsRef.current.delete(EDITOR_CHANNEL_NAME);
-          }
-          if (mountedRef.current) message.error(getErrorMessage(event.payload));
-        });
+        await Promise.all([
+          webview.once("tauri://error", (event) => {
+            closeDetachedEditorChannel(channel);
+            if (mountedRef.current) message.error(getErrorMessage(event.payload));
+          }),
+          webview.once("tauri://destroyed", () => {
+            closeDetachedEditorChannel(channel);
+          }),
+        ]);
       } else {
-        window.open(`${window.location.origin}${window.location.pathname}?editorWindow=${encodeURIComponent(EDITOR_CHANNEL_NAME)}`, `editor-global`, "width=1100,height=760");
+        const existingWindow = detachedEditorWindowRef.current;
+        if (existingWindow?.closed) {
+          closeDetachedEditorChannel();
+        } else if (existingWindow) {
+          const channel = getOrCreateDetachedEditorChannel(initialTab);
+          postEditorMessage(channel, { type: "addTab", path: targetPath, content, sessionId, sessionName });
+          try {
+            existingWindow.focus();
+          } catch (error) {
+            console.warn("[helm] failed to focus editor window:", getErrorMessage(error));
+          }
+          if (mountedRef.current) message.destroy(messageKey);
+          return;
+        }
+
+        closeDetachedEditorChannel();
+        const channel = createDetachedEditorChannel(initialTab);
+        createdChannel = channel;
+        const editorWindow = window.open(`${window.location.origin}${window.location.pathname}?editorWindow=${encodeURIComponent(EDITOR_CHANNEL_NAME)}`, DETACHED_EDITOR_WINDOW_LABEL, "width=1100,height=760");
+        if (!editorWindow) {
+          throw new Error("无法打开编辑器窗口，请检查弹窗拦截设置");
+        }
+        detachedEditorWindowRef.current = editorWindow;
       }
       if (mountedRef.current) message.destroy(messageKey);
     } catch (error) {
       if (createdChannel && detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === createdChannel) {
-        createdChannel.close();
-        detachedEditorsRef.current.delete(EDITOR_CHANNEL_NAME);
+        closeDetachedEditorChannel(createdChannel);
       }
       if (mountedRef.current) {
         message.open({ key: messageKey, type: "error", content: getErrorMessage(error), duration: 3 });

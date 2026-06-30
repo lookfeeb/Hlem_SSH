@@ -10,7 +10,19 @@ impl RemoteRuntime {
     {
         let app = app.clone();
         let this = self.clone();
-        Box::pin(async move { this.connect_inner(&app, session, trusted).await })
+        Box::pin(async move { this.connect_inner(&app, session, trusted, true).await })
+    }
+
+    pub fn connect_new(
+        &self,
+        app: &AppHandle,
+        session: SessionConfig,
+        trusted: Option<KnownHostEntry>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<ConnectionInfo>> + Send + '_>>
+    {
+        let app = app.clone();
+        let this = self.clone();
+        Box::pin(async move { this.connect_inner(&app, session, trusted, false).await })
     }
 
     async fn connect_inner(
@@ -18,11 +30,14 @@ impl RemoteRuntime {
         app: &AppHandle,
         session: SessionConfig,
         trusted: Option<KnownHostEntry>,
+        reuse_existing: bool,
     ) -> AppResult<ConnectionInfo> {
         let session_lock = self.connection_lock(&session.id).await;
         let _session_guard = session_lock.lock().await;
-        if let Some(existing) = self.find_connection_by_session(&session.id).await {
-            return Ok(existing.info);
+        if reuse_existing {
+            if let Some(existing) = self.find_connection_by_session(&session.id).await {
+                return Ok(existing.info);
+            }
         }
 
         let connection_id = Uuid::new_v4().to_string();

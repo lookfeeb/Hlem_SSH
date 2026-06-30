@@ -1,7 +1,8 @@
 import { FolderOutlined, LoadingOutlined } from "@ant-design/icons";
 import { Tree } from "antd";
+import type RcTree from "@rc-component/tree";
 import type { DataNode } from "antd/es/tree";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { comparePathName } from "../../lib/fileClassify";
 import { getParentPath, getPathSegments, joinPath, normalizePath } from "../../lib/path";
 import type { RemoteFileEntry } from "../../types";
@@ -27,10 +28,37 @@ export function DirectoryTree({
   onLoadDirectory,
   onExpandChange,
 }: DirectoryTreeProps) {
+  const treeRootRef = useRef<HTMLDivElement | null>(null);
+  const treeRef = useRef<RcTree | null>(null);
+  const normalizedPath = normalizePath(path);
   const treeData = useMemo(
-    () => buildTreeData(directoryEntries, path, new Set(directoryLoadingKeys)),
-    [directoryEntries, path],
+    () => buildTreeData(directoryEntries, normalizedPath, new Set(directoryLoadingKeys)),
+    [directoryEntries, normalizedPath, directoryLoadingKeys],
   );
+  const visibleTreeKeys = useMemo(
+    () => flattenVisibleTreeKeys(treeData, new Set(directoryExpandedKeys)),
+    [treeData, directoryExpandedKeys],
+  );
+  const currentTreeIndex = visibleTreeKeys.indexOf(normalizedPath);
+
+  useEffect(() => {
+    if (!canUseFiles || normalizedPath === "/" || currentTreeIndex < 0) return;
+    const scrollToCurrentPath = () => {
+      treeRef.current?.scrollTo({ index: currentTreeIndex, align: "top" });
+      scrollSelectedDirectoryIntoView(treeRootRef.current);
+    };
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      scrollToCurrentPath();
+      secondFrame = window.requestAnimationFrame(scrollToCurrentPath);
+    });
+    const retry = window.setTimeout(scrollToCurrentPath, 120);
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+      window.clearTimeout(retry);
+    };
+  }, [canUseFiles, currentTreeIndex, normalizedPath, treeData, directoryExpandedKeys]);
 
   if (!canUseFiles) {
     return (
@@ -44,10 +72,10 @@ export function DirectoryTree({
   }
 
   return (
-    <div className="pathTree">
+    <div className="pathTree" ref={treeRootRef}>
       <button
         type="button"
-        className={`pathTreeRoot${path === "/" ? " pathTreeRoot-selected" : ""}`}
+        className={`pathTreeRoot${normalizedPath === "/" ? " pathTreeRoot-selected" : ""}`}
         onClick={() => {
           onPathChange("/");
           onExpandChange(uniqueKeys(["/", ...directoryExpandedKeys]));
@@ -58,12 +86,13 @@ export function DirectoryTree({
         <span>/</span>
       </button>
       <Tree
+        ref={treeRef}
         className="pathTreeList"
         showIcon
         blockNode
         virtual
         expandAction={false}
-        selectedKeys={path === "/" ? [] : [path]}
+        selectedKeys={normalizedPath === "/" ? [] : [normalizedPath]}
         expandedKeys={directoryExpandedKeys}
         treeData={treeData}
         switcherIcon={({ isLeaf }) => (isLeaf ? null : <span className="pathTreeChevron" />)}
@@ -92,6 +121,33 @@ function buildTreeData(
   const rootChildren = buildDirectoryChildren("/", entriesByPath, normalizedCurrentPath, loadingKeys, new Set(["/"]));
   if (rootChildren.length > 0) return rootChildren;
   return [buildDirectoryNode("/", entriesByPath, normalizedCurrentPath, loadingKeys, new Set())];
+}
+
+function flattenVisibleTreeKeys(nodes: DataNode[], expandedKeys: Set<string>) {
+  const keys: string[] = [];
+  const walk = (items: DataNode[]) => {
+    for (const node of items) {
+      const key = String(node.key);
+      keys.push(key);
+      if (expandedKeys.has(key) && Array.isArray(node.children)) {
+        walk(node.children as DataNode[]);
+      }
+    }
+  };
+  walk(nodes);
+  return keys;
+}
+
+function scrollSelectedDirectoryIntoView(root: HTMLElement | null) {
+  const scrollContainer = root?.querySelector<HTMLElement>(".pathTreeList");
+  if (!scrollContainer) return;
+  const selectedContent = scrollContainer.querySelector<HTMLElement>(".ant-tree-node-selected");
+  const selectedNode = selectedContent?.closest<HTMLElement>(".ant-tree-treenode")
+    ?? scrollContainer.querySelector<HTMLElement>(".ant-tree-treenode-selected");
+  if (!selectedNode) return;
+  const containerRect = scrollContainer.getBoundingClientRect();
+  const nodeRect = selectedNode.getBoundingClientRect();
+  scrollContainer.scrollTop += nodeRect.top - containerRect.top - 6;
 }
 
 function buildDirectoryNode(

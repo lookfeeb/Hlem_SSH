@@ -2,6 +2,7 @@ export type ConnectionState = "connected" | "connecting" | "disconnected" | "fai
 
 export interface RemoteSession {
   id: string;
+  configId?: string | null;
   name: string;
   groupId?: string | null;
   host: string;
@@ -11,6 +12,7 @@ export interface RemoteSession {
   favorite: boolean;
   lastConnectedAt?: string | null;
   currentPath: string;
+  loginPath?: string | null;
   connectionId?: string | null;
   connectedAt?: string | null;
   sshVersion?: string | null;

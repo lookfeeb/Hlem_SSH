@@ -7,6 +7,7 @@ import {
   LoginOutlined,
   LoadingOutlined,
   PlusOutlined,
+  PlusSquareOutlined,
   SearchOutlined,
   StarFilled,
   StarOutlined,
@@ -20,7 +21,7 @@ interface ConnectionSidebarProps {
   groups: SessionGroup[];
   activeSessionId: string;
   connectingSessionId: string | null;
-  onActivate: (id: string) => void;
+  onActivate: (session: RemoteSession) => void;
   onAdd: () => void;
   onEdit: (id: string) => void;
   onDelete: (id: string) => void;
@@ -127,12 +128,15 @@ export function ConnectionSidebar({
 
   function openSession(session: RemoteSession) {
     const state = sessionState(session, connectingSessionId);
-    onActivate(session.id);
-    if (state === "connected" || state === "connecting") {
-      onMarkRecent(session.id);
+    if (state === "connecting") {
       return;
     }
-    onConnect(session);
+    onMarkRecent(session.id);
+    if (state === "connected") {
+      onActivate(session);
+    } else {
+      onConnect(session);
+    }
   }
 
   function toggleFavorite(session: RemoteSession) {
@@ -263,6 +267,20 @@ export function ConnectionSidebar({
                                 }}
                               />
                             </Tooltip>
+                            {connected && (
+                              <Tooltip title="新开终端">
+                                <Button
+                                  aria-label={`新开终端 ${session.name}`}
+                                  icon={<PlusSquareOutlined />}
+                                  size="small"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onMarkRecent(session.id);
+                                    onConnect(session);
+                                  }}
+                                />
+                              </Tooltip>
+                            )}
                             <Tooltip title="编辑">
                               <Button
                                 aria-label={`编辑 ${session.name}`}

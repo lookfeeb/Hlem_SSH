@@ -65,7 +65,7 @@ export function useTerminalRuntime({
   function extractTerminalPromptCwd(terminalId: string, data: string) {
     const session = sessionsRef.current.find((item) => item.terminalId === terminalId);
     if (!session) return null;
-    return extractPromptCwd(data, session.username);
+    return extractPromptCwd(data, session.username, session.loginPath);
   }
 
   function resetTerminalRuntime() {

@@ -42,6 +42,7 @@ import { TopBar } from "./components/TopBar";
 import { EmptyWorkspace } from "./components/shared/EmptyWorkspace";
 import { configToRemoteSession, getErrorMessage } from "./lib/configMapping";
 import { normalizePath as normalizeRemotePath } from "./lib/path";
+import { isRuntimeSession, remoteSessionConfigId } from "./lib/session";
 import type {
   ConfigSnapshot,
   RemoteFileEntry,
@@ -161,17 +162,7 @@ function App() {
     applyConfigSnapshot,
     onSettingsSaved: () => setSettingsOpen(false),
   });
-  const {
-    sessionModal,
-    addSession,
-    editSession,
-    saveSessionConfig,
-    closeSessionConfigModal,
-  } = useSessionConfigWorkflow({
-    configSnapshot,
-    activeSessionId,
-    applySnapshot,
-  });
+  const configSessions = useMemo(() => sessions.filter((session) => !isRuntimeSession(session)), [sessions]);
   const sessionsById = useMemo(() => new Map(sessions.map((session) => [session.id, session])), [sessions]);
   const openSessions = useMemo(
     () => openSessionIds.flatMap((id) => {
@@ -184,6 +175,22 @@ function App() {
     () => openSessions.find((session) => session.id === activeSessionId) ?? openSessions[0],
     [activeSessionId, openSessions],
   );
+  const activeConfigId = activeSession ? remoteSessionConfigId(activeSession) : "";
+  const sidebarSessions = useMemo(
+    () => configSessions.map((session) => sessionForSidebar(session, sessions, activeSessionId)),
+    [activeSessionId, configSessions, sessions],
+  );
+  const {
+    sessionModal,
+    addSession,
+    editSession,
+    saveSessionConfig,
+    closeSessionConfigModal,
+  } = useSessionConfigWorkflow({
+    configSnapshot,
+    activeSessionId: activeConfigId,
+    applySnapshot,
+  });
   const {
     changePath,
     refreshActiveFiles,
@@ -230,6 +237,12 @@ function App() {
     applyConfigSnapshot,
     registerTerminal,
     appendTerminal: (sessionId, kind, content) => appendTerminal(sessionId, kind, content),
+    getSessionConfiguredPath: (sessionId) => {
+      const session = sessionsRef.current.find((item) => item.id === sessionId);
+      const configId = session ? remoteSessionConfigId(session) : sessionId;
+      const config = configSnapshotRef.current?.data.sessions.find((item) => item.id === configId);
+      return config ? config.defaultPath || config.sftp.defaultPath : null;
+    },
   });
   const {
     fileSaveRecords,
@@ -398,22 +411,33 @@ function App() {
       setSessions(mappedSessions);
     }
     setOpenSessionIds((current) => {
-      const validIds = current.filter((id) => mappedIdSet.has(id));
+      const validIds = current.filter((id) => {
+        if (mappedIdSet.has(id)) return true;
+        const runtimeSession = sessionsRef.current.find((session) => session.id === id);
+        return Boolean(runtimeSession && mappedIdSet.has(remoteSessionConfigId(runtimeSession)));
+      });
       if (preferredId && !validIds.includes(preferredId)) validIds.push(preferredId);
       return validIds;
     });
-    setActiveSessionId((current) => (preferredId || (mappedIdSet.has(current) ? current : "")));
+    setActiveSessionId((current) => {
+      if (preferredId) return preferredId;
+      if (mappedIdSet.has(current)) return current;
+      const runtimeSession = sessionsRef.current.find((session) => session.id === current);
+      return runtimeSession && mappedIdSet.has(remoteSessionConfigId(runtimeSession)) ? current : "";
+    });
   }
 
   function mergeSnapshotSessions(nextSessions: RemoteSession[], currentSessions: RemoteSession[]) {
     const currentById = new Map(currentSessions.map((session) => [session.id, session]));
-    return nextSessions.map((next) => {
+    const nextById = new Map(nextSessions.map((session) => [session.id, session]));
+    const mergedBaseSessions = nextSessions.map((next) => {
       const current = currentById.get(next.id);
       if (!current || current.state === "disconnected") return next;
       return {
         ...next,
         state: current.state,
         currentPath: current.currentPath,
+        loginPath: current.loginPath,
         connectionId: current.connectionId,
         connectedAt: current.connectedAt,
         sshVersion: current.sshVersion,
@@ -425,6 +449,22 @@ function App() {
         files: current.files,
       };
     });
+    const runtimeSessions = currentSessions.flatMap((current) => {
+      if (!isRuntimeSession(current)) return [];
+      const nextBase = nextById.get(remoteSessionConfigId(current));
+      if (!nextBase) return [];
+      return [{
+        ...current,
+        name: nextBase.name,
+        groupId: nextBase.groupId,
+        host: nextBase.host,
+        username: nextBase.username,
+        accent: nextBase.accent,
+        favorite: nextBase.favorite,
+        lastConnectedAt: nextBase.lastConnectedAt,
+      }];
+    });
+    return [...mergedBaseSessions, ...runtimeSessions];
   }
 
   function applyConfigSnapshot(snapshot: ConfigSnapshot) {
@@ -474,8 +514,20 @@ function App() {
   }
 
   async function connectSessionWithRecent(session: RemoteSession) {
-    void markSessionRecent(session.id);
+    void markSessionRecent(remoteSessionConfigId(session));
     await connectSession(session);
+  }
+
+  function activateConfigSession(session: RemoteSession) {
+    const configId = remoteSessionConfigId(session);
+    const relatedSessions = sessionsRef.current.filter((item) => remoteSessionConfigId(item) === configId);
+    const target =
+      relatedSessions.find((item) => item.id === activeSessionId) ??
+      relatedSessions.find((item) => item.connectionId === session.connectionId && item.connectionId) ??
+      relatedSessions.find((item) => item.state === "connected") ??
+      relatedSessions.find((item) => item.state === "connecting") ??
+      relatedSessions.find((item) => item.id === configId);
+    if (target) activateSession(target.id);
   }
 
   function resetRuntimeStateForSnapshot() {
@@ -543,11 +595,11 @@ function App() {
                 {activeSession ? (
                   <main className="workspace">
                     <ConnectionSidebar
-                      sessions={sessions}
+                      sessions={sidebarSessions}
                       groups={configSnapshot?.data.groups ?? []}
-                      activeSessionId={activeSession?.id ?? ""}
+                      activeSessionId={activeConfigId}
                       connectingSessionId={connectingSessionId}
-                      onActivate={activateSession}
+                      onActivate={activateConfigSession}
                       onAdd={() => void addSession()}
                       onEdit={(id) => editSession(id)}
                       onDelete={(id) => void deleteSession(id)}
@@ -605,11 +657,11 @@ function App() {
                 ) : (
                   <main className="workspace workspace-empty">
                     <ConnectionSidebar
-                      sessions={sessions}
+                      sessions={sidebarSessions}
                       groups={configSnapshot?.data.groups ?? []}
                       activeSessionId=""
                       connectingSessionId={connectingSessionId}
-                      onActivate={activateSession}
+                      onActivate={activateConfigSession}
                       onAdd={() => void addSession()}
                       onEdit={(id) => editSession(id)}
                       onDelete={(id) => void deleteSession(id)}
@@ -621,7 +673,7 @@ function App() {
                       onClearRecent={(id) => void clearSessionRecent(id)}
                     />
                     <EmptyWorkspace
-                      sessionCount={sessions.length}
+                      sessionCount={configSessions.length}
                       onAddSession={() => void addSession()}
                     />
                   </main>
@@ -699,7 +751,7 @@ function App() {
             <SettingsModal
               open={settingsOpen}
               initialValue={currentSettings}
-              sessions={sessions}
+              sessions={configSessions}
               onClose={() => setSettingsOpen(false)}
               onSubmit={saveSettings}
               onBackupOpen={() => setBackupOpen(true)}
@@ -725,7 +777,7 @@ function App() {
             />
             <TunnelDrawer
               open={tunnelOpen}
-              sessions={sessions}
+              sessions={configSessions}
               tunnels={configSnapshot.data.tunnels ?? []}
               forwards={forwards}
               onClose={() => setTunnelOpen(false)}
@@ -759,3 +811,26 @@ function App() {
 }
 
 export default App;
+
+function sessionForSidebar(configSession: RemoteSession, sessions: RemoteSession[], activeSessionId: string): RemoteSession {
+  const related = sessions.filter((session) => remoteSessionConfigId(session) === configSession.id);
+  const activeRelated = related.find((session) => session.id === activeSessionId);
+  const connecting = related.find((session) => session.state === "connecting");
+  const connected = activeRelated?.state === "connected"
+    ? activeRelated
+    : related.find((session) => session.state === "connected");
+  const source = connecting ?? connected;
+  if (!source) return configSession;
+  return {
+    ...configSession,
+    state: source.state,
+    connectionId: source.connectionId,
+    connectedAt: source.connectedAt,
+    sshVersion: source.sshVersion,
+    terminalId: source.terminalId,
+    sftpId: source.sftpId,
+    telemetryJobId: source.telemetryJobId,
+    currentPath: source.currentPath,
+    loginPath: source.loginPath,
+  };
+}

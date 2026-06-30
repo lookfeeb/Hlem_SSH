@@ -1,6 +1,6 @@
 use tauri::{AppHandle, State};
 
-use super::{connect_session, ensure_vault_unlocked, with_store, AppResult, AppState};
+use super::{connect_session_new, ensure_vault_unlocked, with_store, AppResult, AppState};
 use crate::config::{ConfigSnapshot, GroupInput, SessionInput};
 use crate::remote::ConnectionInfo;
 
@@ -78,7 +78,7 @@ pub async fn ssh_connect(
     state: State<'_, AppState>,
     session_id: String,
 ) -> AppResult<ConnectionInfo> {
-    connect_session(&app, &state, &session_id).await
+    connect_session_new(&app, &state, &session_id).await
 }
 
 #[tauri::command]

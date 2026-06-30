@@ -185,6 +185,15 @@ async fn connect_session(
     state.remote.connect(app, session, known_host).await
 }
 
+async fn connect_session_new(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    session_id: &str,
+) -> AppResult<ConnectionInfo> {
+    let (session, known_host) = session_bundle(state, session_id)?;
+    state.remote.connect_new(app, session, known_host).await
+}
+
 fn session_bundle(
     state: &State<'_, AppState>,
     session_id: &str,

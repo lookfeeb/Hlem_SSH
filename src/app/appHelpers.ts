@@ -1,5 +1,6 @@
 import { defaultRemoteHomePath, getErrorMessage, initialRemotePath } from "../lib/configMapping";
 import { EDITOR_CHANNEL_NAME, type EditorChannelMessage } from "../lib/editorChannel";
+import { normalizePath as normalizeRemotePath } from "../lib/path";
 import type { RemoteSession, SessionConfig, SessionInput, TerminalEntry } from "../types";
 
 export { getHostKeyPayload } from "../lib/configMapping";
@@ -84,7 +85,7 @@ export function stripCwdMarkers(data: string) {
   return { data: withoutCommandEcho, cwd };
 }
 
-export function extractPromptCwd(data: string, username: string) {
+export function extractPromptCwd(data: string, username: string, loginPath?: string | null) {
   const cleaned = stripTerminalControls(data).replace(/\r/g, "\n");
   const lines = cleaned
     .split("\n")
@@ -95,7 +96,7 @@ export function extractPromptCwd(data: string, username: string) {
   for (const line of lines) {
     const cwd = extractPromptCwdFromLine(line);
     if (!cwd) continue;
-    const path = resolvePromptCwd(cwd, username);
+    const path = resolvePromptCwd(cwd, username, loginPath);
     if (path) return path;
   }
   return null;
@@ -109,9 +110,10 @@ function extractPromptCwdFromLine(line: string) {
   return null;
 }
 
-function resolvePromptCwd(cwd: string, username: string) {
-  if (cwd === "~") return defaultRemoteHomePath(username);
-  if (cwd.startsWith("~/")) return `${defaultRemoteHomePath(username)}${cwd.slice(1)}`;
+function resolvePromptCwd(cwd: string, username: string, loginPath?: string | null) {
+  const homePath = loginPath ? normalizeRemotePath(loginPath) : defaultRemoteHomePath(username);
+  if (cwd === "~") return homePath;
+  if (cwd.startsWith("~/")) return `${homePath}${cwd.slice(1)}`;
   if (cwd.startsWith("/")) return cwd;
   return null;
 }
@@ -124,7 +126,8 @@ function stripTerminalControls(value: string) {
 }
 
 export function remoteSessionPath(session: Pick<RemoteSession, "username" | "currentPath">) {
-  return initialRemotePath(session.username, session.currentPath);
+  const path = session.currentPath.trim();
+  return path ? normalizeRemotePath(path) : initialRemotePath(session.username, null);
 }
 
 export function sftpUnavailableMessage(error: unknown) {

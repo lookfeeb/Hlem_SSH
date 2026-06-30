@@ -8,6 +8,7 @@ const ACCENTS = ["#16a34a", "#2563eb", "#ea580c", "#0f766e", "#7c3aed"];
 export function configToRemoteSession(config: SessionConfig, index: number): RemoteSession {
   return {
     id: config.id,
+    configId: config.id,
     name: config.name,
     groupId: config.groupId ?? null,
     host: config.host,
@@ -17,6 +18,7 @@ export function configToRemoteSession(config: SessionConfig, index: number): Rem
     favorite: Boolean(config.favorite),
     lastConnectedAt: config.lastConnectedAt ?? null,
     currentPath: initialRemotePath(config.username, config.defaultPath || config.sftp.defaultPath),
+    loginPath: null,
     connectionId: null,
     connectedAt: null,
     sshVersion: null,
