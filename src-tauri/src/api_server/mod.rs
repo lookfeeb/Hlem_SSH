@@ -319,23 +319,7 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
-            let Ok(origin_str) = origin.to_str() else {
-                return false;
-            };
-            let stripped = origin_str
-                .strip_prefix("http://")
-                .or_else(|| origin_str.strip_prefix("https://"));
-            let Some(host_with_port) = stripped else {
-                return false;
-            };
-            let host = host_with_port
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("");
-            matches!(host, "localhost" | "127.0.0.1" | "[::1]" | "::1")
+            is_allowed_local_origin(origin)
         }))
         .allow_methods([
             Method::GET,
@@ -457,4 +441,26 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         log_file,
         logs,
     })
+}
+
+fn is_allowed_local_origin(origin: &HeaderValue) -> bool {
+    let Ok(origin_str) = origin.to_str() else {
+        return false;
+    };
+    let stripped = origin_str
+        .strip_prefix("http://")
+        .or_else(|| origin_str.strip_prefix("https://"));
+    let Some(host_with_port) = stripped else {
+        return false;
+    };
+    let authority = host_with_port.split('/').next().unwrap_or("");
+    let host = if let Some(ipv6) = authority.strip_prefix('[') {
+        ipv6.split(']').next().unwrap_or("")
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or(authority)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }

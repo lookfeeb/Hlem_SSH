@@ -840,6 +840,11 @@ PROC 42 sshd 1.5 20.0
         assert!(copy.contains("cp -a --"));
         assert!(copy.contains("'/tmp/src dir'"));
         assert!(copy.contains("'/tmp/-target'"));
+        let replace = build_remote_replace_command("/tmp/a.part", "/tmp/a file");
+        assert!(replace.contains("chmod --reference"));
+        assert!(replace.contains("mv -f --"));
+        assert!(replace.contains("'/tmp/a.part'"));
+        assert!(replace.contains("'/tmp/a file'"));
     }
 
     #[test]

@@ -13,6 +13,7 @@ interface EditorTab {
   content: string;
   originalContent: string;
   saving: boolean;
+  pendingSaveId?: string;
   sessionId: string;
   sessionName: string;
   disconnected?: boolean;
@@ -76,11 +77,19 @@ export function EditorWindowApp() {
         setActiveKey(tab.key);
       }
       if (payload.type === "saved") {
-        setTabs((prev) => prev.map((t) => (t.path === payload.path && t.sessionId === (payload.sessionId ?? "")) ? { ...t, saving: false, originalContent: t.content } : t));
+        setTabs((prev) => prev.map((t) => (
+          t.path === payload.path && t.sessionId === payload.sessionId && t.pendingSaveId === payload.saveId
+            ? { ...t, saving: false, pendingSaveId: undefined, originalContent: payload.content }
+            : t
+        )));
         message.open({ key: "editor-save", type: "success", content: "文件已保存", duration: 2 });
       }
       if (payload.type === "error") {
-        setTabs((prev) => prev.map((t) => (t.path === payload.path && t.sessionId === (payload.sessionId ?? "")) ? { ...t, saving: false } : t));
+        setTabs((prev) => prev.map((t) => (
+          t.path === payload.path && t.sessionId === (payload.sessionId ?? "") && (!payload.saveId || t.pendingSaveId === payload.saveId)
+            ? { ...t, saving: false, pendingSaveId: undefined }
+            : t
+        )));
         message.error(payload.message);
       }
       if (payload.type === "sessionDisconnected") {
@@ -109,9 +118,14 @@ export function EditorWindowApp() {
   function save() {
     const tab = tabs.find((t) => t.key === activeKey);
     if (!tab || tab.disconnected) return;
-    setTabs((prev) => prev.map((t) => t.key === activeKey ? { ...t, saving: true } : t));
+    const saveId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+    setTabs((prev) => prev.map((t) => t.key === activeKey ? { ...t, saving: true, pendingSaveId: saveId } : t));
     if (channelRef.current) {
-      postEditorMessage(channelRef.current, { type: "save", path: tab.path, content: tab.content, sessionId: tab.sessionId });
+      if (!postEditorMessage(channelRef.current, { type: "save", path: tab.path, content: tab.content, sessionId: tab.sessionId, saveId })) {
+        setTabs((prev) => prev.map((t) => t.key === activeKey ? { ...t, saving: false, pendingSaveId: undefined } : t));
+      }
+    } else {
+      setTabs((prev) => prev.map((t) => t.key === activeKey ? { ...t, saving: false, pendingSaveId: undefined } : t));
     }
   }
 

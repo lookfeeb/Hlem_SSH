@@ -14,24 +14,20 @@ export interface EditorAddTabMessage {
   sessionName: string;
 }
 
-export interface EditorChangeMessage {
-  type: "change";
-  path: string;
-  content: string;
-  sessionId: string;
-}
-
 export interface EditorSaveMessage {
   type: "save";
   path: string;
   content: string;
   sessionId: string;
+  saveId: string;
 }
 
 export interface EditorSavedMessage {
   type: "saved";
   path: string;
   sessionId: string;
+  saveId: string;
+  content: string;
 }
 
 export interface EditorErrorMessage {
@@ -39,6 +35,7 @@ export interface EditorErrorMessage {
   message: string;
   path?: string;
   sessionId?: string;
+  saveId?: string;
 }
 
 export interface EditorReadyMessage {
@@ -62,7 +59,6 @@ export interface EditorSessionReconnectedMessage {
 export type EditorChannelMessage =
   | EditorInitMessage
   | EditorAddTabMessage
-  | EditorChangeMessage
   | EditorSaveMessage
   | EditorSavedMessage
   | EditorErrorMessage

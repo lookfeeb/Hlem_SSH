@@ -55,6 +55,13 @@ pub(super) fn build_remote_rename_command(from: &str, to: &str) -> String {
     )
 }
 
+pub(super) fn build_remote_replace_command(from: &str, to: &str) -> String {
+    remote_file_command(
+        r#"[ -e "$1" ] || [ -L "$1" ] || { printf "%s\n" "临时文件不存在: $1" >&2; exit 1; }; if [ -d "$2" ] && [ ! -L "$2" ]; then printf "%s\n" "目标已存在且是目录: $2" >&2; exit 1; fi; if [ -e "$2" ] || [ -L "$2" ]; then chmod --reference="$2" "$1" 2>/dev/null || true; fi; mv -f -- "$1" "$2""#,
+        &[normalize_remote_path(from), normalize_remote_path(to)],
+    )
+}
+
 pub(super) fn build_remote_copy_command(from: &str, to: &str) -> String {
     remote_file_command(
         r#"[ -e "$1" ] || [ -L "$1" ] || { printf "%s\n" "路径不存在: $1" >&2; exit 1; }; if [ -d "$1" ] && [ ! -L "$1" ]; then mkdir -p -- "$2" && cp -a -- "$1"/. "$2"/; else if [ -d "$2" ] && [ ! -L "$2" ]; then printf "%s\n" "目标已存在且是目录: $2" >&2; exit 1; fi; cp -a -- "$1" "$2"; fi"#,

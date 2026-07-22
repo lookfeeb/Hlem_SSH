@@ -52,8 +52,8 @@ pub use sessions::{
     ssh_trust_host_key,
 };
 pub use sftp::{
-    sftp_close, sftp_copy, sftp_create_file, sftp_delete, sftp_list, sftp_mkdir, sftp_open,
-    sftp_read_text, sftp_rename, sftp_resolve_target, sftp_search, sftp_write_text,
+    sftp_close, sftp_copy, sftp_create_file, sftp_delete, sftp_exists, sftp_list, sftp_mkdir,
+    sftp_open, sftp_read_text, sftp_rename, sftp_resolve_target, sftp_search, sftp_write_text,
     transfer_cancel, transfer_download, transfer_history_clear_finished, transfer_history_snapshot,
     transfer_pause, transfer_remove, transfer_resume, transfer_retry, transfer_upload,
 };

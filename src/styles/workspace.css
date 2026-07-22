@@ -338,19 +338,6 @@
   position: relative;
 }
 
-.telemetrySidebar::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(560px 280px at 0 -10%, rgba(99, 102, 241, .14) 0%, transparent 65%),
-    radial-gradient(420px 240px at 110% 60%, rgba(139, 92, 246, .10) 0%, transparent 65%);
-  opacity: .85;
-}
-
-.telemetrySidebar > * { position: relative; z-index: 1; }
-
 .telemetrySidebar::-webkit-scrollbar,
 .telemetrySidebar .ant-table-body::-webkit-scrollbar,
 .telemetrySidebar .ant-table-content::-webkit-scrollbar {
@@ -1393,6 +1380,8 @@
   display: inline-flex;
   align-items: center;
   flex: 1 1 0;
+  /* 允许值列在侧栏变窄时收缩，避免长 IP 把内容顶出容器 */
+  width: 0;
   gap: 5px;
   min-width: 0;
   max-width: 100%;
@@ -1417,6 +1406,7 @@
 .connectionInfoCopyValue {
   appearance: none;
   display: block;
+  width: 0;
   padding: 0;
   border: 0;
   background: transparent;

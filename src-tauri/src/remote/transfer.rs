@@ -1,5 +1,63 @@
 use super::*;
 
+pub(super) async fn cleanup_transfer_staging(
+    runtime: &RemoteRuntime,
+    request: &TransferRequest,
+    transfer_id: &str,
+) {
+    match request.direction {
+        TransferDirection::Upload => {
+            if let Ok(record) = runtime.sftp_record(&request.sftp_id).await {
+                let sftp = record.next_transfer_session().await;
+                let path = format!("{}.helm-{}.part", request.remote_path, transfer_id);
+                let _ = sftp.remove_file(path).await;
+            }
+        }
+        TransferDirection::Download => {
+            let path = format!("{}.helm-{}.part", request.local_path, transfer_id);
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
+async fn sync_and_replace_local(staging: &str, target: &str) -> AppResult<()> {
+    let file = File::open(staging).await.map_err(remote_error)?;
+    file.sync_all().await.map_err(remote_error)?;
+    drop(file);
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        let from: Vec<u16> = std::ffi::OsStr::new(staging)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let to: Vec<u16> = std::ffi::OsStr::new(target)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let ok = unsafe {
+            MoveFileExW(
+                from.as_ptr(),
+                to.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok == 0 {
+            return Err(AppError::Io(std::io::Error::last_os_error().to_string()));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        tokio::fs::rename(staging, target)
+            .await
+            .map_err(remote_error)
+    }
+}
+
 async fn await_progress_ticker(handle: tokio::task::JoinHandle<()>, transfer_id: &str) {
     if let Err(error) = handle.await {
         if !error.is_cancelled() {
@@ -83,36 +141,19 @@ pub(super) async fn run_transfer(
     } else {
         TRANSFER_BUFFER_BYTES
     };
+    let staging_remote_path = format!("{}.helm-{}.part", request.remote_path, info.transfer_id);
+    let staging_local_path = format!("{}.helm-{}.part", request.local_path, info.transfer_id);
     match request.direction {
         TransferDirection::Upload => {
             let local_size = tokio::fs::metadata(&request.local_path)
                 .await
                 .map_err(remote_error)?
                 .len();
-            let resume_from = if request.resume {
-                sftp.metadata(request.remote_path.clone())
-                    .await
-                    .ok()
-                    .map(|metadata| {
-                        let remote_size = metadata.len();
-                        if remote_size < local_size {
-                            remote_size
-                        } else {
-                            0
-                        }
-                    })
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            if request.overwrite && !request.resume {
-                if let Err(error) = sftp.remove_file(request.remote_path.clone()).await {
-                    eprintln!(
-                        "[helm] failed to remove remote file before upload overwrite: {}: {error}",
-                        request.remote_path
-                    );
-                }
-            }
+            let resume_from = 0;
+            let _ = sftp.remove_file(staging_remote_path.clone()).await;
+            let mut staged_request = request.clone();
+            staged_request.remote_path = staging_remote_path.clone();
+            staged_request.resume = false;
 
             let should_parallel = local_size >= PARALLEL_UPLOAD_THRESHOLD
                 && resume_from == 0
@@ -123,7 +164,7 @@ pub(super) async fn run_transfer(
                     runtime,
                     app,
                     info: &info,
-                    request: &request,
+                    request: &staged_request,
                     sftp_record: &sftp_record,
                     total_size: local_size,
                     buffer_size,
@@ -147,7 +188,7 @@ pub(super) async fn run_transfer(
                     OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE
                 };
                 let mut remote = sftp
-                    .open_with_flags(request.remote_path.clone(), remote_flags)
+                    .open_with_flags(staging_remote_path.clone(), remote_flags)
                     .await
                     .map_err(remote_error)?;
                 if resume_from > 0 {
@@ -191,6 +232,20 @@ pub(super) async fn run_transfer(
                 let final_bytes = bytes_done.load(Ordering::Relaxed);
                 emit_transfer_progress(runtime, app, &info.transfer_id, final_bytes, 0.0).await;
             }
+            let remote_size = sftp
+                .metadata(staging_remote_path.clone())
+                .await
+                .map_err(remote_error)?
+                .len();
+            if remote_size != local_size {
+                return Err(AppError::Remote(format!(
+                    "上传校验失败：远端大小 {} 字节，本地大小 {} 字节",
+                    remote_size, local_size
+                )));
+            }
+            runtime
+                .replace_remote_file(&request.sftp_id, &staging_remote_path, &request.remote_path)
+                .await?;
         }
         TransferDirection::Download => {
             let remote_size = sftp
@@ -203,22 +258,11 @@ pub(super) async fn run_transfer(
                     .await
                     .map_err(remote_error)?;
             }
-            let resume_from = if request.resume {
-                tokio::fs::metadata(&request.local_path)
-                    .await
-                    .ok()
-                    .map(|metadata| {
-                        let local_size = metadata.len();
-                        if local_size <= remote_size {
-                            local_size
-                        } else {
-                            0
-                        }
-                    })
-                    .unwrap_or(0)
-            } else {
-                0
-            };
+            let resume_from = 0;
+            let _ = tokio::fs::remove_file(&staging_local_path).await;
+            let mut staged_request = request.clone();
+            staged_request.local_path = staging_local_path.clone();
+            staged_request.resume = false;
 
             // 大文件 + 非续传：走多 File handle 并行下载以提升高延迟链路吞吐。
             let should_parallel = remote_size >= PARALLEL_DOWNLOAD_THRESHOLD
@@ -230,7 +274,7 @@ pub(super) async fn run_transfer(
                     runtime,
                     app,
                     info: &info,
-                    request: &request,
+                    request: &staged_request,
                     sftp_record: &sftp_record,
                     total_size: remote_size,
                     buffer_size,
@@ -248,11 +292,11 @@ pub(super) async fn run_transfer(
                         .create(true)
                         .truncate(false)
                         .write(true)
-                        .open(&request.local_path)
+                        .open(&staging_local_path)
                         .await
                         .map_err(remote_error)?
                 } else {
-                    File::create(&request.local_path)
+                    File::create(&staging_local_path)
                         .await
                         .map_err(remote_error)?
                 };
@@ -301,6 +345,17 @@ pub(super) async fn run_transfer(
                 let final_bytes = bytes_done.load(Ordering::Relaxed);
                 emit_transfer_progress(runtime, app, &info.transfer_id, final_bytes, 0.0).await;
             }
+            let local_size = tokio::fs::metadata(&staging_local_path)
+                .await
+                .map_err(remote_error)?
+                .len();
+            if local_size != remote_size {
+                return Err(AppError::Remote(format!(
+                    "下载校验失败：本地大小 {} 字节，远端大小 {} 字节",
+                    local_size, remote_size
+                )));
+            }
+            sync_and_replace_local(&staging_local_path, &request.local_path).await?;
         }
     }
     runtime

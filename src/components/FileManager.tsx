@@ -240,6 +240,9 @@ export function FileManager({
   const columnWidthsRef = useRef(columnWidths);
   const effectiveColumnWidthsRef = useRef(columnWidths);
   const mountedRef = useMountedRef();
+  const sessionIdRef = useRef(session.id);
+  const directoryRequestSeqRef = useRef<Map<string, number>>(new Map());
+  sessionIdRef.current = session.id;
   useEffect(() => {
     columnWidthsRef.current = columnWidths;
     inMemoryColumnWidths = columnWidths;
@@ -252,6 +255,29 @@ export function FileManager({
   const detachedEditorsRef = useRef<Map<string, BroadcastChannel>>(new Map());
   const detachedEditorWindowRef = useRef<Window | null>(null);
   const columnResizeCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    searchSeq.current += 1;
+    directoryRequestSeqRef.current.clear();
+    setSearchText("");
+    setSearching(false);
+    setFocusedPath(null);
+    setSelectedRowKeys([]);
+    setContextMenu(null);
+    setDialog(null);
+    setDirectoryEntries({});
+    setDirectoryLoadingKeys([]);
+    setDirectoryExpandedKeys(["/"]);
+    directoryExpandedKeysRef.current = ["/"];
+    setDragging(false);
+    setOpeningEditorPath(null);
+    setCommandDialogOpen(false);
+    setCommandEditingId(null);
+    if (session.state === "connected" && session.sftpId) {
+      void loadDirectory("/", true);
+    }
+  }, [session.id]);
+
   const path = normalizePath(session.currentPath);
   const canUseFiles = session.state === "connected" && Boolean(session.sftpId);
   const canRefreshFiles = canUseFiles || (session.state === "connected" && Boolean(session.connectionId));
@@ -361,12 +387,12 @@ export function FileManager({
         void onWriteText(payload.path, payload.content, payload.sessionId)
           .then(() => {
             if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
-              postEditorMessage(channel, { type: "saved", path: payload.path, sessionId: payload.sessionId });
+              postEditorMessage(channel, { type: "saved", path: payload.path, sessionId: payload.sessionId, saveId: payload.saveId, content: payload.content });
             }
           })
           .catch((error) => {
             if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
-              postEditorMessage(channel, { type: "error", message: getErrorMessage(error), path: payload.path, sessionId: payload.sessionId });
+              postEditorMessage(channel, { type: "error", message: getErrorMessage(error), path: payload.path, sessionId: payload.sessionId, saveId: payload.saveId });
             }
           });
       }
@@ -440,17 +466,24 @@ export function FileManager({
     if (!canUseFiles) return;
     const targetPath = normalizePath(directoryPath);
     if (!force && directoryEntries[targetPath]) return;
+    const requestSessionId = session.id;
+    const requestKey = `${requestSessionId}:${targetPath}`;
+    const requestSeq = (directoryRequestSeqRef.current.get(requestKey) ?? 0) + 1;
+    directoryRequestSeqRef.current.set(requestKey, requestSeq);
     setDirectoryLoadingKeys((current) => uniqueKeys([...current, targetPath]));
     try {
       const entries = targetPath === path && filesBelongToDirectory(allFiles, targetPath)
         ? allFiles
         : await onListDirectory(targetPath);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || sessionIdRef.current !== requestSessionId || directoryRequestSeqRef.current.get(requestKey) !== requestSeq) return;
       setDirectoryEntries((current) => ({ ...current, [targetPath]: sortRemoteEntries(entries) }));
     } catch (error) {
-      if (mountedRef.current) message.error(getErrorMessage(error));
+      if (mountedRef.current && sessionIdRef.current === requestSessionId && directoryRequestSeqRef.current.get(requestKey) === requestSeq) {
+        message.error(getErrorMessage(error));
+      }
     } finally {
-      if (mountedRef.current) {
+      if (mountedRef.current && sessionIdRef.current === requestSessionId && directoryRequestSeqRef.current.get(requestKey) === requestSeq) {
+        directoryRequestSeqRef.current.delete(requestKey);
         setDirectoryLoadingKeys((current) => current.filter((key) => key !== targetPath));
       }
     }
@@ -496,7 +529,7 @@ export function FileManager({
         });
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [canUseFiles, searchText]);
+  }, [canUseFiles, searchText, session.id]);
 
   useEffect(() => {
     if (!canUseFiles) return;

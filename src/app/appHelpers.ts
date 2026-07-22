@@ -157,3 +157,14 @@ export function notifyEditorSessionDisconnected(sessionId: string) {
     channel.close();
   }
 }
+
+export function notifyEditorSessionReconnected(sessionId: string) {
+  const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
+  try {
+    channel.postMessage({ type: "sessionReconnected", sessionId } satisfies EditorChannelMessage);
+  } catch (error) {
+    console.warn("[helm] failed to notify editor session reconnect:", getErrorMessage(error));
+  } finally {
+    channel.close();
+  }
+}

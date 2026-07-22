@@ -955,7 +955,11 @@ mod tests {
     #[test]
     fn windows_update_installer_args_restart_after_silent_install() {
         let args = windows_update_installer_args();
-        assert!(args.split_whitespace().any(|arg| arg.eq_ignore_ascii_case("/S")));
-        assert!(args.split_whitespace().any(|arg| arg.eq_ignore_ascii_case("/R")));
+        assert!(args
+            .split_whitespace()
+            .any(|arg| arg.eq_ignore_ascii_case("/S")));
+        assert!(args
+            .split_whitespace()
+            .any(|arg| arg.eq_ignore_ascii_case("/R")));
     }
 }

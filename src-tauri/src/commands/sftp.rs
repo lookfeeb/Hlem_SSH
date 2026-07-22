@@ -142,6 +142,16 @@ pub async fn sftp_read_text(
 }
 
 #[tauri::command]
+pub async fn sftp_exists(
+    state: State<'_, AppState>,
+    sftp_id: String,
+    path: String,
+) -> AppResult<bool> {
+    ensure_vault_unlocked(&state)?;
+    state.remote.sftp_exists(&sftp_id, path).await
+}
+
+#[tauri::command]
 pub async fn sftp_write_text(
     app: AppHandle,
     state: State<'_, AppState>,

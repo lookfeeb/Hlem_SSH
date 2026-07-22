@@ -17,6 +17,19 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
     if normalized.is_empty() {
         return None;
     }
+    let normalized = normalized
+        .chars()
+        .filter(|ch| !matches!(ch, '\'' | '"' | '`'))
+        .collect::<String>()
+        .replace('\\', "")
+        .replace("&&", " && ")
+        .replace("||", " || ")
+        .replace(';', " ; ")
+        .replace('|', " | ")
+        .replace('(', " ( ")
+        .replace(')', " ) ")
+        .replace('{', " { ")
+        .replace('}', " } ");
     let squeezed = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
     let parts: Vec<&str> = normalized.split_whitespace().collect();
 
@@ -29,45 +42,11 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
     }
 
     // 2. Recursive rm on root / system / home
-    let rm_rf_aliases = ["rm -rf", "rm -fr", "rm -r -f", "rm -f -r"];
-    let has_rm_rf = rm_rf_aliases.iter().any(|p| squeezed.contains(p));
-    if has_rm_rf {
-        if normalized.contains("--no-preserve-root") {
-            return Some("禁止跳过根目录保护删除");
-        }
-        // 精确匹配的危险目标：只拦截这些目录本身或其通配符展开。
-        // 例如 `rm -rf /usr` 被拦，但 `rm -rf /tmp/mydir` 放行（非系统目录 + 精确路径）。
-        let dangerous_exact = [
-            "/", "/*", "/.", "/..", "~", "~/", "$home", "${home}", "/home", "/home/*", "/root",
-            "/root/*", "/usr", "/usr/*", "/etc", "/etc/*", "/var", "/var/*", "/boot", "/boot/*",
-            "/sys", "/sys/*", "/proc", "/proc/*", "/lib", "/lib/*", "/lib64", "/lib64/*", "/opt",
-            "/opt/*", "/sbin", "/sbin/*", "/bin", "/bin/*",
-        ];
-        // 提取 rm -rf 后面的目标参数（可能有多个），逐个检查是否命中危险目录。
-        for alias in rm_rf_aliases {
-            if let Some(after) = squeezed.split_once(alias).map(|(_, r)| r) {
-                // after 形如 " /tmp/foo" 或 " /usr /etc" 等
-                for arg in after.split_whitespace() {
-                    // 跳过 flag（如 --verbose）
-                    if arg.starts_with('-') {
-                        continue;
-                    }
-                    let normalized_arg = arg.trim_end_matches('/');
-                    let check = if normalized_arg.is_empty() {
-                        "/"
-                    } else {
-                        normalized_arg
-                    };
-                    if dangerous_exact.iter().any(|d| {
-                        let d_trimmed = d.trim_end_matches('/');
-                        let d_check = if d_trimmed.is_empty() { "/" } else { d_trimmed };
-                        check == d_check
-                    }) {
-                        return Some("禁止递归删除根/系统目录或用户家目录");
-                    }
-                }
-            }
-        }
+    if normalized.contains("--no-preserve-root") {
+        return Some("禁止跳过根目录保护删除");
+    }
+    if has_dangerous_recursive_rm(&parts) {
+        return Some("禁止递归删除根/系统目录或用户家目录");
     }
 
     // 3. find -delete / find -exec rm
@@ -222,4 +201,95 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+fn has_dangerous_recursive_rm(parts: &[&str]) -> bool {
+    for (index, token) in parts.iter().enumerate() {
+        if *token != "rm" {
+            continue;
+        }
+        let mut recursive = false;
+        let mut force = false;
+        let mut parse_options = true;
+        let mut targets = Vec::new();
+        for arg in &parts[index + 1..] {
+            if matches!(*arg, ";" | "&&" | "||" | "|" | "(" | ")" | "{" | "}") {
+                break;
+            }
+            if *arg == "--" {
+                parse_options = false;
+                continue;
+            }
+            if parse_options && arg.starts_with("--") {
+                recursive |= matches!(*arg, "--recursive" | "--dir");
+                force |= *arg == "--force";
+                continue;
+            }
+            if parse_options && arg.starts_with('-') {
+                recursive |= arg[1..].contains('r') || arg[1..].contains('R');
+                force |= arg[1..].contains('f');
+                continue;
+            }
+            targets.push(*arg);
+        }
+        if recursive
+            && force
+            && targets
+                .into_iter()
+                .any(is_dangerous_recursive_delete_target)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_dangerous_recursive_delete_target(value: &str) -> bool {
+    const DANGEROUS_TARGETS: &[&str] = &[
+        "/", "/*", "/.", "/..", "~", "~/", "$home", "${home}", "/home", "/home/*", "/root",
+        "/root/*", "/usr", "/usr/*", "/etc", "/etc/*", "/var", "/var/*", "/boot", "/boot/*",
+        "/sys", "/sys/*", "/proc", "/proc/*", "/lib", "/lib/*", "/lib64", "/lib64/*", "/opt",
+        "/opt/*", "/sbin", "/sbin/*", "/bin", "/bin/*",
+    ];
+    let value = value.trim_matches(|ch| matches!(ch, '(' | ')' | '{' | '}' | ';'));
+    let normalized = value.trim_end_matches('/');
+    let target = if normalized.is_empty() {
+        "/"
+    } else {
+        normalized
+    };
+    DANGEROUS_TARGETS.iter().any(|dangerous| {
+        let normalized = dangerous.trim_end_matches('/');
+        let dangerous = if normalized.is_empty() {
+            "/"
+        } else {
+            normalized
+        };
+        target == dangerous
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_dangerous_command;
+
+    #[test]
+    fn blocks_recursive_rm_inside_quoted_shell_wrapper() {
+        assert!(check_dangerous_command("bash -c 'rm -rf /'").is_some());
+    }
+
+    #[test]
+    fn blocks_recursive_rm_long_options() {
+        assert!(check_dangerous_command("rm --recursive --force /etc").is_some());
+    }
+
+    #[test]
+    fn blocks_recursive_rm_inside_command_substitution() {
+        assert!(check_dangerous_command("echo $(rm -rf /root)").is_some());
+    }
+
+    #[test]
+    fn allows_recursive_delete_of_non_system_temp_directory() {
+        assert!(check_dangerous_command("rm -rf /tmp/helm-cache").is_none());
+    }
 }

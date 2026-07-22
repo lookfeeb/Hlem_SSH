@@ -46,6 +46,8 @@ export function useTransferActions({
   }
 
   async function pauseTransfer(transferId: string) {
+    const previous = transfersRef.current.find((transfer) => transfer.transferId === transferId);
+    if (!previous) return;
     setPersistedTransfers((current) =>
       current.map((transfer) =>
         transfer.transferId === transferId ? { ...transfer, status: "paused", speedKbps: 0 } : transfer,
@@ -55,11 +57,19 @@ export function useTransferActions({
       const transfer = await remoteApi.pauseTransfer(transferId);
       if (mountedRef.current) upsertTransfer(transfer);
     } catch (error) {
-      if (mountedRef.current) appendTerminal(activeSessionId, "error", getErrorMessage(error));
+      if (!mountedRef.current) return;
+      setPersistedTransfers((current) =>
+        current.map((transfer) =>
+          transfer.transferId === transferId && transfer.status === "paused" ? previous : transfer,
+        ),
+      );
+      appendTransferError(previous, error);
     }
   }
 
   async function resumeTransfer(transferId: string) {
+    const previous = transfersRef.current.find((transfer) => transfer.transferId === transferId);
+    if (!previous) return;
     setPersistedTransfers((current) =>
       current.map((transfer) =>
         transfer.transferId === transferId ? { ...transfer, status: "running" } : transfer,
@@ -69,15 +79,22 @@ export function useTransferActions({
       const transfer = await remoteApi.resumeTransfer(transferId);
       if (mountedRef.current) upsertTransfer(transfer);
     } catch (error) {
-      if (mountedRef.current) appendTerminal(activeSessionId, "error", getErrorMessage(error));
+      if (!mountedRef.current) return;
+      setPersistedTransfers((current) =>
+        current.map((transfer) =>
+          transfer.transferId === transferId && transfer.status === "running" ? previous : transfer,
+        ),
+      );
+      appendTransferError(previous, error);
     }
   }
 
   async function cancelTransfer(transferId: string) {
+    const transfer = transfersRef.current.find((item) => item.transferId === transferId);
     try {
       await remoteApi.cancelTransfer(transferId);
     } catch (error) {
-      if (mountedRef.current) appendTerminal(activeSessionId, "error", getErrorMessage(error));
+      if (mountedRef.current) appendTransferError(transfer, error);
     }
   }
 
@@ -123,13 +140,24 @@ export function useTransferActions({
   }
 
   async function removeTransfer(transferId: string) {
+    const previous = transfersRef.current.find((transfer) => transfer.transferId === transferId);
+    if (!previous) return;
     setPersistedTransfers((current) => current.filter((transfer) => transfer.transferId !== transferId));
     try {
       const snapshot = await remoteApi.removeTransfer(transferId);
       if (mountedRef.current) applyTransferHistorySnapshot(snapshot);
     } catch (error) {
-      if (mountedRef.current) console.warn("[helm] failed to remove transfer from runtime:", getErrorMessage(error));
+      if (!mountedRef.current) return;
+      setPersistedTransfers((current) =>
+        current.some((transfer) => transfer.transferId === transferId) ? current : [previous, ...current],
+      );
+      appendTransferError(previous, error);
     }
+  }
+
+  function appendTransferError(transfer: TransferInfo | undefined, error: unknown) {
+    const sessionId = transfer ? sessionForTransfer(transfer)?.id : null;
+    appendTerminal(sessionId ?? activeSessionId, "error", getErrorMessage(error));
   }
 
   return {

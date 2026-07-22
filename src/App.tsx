@@ -41,8 +41,9 @@ import { TerminalPanel } from "./components/TerminalPanel";
 import { TopBar } from "./components/TopBar";
 import { EmptyWorkspace } from "./components/shared/EmptyWorkspace";
 import { configToRemoteSession, getErrorMessage } from "./lib/configMapping";
-import { normalizePath as normalizeRemotePath } from "./lib/path";
+import { getParentPath as getRemoteParentPath, normalizePath as normalizeRemotePath } from "./lib/path";
 import { isRuntimeSession, remoteSessionConfigId } from "./lib/session";
+import { TERMINAL_SCROLLBACK, TERMINAL_WEBGL_ENABLED } from "./lib/performanceDefaults";
 import type {
   ConfigSnapshot,
   RemoteFileEntry,
@@ -51,6 +52,7 @@ import type {
 } from "./types";
 
 const AUTO_SFTP_CONNECT_DELAY_MS = 900;
+const SFTP_REFRESH_DEBOUNCE_MS = 120;
 
 function App() {
   const [configSnapshot, setConfigSnapshot] = useState<ConfigSnapshot>();
@@ -76,6 +78,8 @@ function App() {
   const autoSftpConnectionKeysRef = useRef<Set<string>>(new Set());
   const fileLoadingCountsRef = useRef<Map<string, number>>(new Map());
   const sftpListRequestsRef = useRef<Map<string, Promise<RemoteFileEntry[]>>>(new Map());
+  const sftpRefreshTimersRef = useRef<Map<string, number>>(new Map());
+  const sftpChangedDirectoriesRef = useRef<Map<string, Set<string>>>(new Map());
   const listSftpFiles = useCallback((sftpId: string, path: string) => {
     const normalizedPath = normalizeRemotePath(path);
     const requestKey = `${sftpId}:${normalizedPath}`;
@@ -227,6 +231,7 @@ function App() {
     connectSession,
   } = useSessionRuntime({
     sessions,
+    sessionsRef,
     activeSession,
     activeSessionId,
     setSessions,
@@ -304,6 +309,8 @@ function App() {
   useEffect(() => {
     configSnapshotRef.current = configSnapshot;
   }, [configSnapshot]);
+
+  useEffect(() => () => clearPendingSftpRefreshes(), []);
 
   useEffect(() => {
     if (!appReady) return;
@@ -531,6 +538,7 @@ function App() {
   }
 
   function resetRuntimeStateForSnapshot() {
+    clearPendingSftpRefreshes();
     resetSessionRuntime();
     resetTerminalRuntime();
     resetTransferHistory();
@@ -559,10 +567,32 @@ function App() {
   }
 
   function handleSftpChanged(payload: SftpChangedEvent) {
-    const affected = sessionsRef.current.filter((session) => session.sftpId === payload.sftpId);
-    for (const session of affected) {
-      void refreshFiles(payload.sftpId, remoteSessionPath(session), session.id);
-    }
+    const directories = sftpChangedDirectoriesRef.current.get(payload.sftpId) ?? new Set<string>();
+    directories.add(getRemoteParentPath(payload.path));
+    sftpChangedDirectoriesRef.current.set(payload.sftpId, directories);
+
+    const existingTimer = sftpRefreshTimersRef.current.get(payload.sftpId);
+    if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+    const timer = window.setTimeout(() => {
+      sftpRefreshTimersRef.current.delete(payload.sftpId);
+      const changedDirectories = sftpChangedDirectoriesRef.current.get(payload.sftpId) ?? new Set<string>();
+      sftpChangedDirectoriesRef.current.delete(payload.sftpId);
+      const affected = sessionsRef.current.filter(
+        (session) =>
+          session.sftpId === payload.sftpId &&
+          changedDirectories.has(normalizeRemotePath(remoteSessionPath(session))),
+      );
+      for (const session of affected) {
+        void refreshFiles(payload.sftpId, remoteSessionPath(session), session.id);
+      }
+    }, SFTP_REFRESH_DEBOUNCE_MS);
+    sftpRefreshTimersRef.current.set(payload.sftpId, timer);
+  }
+
+  function clearPendingSftpRefreshes() {
+    for (const timer of sftpRefreshTimersRef.current.values()) window.clearTimeout(timer);
+    sftpRefreshTimersRef.current.clear();
+    sftpChangedDirectoriesRef.current.clear();
   }
 
   const currentSettings = configSnapshot?.data.settings ?? { proxy: null, backup: defaultBackupSettings(), quickCommands: [] };
@@ -624,6 +654,8 @@ function App() {
                               >
                                 <TerminalPanel
                                   session={sess}
+                                  scrollback={TERMINAL_SCROLLBACK}
+                                  webglEnabled={TERMINAL_WEBGL_ENABLED}
                                   onSendData={(data) => void sendTerminalData(sess.id, sess.terminalId, data)}
                                   onResize={(cols, rows) => void resizeTerminal(sess.terminalId, cols, rows)}
                                   onClear={() => clearTerminal(sess.id)}

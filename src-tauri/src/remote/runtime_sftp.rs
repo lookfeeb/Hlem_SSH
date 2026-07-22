@@ -305,6 +305,13 @@ impl RemoteRuntime {
             .map_err(|_| AppError::InvalidInput("只支持 UTF-8 文本文件编辑".to_string()))
     }
 
+    pub async fn sftp_exists(&self, sftp_id: &str, path: String) -> AppResult<bool> {
+        let sftp = self.sftp_session(sftp_id).await?;
+        sftp.try_exists(normalize_remote_path(&path))
+            .await
+            .map_err(remote_error)
+    }
+
     pub async fn sftp_write_text(
         &self,
         app: &AppHandle,
@@ -314,20 +321,60 @@ impl RemoteRuntime {
     ) -> AppResult<()> {
         let sftp = self.sftp_session(sftp_id).await?;
         let path = normalize_remote_path(&path);
-        let mut remote = sftp
-            .open_with_flags(
-                path.clone(),
-                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-            )
-            .await
-            .map_err(remote_error)?;
-        remote
-            .write_all(content.as_bytes())
-            .await
-            .map_err(remote_error)?;
-        remote.flush().await.map_err(remote_error)?;
+        if content.len() as u64 > MAX_TEXT_EDIT_BYTES {
+            return Err(AppError::InvalidInput(
+                "文件超过 10MB，暂不支持直接编辑".to_string(),
+            ));
+        }
+        let temp_path = format!("{path}.helm-{}.part", Uuid::new_v4());
+        let result = async {
+            let mut remote = sftp
+                .open_with_flags(
+                    temp_path.clone(),
+                    OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+                )
+                .await
+                .map_err(remote_error)?;
+            remote
+                .write_all(content.as_bytes())
+                .await
+                .map_err(remote_error)?;
+            remote.flush().await.map_err(remote_error)?;
+            remote.shutdown().await.map_err(remote_error)?;
+            let size = sftp
+                .metadata(temp_path.clone())
+                .await
+                .map_err(remote_error)?
+                .len();
+            if size != content.len() as u64 {
+                return Err(AppError::Remote("编辑内容写入校验失败".to_string()));
+            }
+            self.replace_remote_file(sftp_id, &temp_path, &path).await
+        }
+        .await;
+        if result.is_err() {
+            let _ = sftp.remove_file(temp_path.clone()).await;
+        }
+        result?;
         emit_sftp_changed(app, sftp_id, &path);
         Ok(())
+    }
+
+    pub(super) async fn replace_remote_file(
+        &self,
+        sftp_id: &str,
+        from: &str,
+        to: &str,
+    ) -> AppResult<()> {
+        let connection_id = self.sftp_record(sftp_id).await?.info.connection_id;
+        let result = self
+            .exec_on_connection(
+                &connection_id,
+                build_remote_replace_command(from, to),
+                Some(SFTP_FILE_OPERATION_TIMEOUT_MS),
+            )
+            .await?;
+        ensure_remote_file_command_success(result, "替换远端文件")
     }
 
     async fn run_sftp_file_command(

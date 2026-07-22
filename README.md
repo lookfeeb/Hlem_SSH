@@ -3,7 +3,7 @@
 > 基于 **Tauri 2 + React 19 + Rust** 的现代 SSH / SFTP 桌面工作台
 
 [![Windows Release](https://github.com/user/Helm/actions/workflows/release.yml/badge.svg)](https://github.com/user/Helm/actions/workflows/release.yml)
-![Version](https://img.shields.io/badge/version-0.0.26-blue)
+![Version](https://img.shields.io/badge/version-0.0.44-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64%20|%20x86%20|%20ARM64-green)
 
 ---
@@ -129,7 +129,7 @@ graph LR
 | 框架 | Tauri 2 | 桌面应用壳、IPC、窗口管理、系统托盘 |
 | 前端 | React 19 + TypeScript 6 | UI 组件与状态管理 |
 | UI 库 | Ant Design 6 | 组件库 |
-| 终端 | xterm.js 6 + WebGL Addon | 高性能终端渲染 |
+| 终端 | xterm.js 6 + WebGL Addon | 高性能终端渲染（失败自动回退） |
 | 编辑器 | CodeMirror 6 | 远程文件编辑（JS/TS/Python/SQL/JSON/YAML/CSS/HTML） |
 | 构建 | Vite 8 | 前端打包 |
 | 后端 | Rust (Edition 2021) | 核心逻辑、异步 I/O |
@@ -639,7 +639,7 @@ mindmap
       面包屑路径导航
       拖拽上传/下载
       并发传输队列
-      断点续传
+      安全临时文件传输与失败重试
       远程文件在线编辑
       隐藏文件切换
     端口转发
@@ -682,7 +682,7 @@ mindmap
 - **会话分组** — 按生产/测试/客户等维度归类，分组保存于加密工作区
 - **真终端体验** — xterm.js + addon-fit 自适应；支持 Ctrl+C / vim / top 等交互式程序
 - **常用命令面板** — `quick_commands` 一键发送，按点击次数排序自动凸显高频命令
-- **断线重连与心跳** — 可配置 keepalive 间隔，避免 NAT/防火墙静默掉线
+- **断线重连与心跳** — keepalive 配合指数退避自动重连，支持手动断开后禁止自动重连
 - **僵尸连接巡检** — 每 30s 检测并清理已断开的连接
 
 ### 文件管理（SFTP）
@@ -690,7 +690,8 @@ mindmap
 - **远程文件浏览器** — 类资源管理器布局，双击进入、面包屑路径、隐藏文件切换
 - **拖拽上传/下载** — 操作系统拖拽与右键菜单双通道
 - **传输中心** — 多任务并发、单独取消、失败重试，进度可视化
-- **断点续传** — 大文件分块续传，网络抖动后无需从头来过
+- **安全传输** — 先写临时文件，完成后校验并原子替换，失败不会破坏目标文件
+- **低资源策略** — 非活动会话自动降低遥测频率，终端固定 5000 行回滚并支持 WebGL 回退
 - **远程编辑** — 双击远端文件 → 独立 CodeMirror 子窗口 → 保存自动回写远端
 - **文件搜索** — 远程目录内文件名搜索
 

@@ -19,6 +19,8 @@ use super::{
     push_log_with_response, take_chars, truncate_for_log, ApiError, ApiServerState,
 };
 
+const MAX_API_EXEC_TIMEOUT_MS: u64 = 5 * 60_000;
+
 // ─── Public types (re-exported from mod.rs) ────────────────────────────────────
 
 #[derive(Serialize)]
@@ -305,7 +307,10 @@ pub async fn rest_exec(
     }
     verify_session_access(&state, &body.session_id)?;
 
-    let timeout_ms = body.timeout_ms.unwrap_or(30_000);
+    let timeout_ms = body
+        .timeout_ms
+        .unwrap_or(30_000)
+        .clamp(1, MAX_API_EXEC_TIMEOUT_MS);
     let start = std::time::Instant::now();
     let detail = truncate_for_log(&body.command, 77);
 

@@ -115,6 +115,7 @@ impl RemoteRuntime {
                     handle.abort();
                 }
             }
+            cleanup_transfer_staging(self, &record.request, transfer_id).await;
             crate::errors::forget_resource_label(transfer_id);
         }
         self.persist_transfer_history().await
@@ -133,7 +134,7 @@ impl RemoteRuntime {
                 .request
                 .clone()
         };
-        request.resume = true;
+        request.resume = false;
         let next = self.start_transfer(app, request).await?;
         self.transfers.write().await.remove(transfer_id);
         crate::errors::forget_resource_label(transfer_id);
@@ -161,6 +162,9 @@ impl RemoteRuntime {
         record.info.error = Some(reason.to_string());
         record.info.updated_at = now();
         let info = record.info.clone();
+        let request = record.request.clone();
+        drop(transfers);
+        cleanup_transfer_staging(self, &request, transfer_id).await;
         events::emit(app, events::TRANSFER_FAILED, info.clone());
         crate::errors::forget_resource_label(transfer_id);
         Ok(info)
@@ -209,12 +213,13 @@ impl RemoteRuntime {
                 &runtime,
                 &app_handle,
                 task_info.clone(),
-                task_request,
+                task_request.clone(),
                 task_cancel,
                 task_paused,
             )
             .await;
             if let Err(error) = result {
+                cleanup_transfer_staging(&runtime, &task_request, &task_info.transfer_id).await;
                 runtime
                     .mark_transfer_failed(&app_handle, &task_info.transfer_id, error.to_string())
                     .await;

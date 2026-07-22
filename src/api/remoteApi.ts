@@ -63,6 +63,7 @@ export const remoteApi = {
     call<void>("sftp_delete", { sftpId, path, recursive }),
   rename: (sftpId: string, from: string, to: string) => call<void>("sftp_rename", { sftpId, from, to }),
   copy: (sftpId: string, from: string, to: string) => call<void>("sftp_copy", { sftpId, from, to }),
+  pathExists: (sftpId: string, path: string) => call<boolean>("sftp_exists", { sftpId, path }),
   readText: (sftpId: string, path: string) => call<string>("sftp_read_text", { sftpId, path }, { timeoutMs: 5 * 60_000 }),
   writeText: (sftpId: string, path: string, content: string) =>
     call<void>("sftp_write_text", { sftpId, path, content }, { timeoutMs: 5 * 60_000 }),

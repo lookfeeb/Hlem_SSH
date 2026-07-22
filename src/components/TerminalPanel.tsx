@@ -14,6 +14,8 @@ import type { RemoteSession, TerminalEntry } from "../types";
 
 interface TerminalPanelProps {
   session: RemoteSession;
+  scrollback: number;
+  webglEnabled: boolean;
   onSendData: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
   onClear: () => void;
@@ -24,13 +26,14 @@ type AppliedTerminalState = {
   offsets: Map<string, number>;
 };
 
-export function TerminalPanel({ session, onSendData, onResize, onClear }: TerminalPanelProps) {
+export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, onResize, onClear }: TerminalPanelProps) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null);
   const [commandInputValue, setCommandInputValue] = useState("");
   const requestSafeAnimationFrame = useAnimationFrameRegistry();
   const commandInputRef = useRef<HTMLInputElement>(null);
   const terminalHostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XtermTerminal | null>(null);
+  const webglAddonRef = useRef<{ dispose: () => void } | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const appliedRef = useRef<AppliedTerminalState | null>(null);
   const lastSizeRef = useRef<{ terminalId: string | null; cols: number; rows: number }>({ terminalId: null, cols: 0, rows: 0 });
@@ -92,7 +95,7 @@ export function TerminalPanel({ session, onSendData, onResize, onClear }: Termin
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace",
       fontSize: 13,
       lineHeight: 1.35,
-      scrollback: 5000,
+      scrollback,
       macOptionIsMeta: true,
       theme: {
         background: "#fbfdff",
@@ -164,6 +167,45 @@ export function TerminalPanel({ session, onSendData, onResize, onClear }: Termin
       appliedRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.options.scrollback = Math.max(500, Math.min(50_000, scrollback));
+  }, [scrollback]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    webglAddonRef.current?.dispose();
+    webglAddonRef.current = null;
+    if (!terminal || !webglEnabled) return;
+    let disposed = false;
+    void import("@xterm/addon-webgl")
+      .then(({ WebglAddon }) => {
+        if (disposed || terminalRef.current !== terminal) return;
+        const addon = new WebglAddon();
+        addon.onContextLoss(() => {
+          addon.dispose();
+          if (webglAddonRef.current === addon) webglAddonRef.current = null;
+          console.warn("[helm] terminal WebGL context lost, fallback renderer enabled");
+        });
+        try {
+          terminal.loadAddon(addon);
+          webglAddonRef.current = addon;
+        } catch (error) {
+          addon.dispose();
+          console.warn("[helm] failed to enable terminal WebGL, fallback renderer enabled:", error);
+        }
+      })
+      .catch((error) => {
+        console.warn("[helm] failed to load terminal WebGL addon:", error);
+      });
+    return () => {
+      disposed = true;
+      webglAddonRef.current?.dispose();
+      webglAddonRef.current = null;
+    };
+  }, [webglEnabled]);
 
   useEffect(() => {
     if (!session.terminalId) return;
