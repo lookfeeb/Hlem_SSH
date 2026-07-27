@@ -1,532 +1,890 @@
-/* ─── 备份 Modal 子区段 ─────────────────────────────────────────────────── */
-.backupPanel {
+/* ─── 数据备份弹窗：双栏工作台布局 ─────────────────────────────────────── */
+
+.ant-modal-wrap:has(> .backupModal) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px 24px;
+  overflow: hidden !important;
+}
+
+.ant-modal-wrap:has(> .backupModal)::before {
+  display: none !important;
+}
+
+.backupModal {
+  top: 0 !important;
+  max-width: calc(100vw - 48px);
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.backupModal .ant-modal-content {
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  overflow: visible;
+}
+
+.backupModal .ant-modal-content::before,
+.backupModal .ant-modal-content::after,
+.backupModal .ant-modal-container::before,
+.backupModal .ant-modal-container::after {
+  display: none !important;
+  content: none !important;
+}
+
+.backupModal .ant-modal-container {
   position: relative;
-  display: grid;
-  gap: 14px;
-  padding: 20px;
-  border: 1px solid rgba(226, 232, 240, 0.8);
-  border-radius: 14px;
-  background: #ffffff;
-  box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.04);
-  contain: paint;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  height: min(780px, calc(100vh - 32px));
+  min-height: min(620px, calc(100vh - 32px));
+  display: flex;
+  flex-direction: column;
+  padding: 0 !important;
   overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, .88) !important;
+  border-radius: 24px !important;
+  background: #ffffff !important;
+  box-shadow:
+    0 44px 96px rgba(15, 25, 46, .3),
+    0 16px 36px rgba(42, 59, 94, .18) !important;
 }
 
-.backupPanel::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(360px 120px at 0 0, rgba(99, 102, 241, .05) 0%, transparent 60%),
-    radial-gradient(280px 120px at 100% 100%, rgba(139, 92, 246, .04) 0%, transparent 60%);
-  opacity: .85;
+.backupModal .ant-modal-header {
+  min-height: 92px;
+  flex: 0 0 92px;
+  margin: 0 !important;
+  padding: 0 78px 0 30px !important;
+  border-bottom: 1px solid #e3e8f1;
+  background: rgba(255, 255, 255, .98) !important;
 }
 
-.backupPanel > * {
-  position: relative;
-  z-index: 1;
-}
-
-.backupPanel:hover {
-  border-color: rgba(99, 102, 241, .2) !important;
-  box-shadow: 0 10px 25px -5px rgba(99, 102, 241, .08);
-}
-
-.backupSimpleLayout {
-  display: grid;
-  gap: 14px;
-  max-height: min(680px, calc(100vh - 220px));
-  overflow: auto;
-  overscroll-behavior: contain;
-  padding-right: 0;
-  scrollbar-gutter: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.backupSimpleLayout::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
-}
-
-/* ─── 已备份表格：表头固定，列表内部隐藏式滚动 ───────────────────────────── */
-.backupRecordTableFrame {
-  overflow: hidden;
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.backupRecordTable {
+.backupModal .ant-modal-title {
   width: 100%;
-  table-layout: fixed;
-  border-collapse: collapse;
-  color: #334155;
+  height: 100%;
+  background: none !important;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
+  -webkit-text-fill-color: currentColor;
+}
+
+.backupModal .ant-modal-title * {
+  -webkit-text-fill-color: currentColor;
+}
+
+.backupModal .ant-modal-close {
+  top: 27px !important;
+  inset-inline-end: 26px !important;
+  width: 38px !important;
+  height: 38px !important;
+  border: 1px solid transparent !important;
+  border-radius: 12px !important;
+  color: #7c899e !important;
+  background: #f3f5f9 !important;
+}
+
+.backupModal .ant-modal-close:hover,
+.backupModal .ant-modal-close:focus-visible {
+  border-color: #dfe5ee !important;
+  color: #53627a !important;
+  background: #ffffff !important;
+}
+
+.backupModal .ant-modal-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 0 !important;
+  overflow: hidden !important;
+  background: #ffffff;
+}
+
+/* ─── 标题区 ───────────────────────────────────────────────────────────── */
+
+.backupModalHeader {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.backupModalHeaderIcon {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 15px;
+  color: #ffffff;
+  background: linear-gradient(145deg, #427cf7, #755af1);
+  box-shadow: 0 10px 22px rgba(79, 105, 241, .28);
+  font-size: 21px;
+}
+
+.backupModalHeaderCopy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.backupModalHeaderCopy strong {
+  overflow: hidden;
+  color: #172033;
+  font-size: 21px;
+  font-weight: 850;
+  line-height: 1.2;
+  letter-spacing: -.25px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupModalHeaderCopy span {
+  overflow: hidden;
+  color: #718099;
   font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.backupRecordTable th,
-.backupRecordTable td {
-  height: 36px;
-  padding: 6px 10px;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
-  text-align: left;
-  vertical-align: middle;
+.backupModalHeaderStatus {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  padding: 7px 10px;
+  border: 1px solid #dfe5ee;
+  border-radius: 999px;
+  color: #76849a;
+  background: #f6f8fb;
+  font-size: 10.5px;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
-.backupRecordTable th {
-  background: #f8fafc;
-  color: #64748b;
-  font-weight: 700;
+.backupModalHeaderStatus > span {
+  display: inline-block;
 }
 
-.backupRecordTableBody tr:last-child td {
-  border-bottom: 0;
+.backupModalHeaderStatus.is-healthy {
+  border-color: rgba(18, 166, 118, .17);
+  color: #138760;
+  background: #edf9f5;
 }
 
-.backupRecordTableRow:hover > td {
-  background: #f8fafc;
+.backupModalHeaderStatus.is-running {
+  border-color: rgba(79, 109, 245, .18);
+  color: #4f6df5;
+  background: #eef1ff;
 }
 
-.backupRecordTableBodyScroll {
-  max-height: 180px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
-  transition: scrollbar-color .18s ease;
+.backupModalHeaderStatus.is-warning {
+  border-color: rgba(222, 146, 35, .22);
+  color: #c17a16;
+  background: #fff8e9;
 }
 
-.backupRecordTableBodyScroll:hover,
-.backupRecordTableBodyScroll:focus-within {
-  scrollbar-color: rgba(99, 102, 241, .35) transparent;
+.backupModalHeaderStatus.is-paused {
+  color: #7b879b;
+  background: #f5f7fa;
 }
 
-.backupRecordTableBodyScroll::-webkit-scrollbar {
-  width: 6px;
+/* ─── 主体布局 ─────────────────────────────────────────────────────────── */
+
+.backupForm,
+.backupForm > .backupLayout {
+  height: 100%;
+  min-height: 0;
 }
 
-.backupRecordTableBodyScroll::-webkit-scrollbar-track {
-  background: transparent;
+.backupLayout {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
 }
 
-.backupRecordTableBodyScroll::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: 8px;
-  transition: background-color .18s ease;
+.backupSidebar {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 23px 22px 20px;
+  overflow: hidden;
+  border-right: 1px solid #e3e8f1;
+  background: linear-gradient(180deg, #f8faff 0%, #f2f5fb 100%);
 }
 
-.backupRecordTableBodyScroll:hover::-webkit-scrollbar-thumb,
-.backupRecordTableBodyScroll:focus-within::-webkit-scrollbar-thumb {
-  background: rgba(99, 102, 241, .28);
+.backupSidebarLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 13px;
+  color: #687791;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: .15px;
 }
 
-.backupRecordTableBodyScroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(99, 102, 241, .55);
+.backupSidebarLabel::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: #596ff2;
+  box-shadow: 0 0 0 4px rgba(89, 111, 242, .1);
 }
 
-.backupRecordColTime { width: 142px; }
-.backupRecordColFile { width: 180px; }
-.backupRecordColSize { width: 82px; }
-.backupRecordColStatus { width: 84px; }
-.backupRecordColActions { width: 84px; }
+.backupHealthCard {
+  padding: 17px;
+  border: 1px solid #dce4ef;
+  border-radius: 17px;
+  background: rgba(255, 255, 255, .87);
+  box-shadow: 0 10px 24px rgba(39, 55, 89, .055);
+}
 
-.backupRecordCellEllipsis {
+.backupHealthCardHead {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.backupHealthIcon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 13px;
+  color: #12a676;
+  background: #eaf8f3;
+  font-size: 17px;
+}
+
+.backupHealthCard.is-running .backupHealthIcon {
+  color: #4f6df5;
+  background: #edf1ff;
+  animation: backup-status-pulse 1.5s ease-in-out infinite;
+}
+
+.backupHealthCard.is-warning .backupHealthIcon {
+  color: #d28a22;
+  background: #fff5df;
+}
+
+.backupHealthCard.is-paused .backupHealthIcon {
+  color: #7c899e;
+  background: #f0f3f7;
+}
+
+@keyframes backup-status-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(79, 109, 245, 0); }
+  50% { box-shadow: 0 0 0 6px rgba(79, 109, 245, .08); }
+}
+
+.backupHealthCardHead > div {
+  min-width: 0;
+}
+
+.backupHealthCardHead > div > strong,
+.backupHealthCardHead > div > span {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.backupRecordTableEmptyRow td {
-  height: 72px;
-  color: #94a3b8;
-  text-align: center;
-}
-
-.backupRecordTable .ant-btn {
-  width: 28px;
-  height: 28px;
-  border-radius: 6px !important;
-  display: inline-flex !important;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid #e2e8f0 !important;
-  background-color: #ffffff !important;
-  color: #64748b !important;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
-}
-
-.backupRecordTable .ant-btn:hover:not(:disabled) {
-  border-color: rgba(99, 102, 241, 0.35) !important;
-  color: #4f46e5 !important;
-  background-color: #f5f3ff !important;
-  transform: translateY(-1px);
-}
-
-.backupRecordTable .ant-btn:has(.anticon-delete):hover:not(:disabled) {
-  border-color: rgba(239, 68, 68, 0.35) !important;
-  color: #ef4444 !important;
-  background-color: #fff5f5 !important;
-}
-
-/* ─── 已备份行：悬停显示明细 Tooltip ─────────────────────────────────────── */
-
-.backupRecordRowTooltipContent {
-  display: grid;
-  gap: 6px;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: #334155;
-  padding: 4px 0;
-}
-
-.backupRecordRowTooltipContent > div {
-  display: grid;
-  grid-template-columns: 44px 1fr;
-  gap: 10px;
-  word-break: break-all;
-  color: #334155;
-  padding: 3px 0;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
-}
-
-.backupRecordRowTooltipContent > div:last-child {
-  border-bottom: none;
-}
-
-.backupRecordRowTooltipContent > div > span {
-  color: #4f6ef7;
-  font-weight: 700;
-  letter-spacing: .3px;
-  font-size: 11.5px;
-}
-
-.backupPanel-actions {
-  grid-template-columns: 1fr;
-}
-
-.backupSectionHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 28px;
-  padding-bottom: 10px;
-  border-bottom: 1px dashed rgba(99, 102, 241, .18);
-}
-
-.backupSectionHeader > span:first-child {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--text-primary);
-  font-size: 14px;
-  font-weight: 800;
-  letter-spacing: .2px;
-}
-
-.backupSectionHeader > span:first-child::before {
-  content: none;
-  display: none;
-}
-
-.backupSectionHeader .ant-btn-sm {
-  height: 28px;
-  padding: 0 14px !important;
-  border: 0 !important;
-  border-radius: 8px !important;
-  background: var(--accent-grad) !important;
-  color: #ffffff !important;
-  font-weight: 600 !important;
-  font-size: 12px !important;
-  box-shadow: 0 4px 10px -2px rgba(99, 102, 241, .45) !important;
-  transition: all .22s cubic-bezier(.4, 0, .2, 1) !important;
-}
-
-.backupSectionHeader .ant-btn-sm:hover {
-  transform: translateY(-1px);
-  filter: brightness(1.06);
-  box-shadow: 0 8px 16px -4px rgba(99, 102, 241, .55) !important;
-}
-
-.backupSectionHeader .ant-segmented-item-label {
-  font-size: 11.5px !important;
-  font-weight: 600 !important;
-  padding: 0 10px !important;
-}
-
-.backupSectionHeader .ant-tag {
-  margin: 0 !important;
-  padding: 1px 10px !important;
-  border-radius: 999px !important;
-  background: linear-gradient(135deg, rgba(99, 102, 241, .12) 0%, rgba(139, 92, 246, .12) 100%) !important;
-  border: 1px solid rgba(99, 102, 241, .2) !important;
-  color: var(--accent-2) !important;
-  font-weight: 700 !important;
-  font-size: 11px !important;
-}
-
-.backupFormGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px 14px;
-}
-
-.backupActionGrid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-}
-
-.backupActionGrid .ant-btn {
-  position: relative;
-  height: 52px !important;
-  border-radius: 10px !important;
-  font-weight: 600 !important;
-  font-size: 13px !important;
-  border: 1px solid rgba(226, 232, 240, 0.8) !important;
-  background: #ffffff !important;
-  color: #334155 !important;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.02) !important;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
-  overflow: hidden;
-}
-
-.backupActionGrid .ant-btn .ant-btn-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  margin-right: 8px !important;
-  border-radius: 6px;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08) 0%, rgba(139, 92, 246, 0.08) 100%);
-  color: #6366f1;
+.backupHealthCardHead > div > strong {
+  margin-bottom: 3px;
+  color: #263249;
   font-size: 13px;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  flex: 0 0 26px;
+  font-weight: 800;
 }
 
-.backupActionGrid .ant-btn:hover:not(:disabled) {
-  border-color: rgba(99, 102, 241, 0.35) !important;
-  color: #4f46e5 !important;
-  transform: translateY(-2px);
-  box-shadow: 0 10px 20px -8px rgba(99, 102, 241, 0.25) !important;
+.backupHealthCardHead > div > span {
+  color: #8793a7;
+  font-size: 10px;
 }
 
-.backupActionGrid .ant-btn:hover:not(:disabled) .ant-btn-icon {
-  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-  color: #ffffff;
-  transform: scale(1.05) rotate(-3deg);
-  box-shadow: 0 4px 10px rgba(99, 102, 241, 0.3);
+.backupHealthDivider {
+  height: 1px;
+  margin: 15px 0 13px;
+  background: #e8edf4;
 }
 
-.backupActionGrid .ant-btn-primary {
-  border: 0 !important;
-  background: linear-gradient(135deg, #6366f1 0%, #3b82f6 100%) !important;
-  color: #ffffff !important;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2) !important;
-}
-
-.backupActionGrid .ant-btn-primary .ant-btn-icon {
-  background: rgba(255, 255, 255, 0.15) !important;
-  color: #ffffff !important;
-}
-
-.backupActionGrid .ant-btn-primary:hover:not(:disabled) {
-  filter: brightness(1.05);
-  box-shadow: 0 10px 20px -6px rgba(99, 102, 241, 0.45) !important;
-}
-
-.backupActionGrid .ant-btn-primary:hover:not(:disabled) .ant-btn-icon {
-  background: rgba(255, 255, 255, 0.25) !important;
-  color: #ffffff !important;
-  transform: scale(1.05);
-}
-
-.backupActionGrid .ant-btn-dangerous {
-  border: 1px solid rgba(239, 68, 68, 0.2) !important;
-  color: #dc2626 !important;
-  background: #fff8f8 !important;
-}
-
-.backupActionGrid .ant-btn-dangerous .ant-btn-icon {
-  background: rgba(239, 68, 68, 0.08) !important;
-  color: #ef4444 !important;
-}
-
-.backupActionGrid .ant-btn-dangerous:hover:not(:disabled) {
-  border-color: #ef4444 !important;
-  color: #ffffff !important;
-  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%) !important;
-  box-shadow: 0 10px 20px -8px rgba(239, 68, 68, 0.35) !important;
-}
-
-.backupActionGrid .ant-btn-dangerous:hover:not(:disabled) .ant-btn-icon {
-  background: rgba(255, 255, 255, 0.2) !important;
-  color: #ffffff !important;
-}
-
-.backupFormGrid-tight {
-  grid-template-columns: 110px repeat(3, minmax(0, 1fr));
-}
-
-.backupCloudHeader {
+.backupHealthRow {
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 30px;
-  color: var(--text-primary);
+  margin-top: 9px;
+  font-size: 10.5px;
+}
+
+.backupHealthRow > span {
+  flex: 0 0 auto;
+  color: #7f8ba0;
+}
+
+.backupHealthRow > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #35435b;
+  font-size: 10.5px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupMetricGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px;
+  margin: 11px 0 20px;
+}
+
+.backupMetricCard {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid #dfe6f0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .72);
+}
+
+.backupMetricCard span,
+.backupMetricCard strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupMetricCard span {
+  margin-bottom: 4px;
+  color: #8a96a9;
+  font-size: 9px;
+}
+
+.backupMetricCard strong {
+  color: #263249;
   font-size: 13px;
   font-weight: 800;
 }
 
+.backupQuickActions {
+  display: grid;
+  gap: 8px;
+}
+
+.backupModal .backupQuickAction.ant-btn {
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 0 13px;
+  border: 1px solid #dce4ef !important;
+  border-radius: 11px !important;
+  color: #435169 !important;
+  background: rgba(255, 255, 255, .84) !important;
+  box-shadow: none !important;
+  font-size: 11px;
+  font-weight: 750;
+  text-align: left;
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s ease !important;
+}
+
+.backupModal .backupQuickAction.ant-btn:hover:not(:disabled),
+.backupModal .backupQuickAction.ant-btn:focus-visible:not(:disabled) {
+  border-color: #cbd5e5 !important;
+  background: #ffffff !important;
+  box-shadow: 0 7px 16px rgba(42, 58, 91, .07) !important;
+  transform: translateY(-1px);
+}
+
+.backupModal .backupQuickAction.is-primary.ant-btn {
+  border: 0 !important;
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  background: linear-gradient(135deg, #4b79f6, #705cf2) !important;
+  box-shadow: 0 8px 17px rgba(79, 105, 241, .24) !important;
+}
+
+.backupModal .backupQuickAction.is-primary.ant-btn:hover:not(:disabled),
+.backupModal .backupQuickAction.is-primary.ant-btn:focus-visible:not(:disabled) {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  background: linear-gradient(135deg, #4b79f6, #705cf2) !important;
+  filter: brightness(1.04);
+  box-shadow: 0 11px 22px rgba(79, 105, 241, .3) !important;
+}
+
+.backupModal .backupQuickAction.is-danger.ant-btn {
+  border-color: rgba(224, 82, 95, .2) !important;
+  color: #d34d5a !important;
+  background: #fff8f8 !important;
+}
+
+.backupModal .backupQuickAction.is-danger.ant-btn:hover:not(:disabled),
+.backupModal .backupQuickAction.is-danger.ant-btn:focus-visible:not(:disabled) {
+  border-color: rgba(224, 82, 95, .38) !important;
+  color: #c23d4b !important;
+  background: #ffffff !important;
+}
+
+.backupSecurityNote {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  margin-top: auto;
+  padding: 10px 11px;
+  border: 1px solid rgba(18, 166, 118, .14);
+  border-radius: 12px;
+  color: #527268;
+  background: rgba(235, 250, 245, .72);
+}
+
+.backupSecurityNote > span {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: #12a676;
+  background: #ffffff;
+  font-size: 14px;
+}
+
+.backupSecurityNote p {
+  margin: 0;
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+/* ─── 右侧策略与记录 ───────────────────────────────────────────────────── */
+
+.backupMain {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 21px 23px 23px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #d7deea transparent;
+  background: #ffffff;
+}
+
+.backupMain::-webkit-scrollbar {
+  width: 6px;
+}
+
+.backupMain::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #d7deea;
+}
+
+.backupTargetToolbar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.backupTargetCopy {
+  min-width: 0;
+}
+
+.backupTargetCopy strong,
+.backupTargetCopy span {
+  display: block;
+}
+
+.backupTargetCopy strong {
+  margin-bottom: 3px;
+  color: #263249;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.backupTargetCopy span {
+  color: #8a96aa;
+  font-size: 10px;
+}
+
+.backupModal .backupTargetSegmented.ant-segmented {
+  min-width: 188px;
+  padding: 3px !important;
+  border: 1px solid #e0e6ef;
+  border-radius: 10px !important;
+  background: #f1f4f9 !important;
+}
+
+.backupModal .backupTargetSegmented .ant-segmented-item {
+  border-radius: 8px !important;
+  color: #7b879b;
+  font-size: 10.5px;
+  font-weight: 750;
+}
+
+.backupModal .backupTargetSegmented .ant-segmented-item-selected {
+  color: #4f6df5 !important;
+  background: #ffffff !important;
+  box-shadow: 0 2px 7px rgba(40, 55, 86, .1) !important;
+}
+
+.backupContentCard {
+  min-width: 0;
+  border: 1px solid #e1e7f0;
+  border-radius: 15px;
+  background: #ffffff;
+}
+
+.backupStrategyCard,
+.backupCloudCard {
+  flex: 0 0 auto;
+  padding: 17px;
+}
+
+.backupContentCardHeader {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 15px;
+}
+
+.backupContentCardHeader > div {
+  min-width: 0;
+}
+
+.backupContentCardHeader strong,
+.backupContentCardHeader span {
+  display: block;
+}
+
+.backupContentCardHeader strong {
+  margin-bottom: 3px;
+  color: #2b374d;
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.backupContentCardHeader span {
+  color: #929daf;
+  font-size: 9.5px;
+}
+
+.backupModal .backupSaveButton.ant-btn {
+  height: 34px;
+  padding: 0 14px;
+  border: 0 !important;
+  border-radius: 9px !important;
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  background: linear-gradient(135deg, #4e78f5, #725cf1) !important;
+  box-shadow: 0 6px 14px rgba(79, 105, 241, .22) !important;
+  font-size: 10.5px;
+  font-weight: 800;
+}
+
+.backupModal .backupSaveButton.ant-btn:hover:not(:disabled),
+.backupModal .backupSaveButton.ant-btn:focus-visible:not(:disabled) {
+  filter: brightness(1.04);
+  transform: translateY(-1px);
+}
+
+.backupStrategyGrid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 1.05fr 1fr .78fr .78fr;
+  gap: 12px;
+}
+
+.backupAutoField {
+  min-width: 0;
+}
+
+.backupStandaloneLabel,
+.backupModal .ant-form-item-label > label {
+  height: auto;
+  color: #536179 !important;
+  font-size: 10.5px !important;
+  font-weight: 750 !important;
+}
+
+.backupStandaloneLabel {
+  display: block;
+  min-height: 20px;
+  margin-bottom: 6px;
+  line-height: 20px;
+}
+
+.backupAutoControl {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 11px;
+  border: 1px solid #dce3ed;
+  border-radius: 10px;
+  color: #3c4a61;
+  background: #fbfcfe;
+  font-size: 10.5px;
+}
+
 .backupModal .ant-form-item {
-  margin-bottom: 0;
+  min-width: 0;
+  margin-bottom: 0 !important;
 }
 
 .backupModal .ant-form-item-label {
-  padding-bottom: 6px;
+  padding-bottom: 6px !important;
 }
 
-.backupModal .ant-form-item-label > label {
-  color: #475569;
-  font-size: 12.5px;
-  font-weight: 600;
-  letter-spacing: .2px;
+.backupModal .ant-form-item-explain,
+.backupModal .ant-form-item-extra {
+  padding-top: 4px;
+  font-size: 9px;
+  line-height: 1.25;
 }
 
 .backupModal .ant-input,
+.backupModal .ant-input-affix-wrapper,
 .backupModal .ant-input-number,
-.backupModal .ant-select-selector,
+.backupModal .ant-select-selector {
+  width: 100%;
+  min-height: 40px !important;
+  border: 1px solid #dce3ed !important;
+  border-radius: 10px !important;
+  color: #344159 !important;
+  background: #fbfcfe !important;
+  box-shadow: none !important;
+  font-size: 10.5px !important;
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease !important;
+}
+
+.backupModal .ant-input {
+  height: 40px;
+  padding-inline: 11px;
+}
+
 .backupModal .ant-input-affix-wrapper {
-  border-radius: 8px !important;
-  border: 1px solid rgba(226, 232, 240, 0.8) !important;
-  background: #f8fafc !important;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
-}
-
-.backupModal .ant-input:hover,
-.backupModal .ant-input-number:not(.ant-input-number-disabled):hover,
-.backupModal .ant-select:not(.ant-select-disabled):hover .ant-select-selector,
-.backupModal .ant-input-affix-wrapper:hover {
-  border-color: rgba(99, 102, 241, 0.35) !important;
-  background: #ffffff !important;
-}
-
-.backupModal .ant-input:focus,
-.backupModal .ant-input-number-focused,
-.backupModal .ant-select-focused .ant-select-selector,
-.backupModal .ant-input-affix-wrapper-focused {
-  border-color: #6366f1 !important;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12) !important;
-  background: #ffffff !important;
+  height: 40px;
+  padding: 0 10px !important;
 }
 
 .backupModal .ant-input-affix-wrapper > input.ant-input {
+  height: 36px !important;
+  min-height: 36px !important;
+  padding: 0 !important;
   border: 0 !important;
   border-radius: 0 !important;
   background: transparent !important;
   box-shadow: none !important;
-  transition: none !important;
 }
 
-.backupModal .ant-input-affix-wrapper > input.ant-input:hover,
-.backupModal .ant-input-affix-wrapper > input.ant-input:focus {
-  border: 0 !important;
-  background: transparent !important;
-  box-shadow: none !important;
+.backupModal .ant-input-number {
+  height: 40px;
 }
 
-.backupModal .privateKeyPathInput.ant-input-affix-wrapper {
-  padding-inline: 12px 6px !important;
+.backupModal .ant-input-number-input {
+  height: 38px !important;
+  padding-inline: 11px !important;
+  font-size: 10.5px !important;
 }
 
-.backupModal .privateKeyPathInput .ant-input {
-  padding-right: 0 !important;
+.backupModal .ant-select {
+  width: 100%;
+  height: 40px;
 }
 
-.backupModal .privateKeyPathInput .ant-input-suffix {
-  margin-inline-start: 6px !important;
-}
-
-.backupModal .privateKeyBrowseButton {
-  width: 28px !important;
-  height: 28px !important;
-  min-width: 28px !important;
-  padding: 0 !important;
-  border-radius: 8px !important;
-  color: #64748b !important;
-  display: inline-flex;
+.backupModal .ant-select-selector {
+  height: 40px !important;
+  padding-inline: 11px !important;
   align-items: center;
-  justify-content: center;
-  border: none !important;
-  background: transparent !important;
-  box-shadow: none !important;
 }
 
-.backupModal .privateKeyBrowseButton:hover,
-.backupModal .privateKeyBrowseButton:focus-visible {
-  color: #6366f1 !important;
-  background: rgba(99, 102, 241, 0.1) !important;
-}
-
-.backupModal .ant-segmented {
-  background: #f1f5f9 !important;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px !important;
-  padding: 2px !important;
-}
-
-.backupModal .ant-segmented .ant-segmented-item {
-  border-radius: 6px !important;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.backupModal .ant-segmented .ant-segmented-item-selected {
+.backupModal .ant-input:hover,
+.backupModal .ant-input-affix-wrapper:hover,
+.backupModal .ant-input-number:not(.ant-input-number-disabled):hover,
+.backupModal .ant-select:not(.ant-select-disabled):hover .ant-select-selector {
+  border-color: #c2cde0 !important;
   background: #ffffff !important;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 4px 8px -2px rgba(99, 102, 241, 0.15) !important;
 }
 
-.backupModal .ant-segmented .ant-segmented-item-selected .ant-segmented-item-label {
-  color: #4f46e5 !important;
+.backupModal .ant-input:focus,
+.backupModal .ant-input-affix-wrapper-focused,
+.backupModal .ant-input-number-focused,
+.backupModal .ant-select-focused .ant-select-selector {
+  border-color: rgba(79, 109, 245, .68) !important;
+  background: #ffffff !important;
+  box-shadow: 0 0 0 3px rgba(79, 109, 245, .1) !important;
+}
+
+.backupModal .ant-form-item-has-error .ant-input,
+.backupModal .ant-form-item-has-error .ant-input-affix-wrapper,
+.backupModal .ant-form-item-has-error .ant-input-number,
+.backupModal .ant-form-item-has-error .ant-select-selector {
+  border-color: rgba(224, 82, 95, .68) !important;
+  box-shadow: 0 0 0 3px rgba(224, 82, 95, .08) !important;
+}
+
+.backupModal .ant-switch {
+  min-width: 36px;
+  height: 20px;
+  background: #cbd3df !important;
+}
+
+.backupModal .ant-switch-checked {
+  background: linear-gradient(135deg, #4f79f6, #705cf2) !important;
+  box-shadow: 0 4px 10px rgba(79, 105, 241, .2);
+}
+
+.backupDirectoryField {
+  grid-column: 1 / -1;
+}
+
+.backupDirectoryLabel {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.backupDirectoryLabel small {
+  color: #9aa5b6;
+  font-size: 9px;
   font-weight: 500;
 }
 
-.backupModal .ant-segmented .ant-segmented-item:not(.ant-segmented-item-selected):hover {
-  color: #4f46e5;
+.backupModal .backupDirectoryInput.ant-input-affix-wrapper {
+  padding-inline: 11px 5px !important;
+}
+
+.backupModal .backupBrowseButton.ant-btn {
+  width: 29px !important;
+  height: 29px !important;
+  min-width: 29px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+  color: #76859c !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.backupModal .backupBrowseButton.ant-btn:hover,
+.backupModal .backupBrowseButton.ant-btn:focus-visible {
+  color: #4f6df5 !important;
+  background: #eef1ff !important;
+}
+
+/* ─── 云端参数 ─────────────────────────────────────────────────────────── */
+
+.backupCloudCardHeader {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 15px;
+}
+
+.backupCloudCardTitle,
+.backupCloudCardActions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.backupCloudCardTitle {
+  gap: 10px;
+}
+
+.backupCloudCardTitle > span {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #4f6df5;
+  background: #eef1ff;
+  font-size: 15px;
+}
+
+.backupCloudCardTitle strong,
+.backupCloudCardTitle small {
+  display: block;
+}
+
+.backupCloudCardTitle strong {
+  margin-bottom: 2px;
+  color: #2b374d;
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.backupCloudCardTitle small {
+  color: #929daf;
+  font-size: 9.5px;
+}
+
+.backupCloudCardActions {
+  gap: 10px;
+}
+
+.backupCloudReadyState {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border: 1px solid rgba(222, 146, 35, .2);
+  border-radius: 999px;
+  color: #bd7717;
+  background: #fff8e9;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.backupCloudReadyState.is-ready {
+  border-color: rgba(18, 166, 118, .16);
+  color: #138760;
+  background: #edf9f5;
 }
 
 .backupCloudKindSwitch {
   position: relative;
+  width: 190px;
+  height: 36px;
   display: grid;
-  grid-template-columns: repeat(2, minmax(76px, 1fr));
-  width: 196px;
-  height: 32px;
-  padding: 2px;
-  overflow: hidden;
-  border: 1px solid rgba(79, 110, 247, .18);
-  border-radius: 999px;
-  background: #edf4ff;
-  box-shadow: inset 0 1px 2px rgba(37, 99, 235, .08);
+  grid-template-columns: 1fr 1fr;
+  padding: 3px;
+  border: 1px solid #dfe5ee;
+  border-radius: 10px;
+  background: #f1f4f9;
 }
 
 .backupCloudKindThumb {
   position: absolute;
-  top: 2px;
-  bottom: 2px;
-  left: 2px;
-  width: calc((100% - 4px) / 2);
-  border-radius: 999px;
+  top: 3px;
+  left: 3px;
+  width: calc(50% - 3px);
+  height: 28px;
+  border-radius: 8px;
   background: #ffffff;
-  box-shadow:
-    inset 0 0 0 1px rgba(79, 110, 247, .08),
-    0 3px 8px -6px rgba(37, 99, 235, .38);
-  transition: transform .24s cubic-bezier(.22, 1, .36, 1);
+  box-shadow: 0 2px 7px rgba(40, 55, 86, .1);
+  transition: transform .18s ease;
 }
 
 .backupCloudKindSwitch[data-kind="s3"] .backupCloudKindThumb {
@@ -536,74 +894,556 @@
 .backupCloudKindOption {
   position: relative;
   z-index: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   min-width: 0;
-  height: 28px;
-  padding: 0 12px;
+  padding: 0 7px;
   border: 0;
-  border-radius: 999px;
+  border-radius: 8px;
+  color: #7b879b;
   background: transparent;
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0;
+  font-size: 9.5px;
+  font-weight: 750;
   cursor: pointer;
-  transition: color .18s ease;
 }
 
-.backupCloudKindOption:hover {
-  color: #3b82f6;
-}
-
+.backupCloudKindOption:hover,
 .backupCloudKindOption[aria-checked="true"] {
-  color: #2563eb;
+  color: #4f6df5;
 }
 
 .backupCloudKindOption:focus-visible {
-  outline: 2px solid rgba(37, 99, 235, .35);
+  outline: 2px solid rgba(79, 109, 245, .3);
   outline-offset: -2px;
 }
 
-.backupModal .ant-switch {
-  min-width: 44px;
-  height: 22px;
-  background: #cbd5e1 !important;
+.backupCloudFields {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
 
-.backupModal .ant-switch-checked {
-  background: linear-gradient(135deg, #6366f1 0%, #3b82f6 100%) !important;
-  box-shadow: 0 4px 12px -2px rgba(99, 102, 241, 0.3);
+.backupPathStyleField {
+  grid-column: 1 / -1;
+  min-width: 0;
+  min-height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 9px 11px;
+  border: 1px solid #e1e7f0;
+  border-radius: 10px;
+  background: #f8faff;
 }
 
-.backupModal .ant-table-body,
-.backupModal .ant-table-content {
+.backupPathStyleField > div {
+  min-width: 0;
+}
+
+.backupPathStyleField strong,
+.backupPathStyleField span {
+  display: block;
+}
+
+.backupPathStyleField strong {
+  margin-bottom: 2px;
+  color: #445169;
+  font-size: 10.5px;
+  font-weight: 750;
+}
+
+.backupPathStyleField span {
+  overflow: hidden;
+  color: #929daf;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── 恢复点记录 ───────────────────────────────────────────────────────── */
+
+.backupRecordsCard {
+  min-height: 268px;
+  flex: 1 0 268px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.backupRecordsHeader {
+  min-height: 62px;
+  flex: 0 0 62px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 16px;
+  border-bottom: 1px solid #e3e8f1;
+}
+
+.backupRecordsTitle {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.backupRecordsTitle strong {
+  color: #2b374d;
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.backupRecordsTitle > span {
+  min-width: 25px;
+  height: 25px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(79, 109, 245, .16);
+  border-radius: 999px;
+  color: #4f6df5;
+  background: #f0f2ff;
+  font-size: 9.5px;
+  font-weight: 850;
+}
+
+.backupRecordsTitle small {
+  color: #929daf;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.backupRecordsToolbar {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 220px 112px;
+  gap: 8px;
+}
+
+.backupRecordsToolbar .ant-input-affix-wrapper,
+.backupRecordsToolbar .ant-select,
+.backupRecordsToolbar .ant-select-selector {
+  height: 34px !important;
+  min-height: 34px !important;
+}
+
+.backupRecordsToolbar .ant-input-affix-wrapper {
+  padding-inline: 10px !important;
+}
+
+.backupRecordsToolbar .ant-input-affix-wrapper > input.ant-input {
+  height: 30px !important;
+  min-height: 30px !important;
+}
+
+.backupRecordsToolbar .ant-input-prefix {
+  color: #9aa5b6;
+}
+
+.backupRecordsToolbar .ant-select-selector {
+  padding-inline: 10px !important;
+}
+
+.backupRecordTableFrame {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.backupRecordTableScroll {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
   scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
 }
 
-.backupModal .ant-table-body::-webkit-scrollbar,
-.backupModal .ant-table-content::-webkit-scrollbar {
+.backupRecordTableScroll:hover,
+.backupRecordTableScroll:focus-within {
+  scrollbar-color: rgba(123, 139, 162, .34) transparent;
+}
+
+.backupRecordTableScroll::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
-.backupModal .ant-table-body::-webkit-scrollbar-thumb,
-.backupModal .ant-table-content::-webkit-scrollbar-thumb {
+.backupRecordTableScroll::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(99, 102, 241, .25);
+  background: transparent;
 }
+
+.backupRecordTableScroll:hover::-webkit-scrollbar-thumb,
+.backupRecordTableScroll:focus-within::-webkit-scrollbar-thumb {
+  background: rgba(123, 139, 162, .34);
+}
+
+.backupRecordTable {
+  width: 100%;
+  min-width: 660px;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  color: #44526a;
+  font-size: 10px;
+}
+
+.backupRecordTable th {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  height: 37px;
+  padding: 0 11px;
+  border-bottom: 1px solid #e5eaf2;
+  color: #7c899e;
+  background: #f7f9fc;
+  font-size: 9.5px;
+  font-weight: 750;
+  text-align: left;
+}
+
+.backupRecordTable td {
+  height: 49px;
+  padding: 7px 11px;
+  border-bottom: 1px solid #edf0f5;
+  vertical-align: middle;
+}
+
+.backupRecordTable tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.backupRecordTableRow > td {
+  transition: background .15s ease;
+}
+
+.backupRecordTableRow:hover > td {
+  background: #fafbff;
+}
+
+.backupRecordColFile { width: 42%; }
+.backupRecordColTime { width: 22%; }
+.backupRecordColSize { width: 10%; }
+.backupRecordColStatus { width: 11%; }
+.backupRecordColActions { width: 15%; }
+
+.backupRecordFileCell {
+  min-width: 0;
+}
+
+.backupRecordFileCell strong,
+.backupRecordFileCell span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupRecordFileCell strong {
+  margin-bottom: 2px;
+  color: #31405a;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.backupRecordFileCell span {
+  color: #939eb0;
+  font-size: 8.8px;
+}
+
+.backupRecordStatus {
+  width: fit-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid #dfe5ee;
+  border-radius: 999px;
+  color: #718098;
+  background: #f5f7fa;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.backupRecordStatus::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .7;
+}
+
+.backupRecordStatus.is-success {
+  border-color: rgba(18, 166, 118, .16);
+  color: #138e66;
+  background: #ebf9f4;
+}
+
+.backupRecordStatus.is-failed {
+  border-color: rgba(224, 82, 95, .17);
+  color: #cf4856;
+  background: #fff1f2;
+}
+
+.backupRecordActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.backupModal .backupRecordActionButton.ant-btn {
+  width: 29px !important;
+  height: 29px !important;
+  min-width: 29px !important;
+  padding: 0 !important;
+  border: 1px solid #dfe5ee !important;
+  border-radius: 8px !important;
+  color: #71819a !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+.backupModal .backupRecordActionButton.ant-btn:hover:not(:disabled),
+.backupModal .backupRecordActionButton.ant-btn:focus-visible:not(:disabled) {
+  border-color: rgba(79, 109, 245, .28) !important;
+  color: #4f6df5 !important;
+  background: #f5f7ff !important;
+}
+
+.backupModal .backupRecordActionButton.is-danger.ant-btn:hover:not(:disabled),
+.backupModal .backupRecordActionButton.is-danger.ant-btn:focus-visible:not(:disabled) {
+  border-color: rgba(224, 82, 95, .28) !important;
+  color: #d24a57 !important;
+  background: #fff5f6 !important;
+}
+
+.backupRecordTableEmptyRow td {
+  height: 118px;
+  color: #9aa5b6;
+  font-size: 10.5px;
+  text-align: center;
+}
+
+.backupRecordRowTooltipContent {
+  min-width: 290px;
+  display: grid;
+  gap: 7px;
+  padding: 2px 0;
+}
+
+.backupRecordRowTooltipContent > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 8px;
+  color: rgba(255, 255, 255, .92);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.backupRecordRowTooltipContent > div > span {
+  color: rgba(255, 255, 255, .56);
+}
+
+/* ─── 响应式与低高度适配 ───────────────────────────────────────────────── */
+
+@media (max-width: 1050px) {
+  .backupLayout {
+    grid-template-columns: 260px minmax(0, 1fr);
+  }
+
+  .backupSidebar {
+    padding-inline: 18px;
+  }
+
+  .backupHealthCardHead > div > span {
+    display: -webkit-box;
+    overflow: hidden;
+    line-height: 1.35;
+    white-space: normal;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .backupStrategyGrid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .backupDirectoryField {
+    grid-column: 1 / -1;
+  }
+
+  .backupRecordsToolbar {
+    grid-template-columns: 190px 108px;
+  }
+}
+
+@media (max-width: 860px) {
+  .ant-modal-wrap:has(> .backupModal) {
+    padding: 12px;
+  }
+
+  .backupModal {
+    max-width: calc(100vw - 24px);
+  }
+
+  .backupModal .ant-modal-container {
+    height: calc(100vh - 24px);
+    min-height: 0;
+  }
+
+  .backupModalHeaderStatus,
+  .backupSidebar {
+    display: none;
+  }
+
+  .backupLayout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 650px) {
+  .backupModal .ant-modal-header {
+    min-height: 82px;
+    flex-basis: 82px;
+    padding-inline: 20px 68px !important;
+  }
+
+  .backupModal .ant-modal-close {
+    top: 22px !important;
+    inset-inline-end: 18px !important;
+  }
+
+  .backupModalHeaderIcon {
+    width: 42px;
+    height: 42px;
+    flex-basis: 42px;
+    border-radius: 13px;
+  }
+
+  .backupModalHeaderCopy strong {
+    font-size: 18px;
+  }
+
+  .backupModalHeaderCopy span,
+  .backupTargetCopy span {
+    display: none;
+  }
+
+  .backupMain {
+    padding: 16px;
+  }
+
+  .backupTargetToolbar,
+  .backupCloudCardHeader,
+  .backupRecordsHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .backupModal .backupTargetSegmented.ant-segmented {
+    width: 100%;
+  }
+
+  .backupStrategyGrid,
+  .backupCloudFields {
+    grid-template-columns: 1fr;
+  }
+
+  .backupDirectoryField,
+  .backupPathStyleField {
+    grid-column: 1;
+  }
+
+  .backupCloudCardActions {
+    justify-content: space-between;
+  }
+
+  .backupCloudReadyState {
+    display: none;
+  }
+
+  .backupCloudKindSwitch {
+    width: 100%;
+  }
+
+  .backupRecordsHeader {
+    min-height: auto;
+  }
+
+  .backupRecordsToolbar {
+    grid-template-columns: minmax(0, 1fr) 108px;
+  }
+}
+
+@media (max-height: 690px) and (min-width: 861px) {
+  .backupModal .ant-modal-container {
+    height: calc(100vh - 16px);
+    min-height: 0;
+  }
+
+  .backupModal .ant-modal-header {
+    min-height: 82px;
+    flex-basis: 82px;
+  }
+
+  .backupModal .ant-modal-close {
+    top: 22px !important;
+  }
+
+  .backupSidebar {
+    padding-block: 17px;
+  }
+
+  .backupMetricGrid {
+    margin-bottom: 14px;
+  }
+
+  .backupSecurityNote {
+    display: none;
+  }
+
+  .backupMain {
+    gap: 11px;
+    padding-block: 16px;
+  }
+
+  .backupStrategyCard,
+  .backupCloudCard {
+    padding-block: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backupHealthCard.is-running .backupHealthIcon {
+    animation: none;
+  }
+
+  .backupCloudKindThumb,
+  .backupModal .ant-btn,
+  .backupModal .ant-input,
+  .backupModal .ant-input-affix-wrapper,
+  .backupModal .ant-input-number,
+  .backupModal .ant-select-selector {
+    transition: none !important;
+  }
+}
+
+/* ─── Modal 动效 ───────────────────────────────────────────────────────── */
 
 .helm-modal-motion-appear,
 .helm-modal-motion-enter {
   opacity: 0;
-  transform: translateY(10px);
+  transform: translateY(10px) scale(.99);
 }
 
 .helm-modal-motion-appear-active,
 .helm-modal-motion-enter-active {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
   transition:
     opacity 180ms cubic-bezier(.22, 1, .36, 1),
     transform 180ms cubic-bezier(.22, 1, .36, 1);
@@ -611,12 +1451,12 @@
 
 .helm-modal-motion-leave {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
 }
 
 .helm-modal-motion-leave-active {
   opacity: 0;
-  transform: translateY(8px);
+  transform: translateY(8px) scale(.992);
   transition:
     opacity 140ms cubic-bezier(.4, 0, .2, 1),
     transform 140ms cubic-bezier(.4, 0, .2, 1);
@@ -641,4 +1481,3 @@
   opacity: 0;
   transition: opacity 140ms cubic-bezier(.4, 0, .2, 1);
 }
-

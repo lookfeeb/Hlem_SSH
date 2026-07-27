@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { comparePathName } from "../../lib/fileClassify";
 import { getParentPath, getPathSegments, joinPath, normalizePath } from "../../lib/path";
 import type { RemoteFileEntry } from "../../types";
+import { getDirectoryAncestorPaths, uniqueKeys } from "./directoryViewState";
 
 export interface DirectoryTreeProps {
   canUseFiles: boolean;
@@ -211,21 +212,6 @@ function getActiveChildPath(directoryPath: string, currentPath: string) {
 function getDirectoryTitle(path: string) {
   const segments = getPathSegments(path);
   return segments[segments.length - 1] ?? "/";
-}
-
-function getDirectoryAncestorPaths(path: string) {
-  const segments = getPathSegments(path);
-  const paths = ["/"];
-  let current = "/";
-  for (const segment of segments) {
-    current = joinPath(current, segment);
-    paths.push(current);
-  }
-  return paths;
-}
-
-function uniqueKeys(keys: string[]) {
-  return Array.from(new Set(keys));
 }
 
 function isTreeSwitcherClick(target: EventTarget | null) {

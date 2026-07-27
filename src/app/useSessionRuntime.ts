@@ -19,9 +19,18 @@ import {
   notifyEditorSessionDisconnected,
   shouldSkipTerminalEntry,
 } from "./appHelpers";
+import {
+  addConnectingSessionId,
+  connectingSessionIdsFor,
+  removeConnectingSessionIds,
+} from "./sessionConnectionState";
 import type { ConfigSnapshot, RemoteSession } from "../types";
 
 type TerminalInfo = { terminalId: string };
+type ConnectionAttempt = {
+  cancelled: boolean;
+  connectionId: string | null;
+};
 
 const SSH_VERSION_COMMAND =
   "sh -lc 'if command -v sshd >/dev/null 2>&1; then sshd -V 2>&1; elif [ -x /usr/sbin/sshd ]; then /usr/sbin/sshd -V 2>&1; elif [ -x /usr/local/sbin/sshd ]; then /usr/local/sbin/sshd -V 2>&1; else ssh -V 2>&1; fi'";
@@ -107,6 +116,7 @@ type UseSessionRuntimeOptions = {
   registerTerminal: (terminalId: string, sessionId: string) => void;
   appendTerminal: (sessionId: string, kind: "system" | "error", content: string) => void;
   getSessionConfiguredPath: (sessionId: string) => string | null | undefined;
+  onSessionConnected: (sessionId: string, connectionId: string) => Promise<void> | void;
 };
 
 export function useSessionRuntime({
@@ -123,20 +133,21 @@ export function useSessionRuntime({
   registerTerminal,
   appendTerminal,
   getSessionConfiguredPath,
+  onSessionConnected,
 }: UseSessionRuntimeOptions) {
-  const [connectingSessionId, setConnectingSessionId] = useState<string | null>(null);
+  const [connectingSessionIds, setConnectingSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const mountedRef = useMountedRef();
-  const pendingConnectionIdsRef = useRef<Map<string, string>>(new Map());
-  const abortedConnectSessionsRef = useRef<Set<string>>(new Set());
-  const uiInitiatedConnectsRef = useRef<Set<string>>(new Set());
+  const connectionAttemptsRef = useRef<Map<string, ConnectionAttempt>>(new Map());
+  const connectingSessionIdsRef = useRef<ReadonlySet<string>>(connectingSessionIds);
+  const uiInitiatedConnectCountsRef = useRef<Map<string, number>>(new Map());
+  const uiManagedConnectionIdsRef = useRef<Set<string>>(new Set());
   const manualDisconnectSessionIdsRef = useRef<Set<string>>(new Set());
   const reconnectAttemptsRef = useRef<Map<string, number>>(new Map());
   const reconnectTimersRef = useRef<Map<string, number>>(new Map());
   const telemetryIntervalsRef = useRef<Map<string, number>>(new Map());
   const telemetryStartSeqRef = useRef<Map<string, number>>(new Map());
-  const connectingSessionIdRef = useRef<string | null>(connectingSessionId);
+  const deferredTelemetryStartsRef = useRef<Map<string, string>>(new Map());
   const activeSessionIdRef = useRef(activeSessionId);
-  connectingSessionIdRef.current = connectingSessionId;
   activeSessionIdRef.current = activeSessionId;
 
   useEffect(() => {
@@ -144,6 +155,7 @@ export function useSessionRuntime({
     for (const session of sessions) {
       if (session.state !== "connected" || !session.connectionId) continue;
       connectedIds.add(session.id);
+      if (deferredTelemetryStartsRef.current.has(session.id)) continue;
       const interval = desiredTelemetryInterval(session.id);
       if (telemetryIntervalsRef.current.get(session.id) !== interval) {
         startTelemetry(session.connectionId, session.id, interval);
@@ -160,16 +172,63 @@ export function useSessionRuntime({
   }, []);
 
   function resetSessionRuntime() {
-    pendingConnectionIdsRef.current.clear();
-    abortedConnectSessionsRef.current.clear();
-    uiInitiatedConnectsRef.current.clear();
+    for (const attempt of connectionAttemptsRef.current.values()) {
+      attempt.cancelled = true;
+      if (attempt.connectionId) {
+        const connectionId = attempt.connectionId;
+        attempt.connectionId = null;
+        void disconnectQuietly(connectionId, "reset session runtime");
+      }
+    }
+    connectionAttemptsRef.current.clear();
     manualDisconnectSessionIdsRef.current.clear();
     reconnectAttemptsRef.current.clear();
     for (const timer of reconnectTimersRef.current.values()) window.clearTimeout(timer);
     reconnectTimersRef.current.clear();
     telemetryIntervalsRef.current.clear();
     telemetryStartSeqRef.current.clear();
-    setConnectingSessionId(null);
+    deferredTelemetryStartsRef.current.clear();
+    const nextConnectingSessionIds = new Set<string>();
+    connectingSessionIdsRef.current = nextConnectingSessionIds;
+    setConnectingSessionIds(nextConnectingSessionIds);
+  }
+
+  function beginConnectionAttempt(sessionId: string) {
+    const nextConnectingSessionIds = addConnectingSessionId(connectingSessionIdsRef.current, sessionId);
+    if (!nextConnectingSessionIds) return null;
+    const attempt: ConnectionAttempt = { cancelled: false, connectionId: null };
+    connectionAttemptsRef.current.set(sessionId, attempt);
+    connectingSessionIdsRef.current = nextConnectingSessionIds;
+    setConnectingSessionIds(nextConnectingSessionIds);
+    uiInitiatedConnectCountsRef.current.set(
+      sessionId,
+      (uiInitiatedConnectCountsRef.current.get(sessionId) ?? 0) + 1,
+    );
+    return attempt;
+  }
+
+  function finishConnectionAttempt(sessionId: string, attempt: ConnectionAttempt) {
+    const remainingUiAttempts = (uiInitiatedConnectCountsRef.current.get(sessionId) ?? 1) - 1;
+    if (remainingUiAttempts > 0) {
+      uiInitiatedConnectCountsRef.current.set(sessionId, remainingUiAttempts);
+    } else {
+      uiInitiatedConnectCountsRef.current.delete(sessionId);
+    }
+    if (connectionAttemptsRef.current.get(sessionId) !== attempt) return;
+    connectionAttemptsRef.current.delete(sessionId);
+    const nextConnectingSessionIds = removeConnectingSessionIds(connectingSessionIdsRef.current, [sessionId]);
+    connectingSessionIdsRef.current = nextConnectingSessionIds;
+    if (mountedRef.current) setConnectingSessionIds(nextConnectingSessionIds);
+  }
+
+  function hasUiInitiatedConnect(sessionId: string) {
+    return (uiInitiatedConnectCountsRef.current.get(sessionId) ?? 0) > 0;
+  }
+
+  function updateSessionRef(sessionId: string, updater: (session: RemoteSession) => RemoteSession) {
+    sessionsRef.current = sessionsRef.current.map((session) =>
+      session.id === sessionId ? updater(session) : session,
+    );
   }
 
   function activateSession(id: string) {
@@ -178,21 +237,18 @@ export function useSessionRuntime({
   }
 
   function runtimeSessionsForConfig(configId: string) {
-    return sessions.filter((session) => remoteSessionConfigId(session) === configId && isRuntimeSession(session));
+    return sessionsRef.current.filter((session) => remoteSessionConfigId(session) === configId && isRuntimeSession(session));
   }
 
   async function deleteSession(id: string) {
     const configId = id;
-    const baseSession = sessions.find((session) => session.id === configId);
+    const baseSession = sessionsRef.current.find((session) => session.id === configId);
     const runtimeSessions = runtimeSessionsForConfig(configId);
     for (const sessionId of [configId, ...runtimeSessions.map((session) => session.id)]) {
       manualDisconnectSessionIdsRef.current.add(sessionId);
       cancelReconnect(sessionId);
     }
-    const connectingRuntime = runtimeSessions.find((session) => session.id === connectingSessionId);
-    if (connectingRuntime) {
-      await cancelConnectingSession(connectingRuntime.id);
-    }
+    await cancelConnectingSession(configId);
     if (baseSession?.connectionId) {
       await teardownSession(baseSession);
     }
@@ -206,38 +262,57 @@ export function useSessionRuntime({
   }
 
   async function cancelConnectingSession(id: string) {
-    const targetId = connectingSessionId === id
-      ? id
-      : sessions.find((session) => remoteSessionConfigId(session) === id && session.id === connectingSessionId)?.id;
-    if (!targetId) return;
-    manualDisconnectSessionIdsRef.current.add(targetId);
-    cancelReconnect(targetId);
-    abortedConnectSessionsRef.current.add(targetId);
-    const pendingConnectionId = pendingConnectionIdsRef.current.get(targetId);
-    if (pendingConnectionId) {
-      pendingConnectionIdsRef.current.delete(targetId);
-      await disconnectQuietly(pendingConnectionId, "cancel connecting session");
+    const targetIds = connectingSessionIdsFor(
+      id,
+      sessionsRef.current,
+      connectingSessionIdsRef.current,
+    );
+    if (targetIds.length === 0) return;
+
+    const disconnects: Promise<void>[] = [];
+    for (const targetId of targetIds) {
+      manualDisconnectSessionIdsRef.current.add(targetId);
+      cancelReconnect(targetId);
+      const attempt = connectionAttemptsRef.current.get(targetId);
+      if (!attempt) continue;
+      attempt.cancelled = true;
+      if (connectionAttemptsRef.current.get(targetId) === attempt) {
+        connectionAttemptsRef.current.delete(targetId);
+      }
+      if (attempt.connectionId) {
+        const connectionId = attempt.connectionId;
+        attempt.connectionId = null;
+        disconnects.push(disconnectQuietly(connectionId, "cancel connecting session"));
+      }
+      const resetConnection = (item: RemoteSession): RemoteSession => ({
+        ...item,
+        state: "disconnected",
+        connectionId: null,
+        connectedAt: null,
+        sshVersion: null,
+        terminalId: null,
+        sftpId: null,
+        telemetryJobId: null,
+        loginPath: null,
+        files: [],
+      });
+      updateSessionRef(targetId, resetConnection);
+      if (mountedRef.current) updateSession(targetId, resetConnection);
     }
-    if (!mountedRef.current) return;
-    setConnectingSessionId((current) => (current === targetId ? null : current));
-    updateSession(targetId, (item) => ({
-      ...item,
-      state: "disconnected",
-      connectionId: null,
-      connectedAt: null,
-      sshVersion: null,
-      terminalId: null,
-      sftpId: null,
-      telemetryJobId: null,
-      loginPath: null,
-    }));
+    const nextConnectingSessionIds = removeConnectingSessionIds(
+      connectingSessionIdsRef.current,
+      targetIds,
+    );
+    connectingSessionIdsRef.current = nextConnectingSessionIds;
+    if (mountedRef.current) setConnectingSessionIds(nextConnectingSessionIds);
+    await Promise.all(disconnects);
   }
 
   async function closeSession(id: string) {
     const session = sessions.find((item) => item.id === id);
     manualDisconnectSessionIdsRef.current.add(id);
     cancelReconnect(id);
-    if (connectingSessionId === id) {
+    if (connectingSessionIdsFor(id, sessionsRef.current, connectingSessionIdsRef.current).length > 0) {
       await cancelConnectingSession(id);
     } else if (session?.connectionId) {
       await teardownSession(session);
@@ -333,11 +408,14 @@ export function useSessionRuntime({
   function handleSshStatus(payload: Awaited<ReturnType<typeof remoteApi.connect>>) {
     if (!mountedRef.current) return;
     const currentSessions = sessionsRef.current;
+    const managedConnection = uiManagedConnectionIdsRef.current.has(payload.connectionId);
     const reconnectTargets = payload.status === "disconnected"
       ? currentSessions.filter((session) => {
           const matchesConnection = Boolean(session.connectionId && session.connectionId === payload.connectionId);
           const matchesConfig = session.id === payload.sessionId && !isRuntimeSession(session);
-          const uiManaged = currentSessions.some((item) => remoteSessionConfigId(item) === payload.sessionId && uiInitiatedConnectsRef.current.has(item.id));
+          const uiManaged = managedConnection || currentSessions.some((item) =>
+              remoteSessionConfigId(item) === payload.sessionId && hasUiInitiatedConnect(item.id),
+            );
           return (matchesConnection || (matchesConfig && !uiManaged)) && session.state === "connected";
         })
       : [];
@@ -345,7 +423,9 @@ export function useSessionRuntime({
       current.map((session) => {
         const matchesConnection = Boolean(session.connectionId && session.connectionId === payload.connectionId);
         const matchesConfig = session.id === payload.sessionId && !isRuntimeSession(session);
-        const uiManaged = current.some((item) => remoteSessionConfigId(item) === payload.sessionId && uiInitiatedConnectsRef.current.has(item.id));
+        const uiManaged = managedConnection || current.some((item) =>
+            remoteSessionConfigId(item) === payload.sessionId && hasUiInitiatedConnect(item.id),
+          );
         if (!matchesConnection && (!matchesConfig || uiManaged)) return session;
         if (payload.status === "disconnected") {
           notifyEditorSessionDisconnected(session.id);
@@ -369,12 +449,12 @@ export function useSessionRuntime({
         }
         if (
           payload.status === "connected" &&
-          !uiInitiatedConnectsRef.current.has(session.id) &&
+          !uiManaged &&
           !session.terminalId
         ) {
           void backfillExternalConnection(session.id, payload.connectionId);
         }
-        if (payload.status === "connected" && !uiInitiatedConnectsRef.current.has(session.id) && !session.sshVersion) {
+        if (payload.status === "connected" && !uiManaged && !session.sshVersion) {
           void fetchSshVersion(payload.connectionId, session.id);
         }
         return {
@@ -386,33 +466,52 @@ export function useSessionRuntime({
       }),
     );
     for (const session of reconnectTargets) scheduleReconnect(session.id);
+    if (payload.status === "disconnected") {
+      uiManagedConnectionIdsRef.current.delete(payload.connectionId);
+    }
   }
 
   async function backfillExternalConnection(
     sessionId: string,
     connectionId: string,
   ) {
-    if (uiInitiatedConnectsRef.current.has(sessionId)) return;
+    if (hasUiInitiatedConnect(sessionId)) return;
     try {
-      const session = sessions.find((item) => item.id === sessionId);
-      const paths = session ? await resolveConnectionPaths(connectionId, session.username, getSessionConfiguredPath(sessionId)) : null;
-      const terminal = await remoteApi.openTerminal(connectionId, 100, 30);
+      const session = sessionsRef.current.find((item) => item.id === sessionId);
+      void prewarmSftp(connectionId);
+      const [paths, terminal] = await Promise.all([
+        session
+          ? resolveConnectionPaths(connectionId, session.username, getSessionConfiguredPath(sessionId))
+          : Promise.resolve(null),
+        remoteApi.openTerminal(connectionId, 100, 30),
+      ]);
       if (!mountedRef.current) {
         await closeTerminalQuietly(terminal.terminalId, "unmounted external connection backfill");
         return;
       }
       registerTerminal(terminal.terminalId, sessionId);
-      updateSession(sessionId, (item) => ({
+      updateSessionRef(sessionId, (item) => ({
         ...item,
+        state: "connected",
+        connectionId,
         ...(paths ? { currentPath: paths.initialPath, loginPath: paths.loginPath } : {}),
         terminalId: terminal.terminalId,
       }));
+      updateSession(sessionId, (item) => ({
+        ...item,
+        state: "connected",
+        connectionId,
+        ...(paths ? { currentPath: paths.initialPath, loginPath: paths.loginPath } : {}),
+        terminalId: terminal.terminalId,
+      }));
+      startConnectedServices(connectionId, sessionId);
     } catch (error) {
-      if (mountedRef.current) appendTerminal(sessionId, "error", `终端不可用：${getErrorMessage(error)}`);
+      if (mountedRef.current) {
+        appendTerminal(sessionId, "error", `终端不可用：${getErrorMessage(error)}`);
+        startTelemetry(connectionId, sessionId);
+        void fetchSshVersion(connectionId, sessionId);
+      }
     }
-    if (!mountedRef.current) return;
-    startTelemetry(connectionId, sessionId);
-    void fetchSshVersion(connectionId, sessionId);
   }
 
   async function connectSession(
@@ -425,17 +524,18 @@ export function useSessionRuntime({
       : createRuntimeSessionInstance(session);
     const runtimeId = targetSession.id;
     const configId = remoteSessionConfigId(targetSession);
-    if (connectingSessionIdRef.current === runtimeId) return false;
+    const attempt = beginConnectionAttempt(runtimeId);
+    if (!attempt) return false;
     manualDisconnectSessionIdsRef.current.delete(runtimeId);
     cancelReconnect(runtimeId);
     if (!isRuntimeSession(session)) {
+      if (!sessionsRef.current.some((item) => item.id === runtimeId)) {
+        sessionsRef.current = [...sessionsRef.current, targetSession];
+      }
       setSessions((current) => current.some((item) => item.id === runtimeId) ? current : [...current, targetSession]);
     }
     if (options.activate !== false) activateSession(runtimeId);
-    abortedConnectSessionsRef.current.delete(runtimeId);
-    uiInitiatedConnectsRef.current.add(runtimeId);
-    setConnectingSessionId(runtimeId);
-    updateSession(runtimeId, (item) => ({
+    const markConnecting = (item: RemoteSession): RemoteSession => ({
       ...item,
       state: "connecting",
       connectionId: null,
@@ -446,71 +546,71 @@ export function useSessionRuntime({
       telemetryJobId: null,
       loginPath: null,
       files: [],
-    }));
+    });
+    updateSessionRef(runtimeId, markConnecting);
+    updateSession(runtimeId, markConnecting);
     let connection: Awaited<ReturnType<typeof remoteApi.connect>> | null = null;
     try {
       connection = await remoteApi.connect(configId);
       const connectionId = connection.connectionId;
-      pendingConnectionIdsRef.current.set(runtimeId, connectionId);
+      uiManagedConnectionIdsRef.current.add(connectionId);
+      attempt.connectionId = connectionId;
       if (!mountedRef.current) {
-        pendingConnectionIdsRef.current.delete(runtimeId);
+        attempt.connectionId = null;
         await disconnectQuietly(connectionId, "unmounted connect session cleanup");
         return false;
       }
-      if (await disconnectIfAborted(runtimeId, connectionId)) return false;
+      if (await disconnectIfCancelled(attempt, connectionId)) return false;
 
-      const paths = await resolveConnectionPaths(connectionId, targetSession.username, getSessionConfiguredPath(configId));
+      void prewarmSftp(connectionId);
+      const [paths, terminalResult] = await Promise.all([
+        resolveConnectionPaths(connectionId, targetSession.username, getSessionConfiguredPath(configId)),
+        openTerminalSafely(connectionId),
+      ]);
       if (!mountedRef.current) {
-        pendingConnectionIdsRef.current.delete(runtimeId);
+        attempt.connectionId = null;
         await disconnectQuietly(connectionId, "unmounted connect session cleanup");
         return false;
       }
-      if (await disconnectIfAborted(runtimeId, connectionId)) return false;
-
-      const terminalResult = await openTerminalSafely(connectionId);
-      if (!mountedRef.current) {
-        pendingConnectionIdsRef.current.delete(runtimeId);
-        await disconnectQuietly(connectionId, "unmounted connect session cleanup");
-        return false;
-      }
-      if (await disconnectIfAborted(runtimeId, connectionId)) return false;
+      if (await disconnectIfCancelled(attempt, connectionId)) return false;
 
       const terminal = terminalResult.value;
-      if (terminal) attachTerminal(runtimeId, terminal);
+      if (!terminal) {
+        const detail = terminalResult.error ? `：${getErrorMessage(terminalResult.error)}` : "";
+        throw new Error(`SSH 已连接，但远端拒绝打开终端通道${detail}`);
+      }
+      attachTerminal(runtimeId, terminal);
 
-      pendingConnectionIdsRef.current.delete(runtimeId);
       if (!mountedRef.current) return false;
-      updateSession(runtimeId, (item) => ({
+      const markConnected = (item: RemoteSession): RemoteSession => ({
         ...item,
         state: "connected",
         currentPath: paths.initialPath,
         loginPath: paths.loginPath,
         connectionId,
         connectedAt: connection?.connectedAt ?? new Date().toISOString(),
-        terminalId: terminal?.terminalId ?? null,
+        terminalId: terminal.terminalId,
         sftpId: null,
         telemetryJobId: null,
         files: [],
-        terminal: [
-          ...item.terminal,
-          ...(terminalResult.error ? [createTerminalEntry("error", `终端不可用：${getErrorMessage(terminalResult.error)}`)] : []),
-        ],
-      }));
-      setConnectingSessionId(null);
-      startTelemetry(connectionId, runtimeId);
-      void fetchSshVersion(connectionId, runtimeId);
-
-      if (!terminal) throw new Error("SSH 已连接，但远端拒绝打开终端通道");
+      });
+      updateSessionRef(runtimeId, markConnected);
+      updateSession(runtimeId, markConnected);
+      attempt.connectionId = null;
+      startConnectedServices(connectionId, runtimeId);
       reconnectAttemptsRef.current.delete(runtimeId);
       return true;
     } catch (error) {
-      if (connection?.connectionId) {
-        await disconnectQuietly(connection.connectionId, "connect session rollback");
+      if (attempt.connectionId) {
+        const connectionId = attempt.connectionId;
+        attempt.connectionId = null;
+        await disconnectQuietly(connectionId, "connect session rollback");
       }
-      pendingConnectionIdsRef.current.delete(runtimeId);
-      if (abortedConnectSessionsRef.current.has(runtimeId)) return false;
+      if (attempt.cancelled) return false;
       if (!mountedRef.current) return false;
-      updateSession(runtimeId, (item) => ({ ...item, state: "failed" }));
+      const markFailed = (item: RemoteSession): RemoteSession => ({ ...item, state: "failed" });
+      updateSessionRef(runtimeId, markFailed);
+      updateSession(runtimeId, markFailed);
       const hostKey = getHostKeyPayload(error);
       if (hostKey) {
         Modal.confirm({
@@ -530,16 +630,16 @@ export function useSessionRuntime({
       }
       return false;
     } finally {
-      abortedConnectSessionsRef.current.delete(runtimeId);
-      uiInitiatedConnectsRef.current.delete(runtimeId);
-      if (mountedRef.current) setConnectingSessionId((current) => (current === runtimeId ? null : current));
+      finishConnectionAttempt(runtimeId, attempt);
     }
   }
 
-  async function disconnectIfAborted(sessionId: string, connectionId: string) {
-    if (!abortedConnectSessionsRef.current.has(sessionId)) return false;
-    pendingConnectionIdsRef.current.delete(sessionId);
-    await disconnectQuietly(connectionId, "aborted connection cleanup");
+  async function disconnectIfCancelled(attempt: ConnectionAttempt, connectionId: string) {
+    if (!attempt.cancelled) return false;
+    if (attempt.connectionId === connectionId) {
+      attempt.connectionId = null;
+      await disconnectQuietly(connectionId, "cancelled connection cleanup");
+    }
     return true;
   }
 
@@ -568,6 +668,33 @@ export function useSessionRuntime({
 
   function attachTerminal(sessionId: string, terminal: TerminalInfo) {
     registerTerminal(terminal.terminalId, sessionId);
+  }
+
+  async function prewarmSftp(connectionId: string) {
+    try {
+      await remoteApi.openSftp(connectionId);
+    } catch (error) {
+      console.warn("[helm] failed to prewarm sftp:", getErrorMessage(error));
+    }
+  }
+
+  function startConnectedServices(connectionId: string, sessionId: string) {
+    deferredTelemetryStartsRef.current.set(sessionId, connectionId);
+    void (async () => {
+      try {
+        await onSessionConnected(sessionId, connectionId);
+      } catch (error) {
+        console.warn("[helm] failed to initialize connected session services:", getErrorMessage(error));
+      } finally {
+        if (deferredTelemetryStartsRef.current.get(sessionId) !== connectionId) return;
+        deferredTelemetryStartsRef.current.delete(sessionId);
+        if (!mountedRef.current) return;
+        const current = sessionsRef.current.find((session) => session.id === sessionId);
+        if (current?.state !== "connected" || current.connectionId !== connectionId) return;
+        startTelemetry(connectionId, sessionId);
+        void fetchSshVersion(connectionId, sessionId);
+      }
+    })();
   }
 
   function desiredTelemetryInterval(sessionId: string) {
@@ -618,13 +745,19 @@ export function useSessionRuntime({
       reconnectAttemptsRef.current.delete(sessionId);
       return;
     }
-    if (connectingSessionIdRef.current) {
+    if (connectingSessionIdsRef.current.has(sessionId)) {
       reconnectAttemptsRef.current.set(sessionId, Math.max(0, attempt - 1));
       scheduleReconnect(sessionId);
       return;
     }
     const connected = await connectSession(session, { activate: false, reuseSession: true });
-    if (!connected) scheduleReconnect(sessionId);
+    if (
+      !connected &&
+      !manualDisconnectSessionIdsRef.current.has(sessionId) &&
+      !connectingSessionIdsRef.current.has(sessionId)
+    ) {
+      scheduleReconnect(sessionId);
+    }
   }
 
   function startTelemetry(
@@ -640,7 +773,6 @@ export function useSessionRuntime({
       .then((telemetryJob) => {
         if (
           !mountedRef.current ||
-          abortedConnectSessionsRef.current.has(sessionId) ||
           telemetryStartSeqRef.current.get(sessionId) !== requestSeq
         ) return;
         updateSession(sessionId, (item) =>
@@ -684,7 +816,7 @@ export function useSessionRuntime({
   }
 
   return {
-    connectingSessionId,
+    connectingSessionIds,
     resetSessionRuntime,
     activateSession,
     deleteSession,

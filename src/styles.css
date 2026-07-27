@@ -5,6 +5,7 @@
 
 @import "./styles/modals/modal-base.css";
 @import "./styles/modals/modal-about.css";
+@import "./styles/modals/modal-settings.css";
 @import "./styles/modals/modal-tunnel.css";
 @import "./styles/modals/modal-backup.css";
 @import "./styles/modals/modal-ai.css";

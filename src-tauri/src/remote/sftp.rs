@@ -99,85 +99,10 @@ pub(super) fn ensure_remote_file_command_success(
     Err(AppError::Remote(format!("{action}失败：{detail}")))
 }
 
-#[derive(Default)]
-pub(super) struct OwnerLookup {
-    users: HashMap<u32, String>,
-    groups: HashMap<u32, String>,
-}
-
-pub(super) async fn resolve_owner_lookup(
-    handle: &SshHandle,
-    entries: &[DirEntry],
-) -> AppResult<OwnerLookup> {
-    let mut uids = HashSet::new();
-    let mut gids = HashSet::new();
-    for entry in entries {
-        let metadata = entry.metadata();
-        if metadata.user.is_none() {
-            if let Some(uid) = metadata.uid {
-                uids.insert(uid);
-            }
-        }
-        if metadata.group.is_none() {
-            if let Some(gid) = metadata.gid {
-                gids.insert(gid);
-            }
-        }
-    }
-    if uids.is_empty() && gids.is_empty() {
-        return Ok(OwnerLookup::default());
-    }
-
-    let user_args = join_numbers(uids);
-    let group_args = join_numbers(gids);
-    let command = format!(
-        "sh -lc '{}{}'",
-        if user_args.is_empty() {
-            String::new()
-        } else {
-            format!("getent passwd {user_args} | awk -F: '\\''{{print \"u:\"$3\":\"$1}}'\\''; ")
-        },
-        if group_args.is_empty() {
-            String::new()
-        } else {
-            format!("getent group {group_args} | awk -F: '\\''{{print \"g:\"$3\":\"$1}}'\\''")
-        }
-    );
-    let result = exec_with_handle(handle, command, SFTP_OWNER_LOOKUP_TIMEOUT_MS).await?;
-    let mut lookup = OwnerLookup::default();
-    for line in result.stdout.lines() {
-        let mut parts = line.splitn(3, ':');
-        let kind = parts.next();
-        let id = parts.next().and_then(|value| value.parse::<u32>().ok());
-        let name = parts.next().filter(|value| !value.is_empty());
-        match (kind, id, name) {
-            (Some("u"), Some(id), Some(name)) => {
-                lookup.users.insert(id, name.to_string());
-            }
-            (Some("g"), Some(id), Some(name)) => {
-                lookup.groups.insert(id, name.to_string());
-            }
-            _ => {}
-        }
-    }
-    Ok(lookup)
-}
-
-pub(super) fn join_numbers(values: HashSet<u32>) -> String {
-    let mut values: Vec<u32> = values.into_iter().collect();
-    values.sort_unstable();
-    values
-        .into_iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 pub(super) fn remote_entry(
     parent: &str,
     name: String,
     metadata: FileAttributes,
-    owner_lookup: &OwnerLookup,
 ) -> RemoteFileEntry {
     let file_type = sftp_file_type(metadata.file_type());
     let permissions = format!(
@@ -192,20 +117,10 @@ pub(super) fn remote_entry(
     let user = metadata
         .user
         .clone()
-        .or_else(|| {
-            metadata
-                .uid
-                .and_then(|uid| owner_lookup.users.get(&uid).cloned())
-        })
         .unwrap_or_else(|| metadata.uid.map_or("-".to_string(), |uid| uid.to_string()));
     let group = metadata
         .group
         .clone()
-        .or_else(|| {
-            metadata
-                .gid
-                .and_then(|gid| owner_lookup.groups.get(&gid).cloned())
-        })
         .unwrap_or_else(|| metadata.gid.map_or("-".to_string(), |gid| gid.to_string()));
     let owner = format!("{user}/{group}");
     RemoteFileEntry {

@@ -2,6 +2,24 @@ use super::*;
 
 impl RemoteRuntime {
     pub async fn open_sftp(&self, connection_id: &str) -> AppResult<SftpInfo> {
+        let open_lock = self.sftp_open_lock(connection_id).await;
+        let _open_guard = open_lock.lock().await;
+        if let Some(info) = self
+            .sftp_sessions
+            .read()
+            .await
+            .values()
+            .find(|record| record.info.connection_id == connection_id)
+            .map(|record| record.info.clone())
+        {
+            log::info!(
+                "SFTP reuse: sftp_id={} connection_id={}",
+                info.sftp_id,
+                connection_id
+            );
+            return Ok(info);
+        }
+
         let connection = self.connection(connection_id).await?;
         // Open only 1 SFTP channel immediately for fast startup
         let channel = self
@@ -28,6 +46,11 @@ impl RemoteRuntime {
             .write()
             .await
             .insert(info.sftp_id.clone(), record);
+        log::info!(
+            "SFTP opened: sftp_id={} connection_id={}",
+            info.sftp_id,
+            connection_id
+        );
 
         // Expand the transfer pool in the background (non-blocking)
         let conn = connection.clone();
@@ -67,25 +90,8 @@ impl RemoteRuntime {
             .read_dir(normalized.clone())
             .await
             .map_err(remote_error)?;
-        let entries: Vec<_> = entries.collect();
-        let owner_lookup =
-            if let Ok(connection) = self.connection(&sftp_record.info.connection_id).await {
-                resolve_owner_lookup(&connection.handle, &entries)
-                    .await
-                    .unwrap_or_default()
-            } else {
-                OwnerLookup::default()
-            };
         Ok(entries
-            .into_iter()
-            .map(|entry| {
-                remote_entry(
-                    &normalized,
-                    entry.file_name(),
-                    entry.metadata(),
-                    &owner_lookup,
-                )
-            })
+            .map(|entry| remote_entry(&normalized, entry.file_name(), entry.metadata()))
             .collect())
     }
 

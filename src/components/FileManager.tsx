@@ -12,7 +12,7 @@ import {
 import { App as AntdApp, Button, Dropdown, Form, Input, Modal, Table, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { writeClipboardText } from "../lib/clipboard";
 import { formatFileSize } from "../lib/format";
 import { getErrorMessage } from "../lib/configMapping";
@@ -26,6 +26,12 @@ import { fileCategoryMeta } from "./fileManager/fileIcons";
 import { QuickCommandTopArea } from "./fileManager/QuickCommandPanel";
 import { FileDialogs, operationLabel, type FileDialogState } from "./fileManager/FileDialogs";
 import { DirectoryTree, buildTreeData, getDirectoryAncestorPaths, uniqueKeys } from "./fileManager/DirectoryTree";
+import {
+  filesBelongToDirectory,
+  loadDirectoryViewState,
+  saveDirectoryViewState,
+  type DirectoryViewState,
+} from "./fileManager/directoryViewState";
 import type { QuickCommand, RemoteFileEntry, RemoteSession } from "../types";
 
 
@@ -226,9 +232,13 @@ export function FileManager({
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dialog, setDialog] = useState<FileDialogState | null>(null);
-  const [directoryEntries, setDirectoryEntries] = useState<Record<string, RemoteFileEntry[]>>({});
+  const [directoryEntries, setDirectoryEntries] = useState<Record<string, RemoteFileEntry[]>>(
+    () => loadDirectoryViewState(session).entries,
+  );
   const [directoryLoadingKeys, setDirectoryLoadingKeys] = useState<string[]>([]);
-  const [directoryExpandedKeys, setDirectoryExpandedKeys] = useState<string[]>(["/"]);
+  const [directoryExpandedKeys, setDirectoryExpandedKeys] = useState<string[]>(
+    () => loadDirectoryViewState(session).expandedKeys,
+  );
   const [dragging, setDragging] = useState(false);
   const [openingEditorPath, setOpeningEditorPath] = useState<string | null>(null);
   const [commandDialogOpen, setCommandDialogOpen] = useState(false);
@@ -242,6 +252,10 @@ export function FileManager({
   const mountedRef = useMountedRef();
   const sessionIdRef = useRef(session.id);
   const directoryRequestSeqRef = useRef<Map<string, number>>(new Map());
+  const directoryStateSessionIdRef = useRef(session.id);
+  const directoryStateSftpIdRef = useRef(session.sftpId ?? null);
+  const directoryEntriesRef = useRef(directoryEntries);
+  const directoryExpandedKeysRef = useRef(directoryExpandedKeys);
   sessionIdRef.current = session.id;
   useEffect(() => {
     columnWidthsRef.current = columnWidths;
@@ -251,32 +265,73 @@ export function FileManager({
   const contentRef = useRef<HTMLDivElement>(null);
   const tableSurfaceRef = useRef<HTMLDivElement>(null);
   const searchSeq = useRef(0);
-  const directoryExpandedKeysRef = useRef<string[]>(["/"]);
   const detachedEditorsRef = useRef<Map<string, BroadcastChannel>>(new Map());
   const detachedEditorWindowRef = useRef<Window | null>(null);
   const columnResizeCleanupRef = useRef<(() => void) | null>(null);
 
-  useEffect(() => {
-    searchSeq.current += 1;
+  function persistDirectoryViewState(
+    entries = directoryEntriesRef.current,
+    expandedKeys = directoryExpandedKeysRef.current,
+  ) {
+    saveDirectoryViewState(
+      directoryStateSessionIdRef.current,
+      directoryStateSftpIdRef.current,
+      entries,
+      expandedKeys,
+    );
+  }
+
+  function updateDirectoryEntries(action: SetStateAction<Record<string, RemoteFileEntry[]>>) {
+    const next = resolveStateAction(action, directoryEntriesRef.current);
+    directoryEntriesRef.current = next;
+    persistDirectoryViewState(next);
+    setDirectoryEntries(next);
+  }
+
+  function updateDirectoryExpandedKeys(action: SetStateAction<string[]>) {
+    const next = resolveStateAction(action, directoryExpandedKeysRef.current);
+    directoryExpandedKeysRef.current = next;
+    persistDirectoryViewState(directoryEntriesRef.current, next);
+    setDirectoryExpandedKeys(next);
+  }
+
+  function directoryViewMatchesRender() {
+    return directoryStateSessionIdRef.current === session.id
+      && directoryStateSftpIdRef.current === (session.sftpId ?? null)
+      && directoryEntriesRef.current === directoryEntries
+      && directoryExpandedKeysRef.current === directoryExpandedKeys;
+  }
+
+  useLayoutEffect(() => {
+    const nextSftpId = session.sftpId ?? null;
+    const sessionChanged = directoryStateSessionIdRef.current !== session.id;
+    const sftpChanged = directoryStateSftpIdRef.current !== nextSftpId;
+    if (!sessionChanged && !sftpChanged) return;
+
+    persistDirectoryViewState();
+    const nextDirectoryView = loadDirectoryViewState(session);
+    directoryStateSessionIdRef.current = session.id;
+    directoryStateSftpIdRef.current = nextSftpId;
+    directoryEntriesRef.current = nextDirectoryView.entries;
+    directoryExpandedKeysRef.current = nextDirectoryView.expandedKeys;
+    setDirectoryEntries(nextDirectoryView.entries);
+    setDirectoryExpandedKeys(nextDirectoryView.expandedKeys);
+    setDirectoryLoadingKeys([]);
     directoryRequestSeqRef.current.clear();
+
+    if (!sessionChanged) return;
+    searchSeq.current += 1;
     setSearchText("");
     setSearching(false);
     setFocusedPath(null);
     setSelectedRowKeys([]);
     setContextMenu(null);
     setDialog(null);
-    setDirectoryEntries({});
-    setDirectoryLoadingKeys([]);
-    setDirectoryExpandedKeys(["/"]);
-    directoryExpandedKeysRef.current = ["/"];
     setDragging(false);
     setOpeningEditorPath(null);
     setCommandDialogOpen(false);
     setCommandEditingId(null);
-    if (session.state === "connected" && session.sftpId) {
-      void loadDirectory("/", true);
-    }
-  }, [session.id]);
+  }, [session.id, session.sftpId]);
 
   const path = normalizePath(session.currentPath);
   const canUseFiles = session.state === "connected" && Boolean(session.sftpId);
@@ -408,10 +463,6 @@ export function FileManager({
   }
 
   useEffect(() => {
-    directoryExpandedKeysRef.current = directoryExpandedKeys;
-  }, [directoryExpandedKeys]);
-
-  useEffect(() => {
     return () => {
       columnResizeCleanupRef.current?.();
       columnResizeCleanupRef.current = null;
@@ -447,26 +498,31 @@ export function FileManager({
   }, []);
 
   useEffect(() => {
+    if (!directoryViewMatchesRender()) return;
     if (!canUseFiles) {
       setSearching(false);
       setFocusedPath(null);
-      setDirectoryEntries({});
       setDirectoryLoadingKeys([]);
-      setDirectoryExpandedKeys(["/"]);
       return;
     }
     if (filesMatchCurrentPath) {
-      setDirectoryEntries((current) => ({ ...current, [path]: allFiles }));
+      updateDirectoryEntries((current) =>
+        current[path] === allFiles ? current : { ...current, [path]: allFiles },
+      );
     }
-    setDirectoryExpandedKeys((current) => uniqueKeys([...current, ...getDirectoryAncestorPaths(path)]));
+    updateDirectoryExpandedKeys((current) => {
+      const next = uniqueKeys([...current, ...getDirectoryAncestorPaths(path)]);
+      return sameStringArray(current, next) ? current : next;
+    });
     if (path !== "/" && !directoryEntries["/"]) void loadDirectory("/");
-  }, [allFiles, canUseFiles, path]);
+  }, [allFiles, canUseFiles, path, directoryEntries, directoryExpandedKeys]);
 
   async function loadDirectory(directoryPath: string, force = false) {
-    if (!canUseFiles) return;
+    if (!canUseFiles || !directoryViewMatchesRender()) return;
     const targetPath = normalizePath(directoryPath);
     if (!force && directoryEntries[targetPath]) return;
     const requestSessionId = session.id;
+    const requestSftpId = session.sftpId ?? null;
     const requestKey = `${requestSessionId}:${targetPath}`;
     const requestSeq = (directoryRequestSeqRef.current.get(requestKey) ?? 0) + 1;
     directoryRequestSeqRef.current.set(requestKey, requestSeq);
@@ -475,14 +531,32 @@ export function FileManager({
       const entries = targetPath === path && filesBelongToDirectory(allFiles, targetPath)
         ? allFiles
         : await onListDirectory(targetPath);
-      if (!mountedRef.current || sessionIdRef.current !== requestSessionId || directoryRequestSeqRef.current.get(requestKey) !== requestSeq) return;
-      setDirectoryEntries((current) => ({ ...current, [targetPath]: sortRemoteEntries(entries) }));
+      if (
+        !mountedRef.current ||
+        sessionIdRef.current !== requestSessionId ||
+        directoryStateSessionIdRef.current !== requestSessionId ||
+        directoryStateSftpIdRef.current !== requestSftpId ||
+        directoryRequestSeqRef.current.get(requestKey) !== requestSeq
+      ) return;
+      updateDirectoryEntries((current) => ({ ...current, [targetPath]: sortRemoteEntries(entries) }));
     } catch (error) {
-      if (mountedRef.current && sessionIdRef.current === requestSessionId && directoryRequestSeqRef.current.get(requestKey) === requestSeq) {
+      if (
+        mountedRef.current &&
+        sessionIdRef.current === requestSessionId &&
+        directoryStateSessionIdRef.current === requestSessionId &&
+        directoryStateSftpIdRef.current === requestSftpId &&
+        directoryRequestSeqRef.current.get(requestKey) === requestSeq
+      ) {
         message.error(getErrorMessage(error));
       }
     } finally {
-      if (mountedRef.current && sessionIdRef.current === requestSessionId && directoryRequestSeqRef.current.get(requestKey) === requestSeq) {
+      if (
+        mountedRef.current &&
+        sessionIdRef.current === requestSessionId &&
+        directoryStateSessionIdRef.current === requestSessionId &&
+        directoryStateSftpIdRef.current === requestSftpId &&
+        directoryRequestSeqRef.current.get(requestKey) === requestSeq
+      ) {
         directoryRequestSeqRef.current.delete(requestKey);
         setDirectoryLoadingKeys((current) => current.filter((key) => key !== targetPath));
       }
@@ -492,7 +566,7 @@ export function FileManager({
   function toggleDirectory(directoryPath: string) {
     const targetPath = normalizePath(directoryPath);
     const isExpanded = directoryExpandedKeysRef.current.includes(targetPath);
-    setDirectoryExpandedKeys((current) =>
+    updateDirectoryExpandedKeys((current) =>
       current.includes(targetPath) ? current.filter((key) => key !== targetPath) : uniqueKeys([...current, targetPath]),
     );
     if (!isExpanded) void loadDirectory(targetPath);
@@ -963,7 +1037,7 @@ export function FileManager({
               setSelectedRowKeys([]);
             }}
             onLoadDirectory={(p) => void loadDirectory(p)}
-            onExpandChange={(keys) => setDirectoryExpandedKeys(keys)}
+            onExpandChange={updateDirectoryExpandedKeys}
           />
           <div
             ref={tableSurfaceRef}
@@ -1123,7 +1197,7 @@ export function FileManager({
         onDialogChange={setDialog}
         onSubmit={submitDialog}
         onLoadDirectory={(p) => void loadDirectory(p)}
-        onExpandChange={(keys) => setDirectoryExpandedKeys(keys)}
+        onExpandChange={updateDirectoryExpandedKeys}
         onTreeSelect={(selectedPath) => {
           const np = normalizePath(selectedPath);
           setDialog((d) => d && (d.kind === "copy" || d.kind === "move") ? { ...d, value: np } : d);
@@ -1134,12 +1208,12 @@ export function FileManager({
   );
 }
 
-function filesBelongToDirectory(files: RemoteFileEntry[], directoryPath: string) {
-  const normalizedDirectory = normalizePath(directoryPath);
-  return files.every((entry) => {
-    if (!entry.path) return true;
-    return getParentPath(entry.path) === normalizedDirectory;
-  });
+function resolveStateAction<T>(action: SetStateAction<T>, current: T): T {
+  return typeof action === "function" ? (action as (value: T) => T)(current) : action;
+}
+
+function sameStringArray(left: string[], right: string[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 

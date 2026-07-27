@@ -1,4 +1,4 @@
-import { CloudDownloadOutlined, EyeInvisibleOutlined, RocketOutlined } from "@ant-design/icons";
+import { CalendarOutlined, CloudDownloadOutlined, EyeInvisibleOutlined, FileTextOutlined, RocketOutlined } from "@ant-design/icons";
 import { Button, Modal } from "antd";
 import type { ReactNode } from "react";
 import { formatBeijingDate } from "../../lib/format";
@@ -15,25 +15,46 @@ interface ReleaseNotesModalProps {
 
 export function ReleaseNotesModal({ open, onClose, updateInfo, updateDownloading, onDownloadUpdate, onIgnoreUpdate }: ReleaseNotesModalProps) {
   const canDownloadUpdate = Boolean(updateInfo?.hasUpdate && updateInfo.asset);
+  const versionLabel = updateInfo?.tagName || (updateInfo?.latestVersion ? `v${updateInfo.latestVersion}` : "--");
 
   return (
-    <Modal open={open} title={null} className="releaseNotesModal" footer={null} onCancel={onClose} destroyOnHidden width={520}>
-      <div className="releaseNotesHeader">
-        <div className="releaseNotesHeaderIcon"><RocketOutlined /></div>
-        <div className="releaseNotesHeaderMeta">
-          <span className="releaseNotesLabel">更新日志</span>
-          <strong className="releaseNotesVersionTag">{updateInfo?.tagName || (updateInfo?.latestVersion ? `v${updateInfo.latestVersion}` : "--")}</strong>
-        </div>
-        {updateInfo?.publishedAt ? <span className="releaseNotesDate">{formatBeijingDate(updateInfo.publishedAt)}</span> : null}
-      </div>
-      <div className="releaseNotesBody">{renderReleaseNotes(updateInfo)}</div>
-      <div className="releaseNotesFooter">
-        {updateInfo?.hasUpdate ? (
-          <>
-            <Button className="releaseNotesIgnoreBtn" icon={<EyeInvisibleOutlined />} onClick={() => { void onIgnoreUpdate(); onClose(); }}>忽略版本</Button>
-            <Button className="aboutUpdateBtn releaseNotesDownloadBtn" type="primary" icon={<CloudDownloadOutlined />} loading={updateDownloading} disabled={!canDownloadUpdate} onClick={() => { void onDownloadUpdate(); onClose(); }}>下载更新</Button>
-          </>
-        ) : <Button type="primary" onClick={onClose}>关闭</Button>}
+    <Modal open={open} title={null} className="releaseNotesModal" footer={null} onCancel={onClose} destroyOnHidden width={680} centered>
+      <div className="releaseNotesModalShell">
+        <header className="releaseNotesHeader">
+          <span className="releaseNotesHeaderIcon" aria-hidden="true"><RocketOutlined /></span>
+          <div className="releaseNotesHeaderCopy">
+            <strong>版本更新记录</strong>
+            <span>查看本次发布包含的功能、优化与修复</span>
+          </div>
+          <div className="releaseNotesHeaderMeta">
+            <strong className="releaseNotesVersionTag">{versionLabel}</strong>
+            {updateInfo?.publishedAt ? <span className="releaseNotesDate"><CalendarOutlined />{formatBeijingDate(updateInfo.publishedAt)}</span> : null}
+          </div>
+        </header>
+
+        <main className="releaseNotesMain">
+          <div className={`releaseNotesOverview ${updateInfo?.hasUpdate ? "has-update" : "is-current"}`}>
+            <span className="releaseNotesOverviewDot" aria-hidden="true" />
+            <div>
+              <strong>{updateInfo?.hasUpdate ? `新版本 ${versionLabel} 已可用` : `${versionLabel} 版本记录`}</strong>
+              <span>{updateInfo?.asset?.name ?? "内容来自 GitHub Release 发布说明"}</span>
+            </div>
+          </div>
+          <div className="releaseNotesBody">{renderReleaseNotes(updateInfo)}</div>
+        </main>
+
+        <footer className="releaseNotesFooter">
+          <div className="releaseNotesFooterHint"><FileTextOutlined /><span>更新内容来自项目发布记录</span></div>
+          <div className="releaseNotesFooterActions">
+            {updateInfo?.hasUpdate ? (
+              <>
+                <Button className="releaseNotesCloseBtn" onClick={onClose}>稍后处理</Button>
+                <Button className="releaseNotesIgnoreBtn" icon={<EyeInvisibleOutlined />} onClick={() => { void onIgnoreUpdate(); onClose(); }}>忽略此版本</Button>
+                <Button className="aboutUpdateBtn releaseNotesDownloadBtn" type="primary" icon={<CloudDownloadOutlined />} loading={updateDownloading} disabled={!canDownloadUpdate} onClick={() => { void onDownloadUpdate(); onClose(); }}>下载更新</Button>
+              </>
+            ) : <Button className="releaseNotesCloseBtn is-primary" type="primary" onClick={onClose}>完成</Button>}
+          </div>
+        </footer>
       </div>
     </Modal>
   );

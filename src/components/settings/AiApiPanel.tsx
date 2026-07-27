@@ -1,4 +1,16 @@
-import { CheckOutlined, CopyOutlined, FundProjectionScreenOutlined, MinusOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import {
+  ApiOutlined,
+  CheckOutlined,
+  CopyOutlined,
+  FundProjectionScreenOutlined,
+  LockOutlined,
+  MinusOutlined,
+  PlusOutlined,
+  PoweroffOutlined,
+  ReloadOutlined,
+  SafetyCertificateOutlined,
+  ThunderboltOutlined,
+} from "@ant-design/icons";
 import { Button, Input, InputNumber, Modal, Select, Switch, Tooltip, message } from "antd";
 import type { MouseEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -15,6 +27,7 @@ interface AiApiPanelProps {
   onClose: () => void;
   initialValue: AppSettings;
   sessions: { id: string; name: string; host: string }[];
+  onCreateSession: (onCreated?: (sessionId: string) => void) => void;
   onApiServerChange: (running: boolean) => void;
   onSettingsChange: (snapshot: ConfigSnapshot) => void;
 }
@@ -51,7 +64,7 @@ function sameSessionIds(left: string[], right: string[]) {
   return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
-export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerChange, onSettingsChange }: AiApiPanelProps) {
+export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSession, onApiServerChange, onSettingsChange }: AiApiPanelProps) {
   const [aiApiInfo, setAiApiInfo] = useState<ApiServerInfo | null>(null);
   const [aiApiLoading, setAiApiLoading] = useState(false);
   const [aiApiPort, setAiApiPort] = useState(() => initialValue.aiApiPort ?? 19880);
@@ -197,18 +210,31 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
   }
 
   function addAiApiSessionRow() {
-    setAiApiSessionRows((prev) => {
-      if (prev.length >= MAX_AI_API_SESSIONS || prev.length >= sessions.length || !prev[prev.length - 1]) return prev;
-      return [...prev, null];
-    });
+    if (aiApiSessionRows.length >= MAX_AI_API_SESSIONS) return;
+    const selectedIds = compactAiApiSessionRows(aiApiSessionRows);
+    const hasUnusedSession = sessions.some((session) => !selectedIds.includes(session.id));
+
+    if (!hasUnusedSession) {
+      const previousRows = aiApiSessionRows;
+      onCreateSession((sessionId) => {
+        if (selectedIds.includes(sessionId) || selectedIds.length >= MAX_AI_API_SESSIONS) return;
+        void saveAiApiSessionRows([...selectedIds, sessionId], previousRows);
+      });
+      return;
+    }
+
+    if (!aiApiSessionRows[aiApiSessionRows.length - 1]) return;
+    setAiApiSessionRows((prev) => [...prev, null]);
   }
 
   function addAiApiSessionTooltip(sessionId: string | null, isLastRow: boolean) {
     if (!isLastRow) return "";
     if (aiApiSessionRows.length >= MAX_AI_API_SESSIONS) return "最多指定 5 个会话";
-    if (aiApiSessionRows.length >= sessions.length) return "没有更多可选会话";
+    const selectedIds = compactAiApiSessionRows(aiApiSessionRows);
+    const hasUnusedSession = sessions.some((session) => !selectedIds.includes(session.id));
+    if (!hasUnusedSession) return sessions.length > 0 ? "新建 SSH 会话并自动加入授权" : "新建首个 SSH 会话并自动加入授权";
     if (!sessionId) return "请先选择当前会话";
-    return "添加指定会话";
+    return "添加授权会话";
   }
 
   function selectApiKeyInput(event: MouseEvent<HTMLInputElement>) {
@@ -375,127 +401,169 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
 
   function renderAiApiSessionFormRow() {
     return (
-      <div className="aiApiFormRow aiApiSessionFormRow">
-        <span className="aiApiFormLabel">指定会话</span>
-        <div className="aiApiSessionRows">
-          {aiApiSessionRows.map((sessionId, index) => {
-            const isLastRow = index === aiApiSessionRows.length - 1;
-            const canShowAdd = isLastRow && aiApiSessionRows.length < MAX_AI_API_SESSIONS && aiApiSessionRows.length < sessions.length;
-            const canAdd = canShowAdd && Boolean(sessionId);
-            const isSessionCopied = Boolean(sessionId) && copiedSessionId === sessionId;
-            return (
-              <div className="aiApiSessionSelectRow" key={index}>
-                <Select
-                  style={{ flex: 1 }}
-                  placeholder="请选择允许访问的会话"
-                  allowClear
-                  value={sessionId}
-                  onChange={(v) => void changeAiApiSession(index, v ?? null)}
-                  options={sessionOptions.map((option) => ({
-                    ...option,
-                    disabled: aiApiSessionRows.some((row, rowIndex) => rowIndex !== index && row === option.value),
-                  }))}
-                />
-                <div style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, justifyContent: "flex-end", width: 112 }}>
-                  {aiApiSessionRows.length > 1 && (
-                    <Tooltip title="移除指定会话">
-                      <Button
-                        className="aiApiSessionAction"
-                        size="small"
-                        icon={<MinusOutlined />}
-                        onClick={() => void removeAiApiSessionRow(index)}
-                      />
-                    </Tooltip>
-                  )}
-                  {canShowAdd && (
-                    <Tooltip title={addAiApiSessionTooltip(sessionId, isLastRow)}>
-                      <Button
-                        className="aiApiSessionAction"
-                        size="small"
-                        icon={<PlusOutlined />}
-                        disabled={!canAdd}
-                        onClick={addAiApiSessionRow}
-                      />
-                    </Tooltip>
-                  )}
-                  <Tooltip title={aiApiSessionCopyTooltip(sessionId, isSessionCopied)}>
+      <div className="aiApiSessionRows">
+        {aiApiSessionRows.map((sessionId, index) => {
+          const isLastRow = index === aiApiSessionRows.length - 1;
+          const selectedIds = compactAiApiSessionRows(aiApiSessionRows);
+          const hasUnusedSession = sessions.some((session) => !selectedIds.includes(session.id));
+          const canShowAdd = isLastRow && aiApiSessionRows.length < MAX_AI_API_SESSIONS;
+          const canAdd = canShowAdd && (Boolean(sessionId) || !hasUnusedSession);
+          const isSessionCopied = Boolean(sessionId) && copiedSessionId === sessionId;
+          return (
+            <div className="aiApiSessionSelectRow" key={index}>
+              <span className="aiApiSessionIndex" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+              <Select
+                className="aiApiSessionSelect"
+                placeholder={sessions.length > 0 ? "请选择允许访问的会话" : "暂无可用 SSH 会话"}
+                aria-label={`授权会话 ${index + 1}`}
+                allowClear
+                value={sessionId}
+                disabled={sessions.length === 0}
+                onChange={(v) => void changeAiApiSession(index, v ?? null)}
+                options={sessionOptions.map((option) => ({
+                  ...option,
+                  disabled: aiApiSessionRows.some((row, rowIndex) => rowIndex !== index && row === option.value),
+                }))}
+              />
+              <div className="aiApiSessionActions">
+                {aiApiSessionRows.length > 1 && (
+                  <Tooltip title="移除指定会话">
                     <Button
-                      className="aiApiSessionAction"
+                      className="aiApiSessionAction is-remove"
                       size="small"
-                      type="text"
-                      icon={isSessionCopied ? <CheckOutlined style={{ color: "#10b981" }} /> : <CopyOutlined />}
-                      disabled={!sessionId || !aiApiInfo?.running || !aiApiInfo.apiKey}
-                      onClick={() => copyApiInfoForSession(sessionId)}
+                      icon={<MinusOutlined />}
+                      aria-label={`移除授权会话 ${index + 1}`}
+                      onClick={() => void removeAiApiSessionRow(index)}
                     />
                   </Tooltip>
-                </div>
+                )}
+                {canShowAdd && (
+                  <Tooltip title={addAiApiSessionTooltip(sessionId, isLastRow)}>
+                    <Button
+                      className="aiApiSessionAction is-add"
+                      size="small"
+                      icon={<PlusOutlined />}
+                      aria-label="添加授权会话"
+                      disabled={!canAdd}
+                      onClick={addAiApiSessionRow}
+                    />
+                  </Tooltip>
+                )}
+                <Tooltip title={aiApiSessionCopyTooltip(sessionId, isSessionCopied)}>
+                  <Button
+                    className="aiApiSessionAction is-copy"
+                    size="small"
+                    type="text"
+                    icon={isSessionCopied ? <CheckOutlined /> : <CopyOutlined />}
+                    aria-label={isSessionCopied ? "命令已复制" : `复制授权会话 ${index + 1} 的字段库命令`}
+                    disabled={!sessionId || !aiApiInfo?.running || !aiApiInfo.apiKey}
+                    onClick={() => copyApiInfoForSession(sessionId)}
+                  />
+                </Tooltip>
               </div>
-            );
-          })}
-        </div>
+            </div>
+          );
+        })}
       </div>
     );
   }
 
   const renderStatusCard = () => {
+    const running = Boolean(aiApiInfo?.running);
     return (
-      <div className="aiApiPanel">
-        <div className="aiApiStatusRow">
-          <div className="aiApiStatusGroup">
-            <span className="aiApiStatusLabel">服务状态</span>
+      <section className="aiApiCard aiApiControlCard">
+        <div className="aiApiSectionHeading">
+          <span className="aiApiSectionIcon"><PoweroffOutlined /></span>
+          <div className="aiApiSectionCopy">
+            <strong>服务控制</strong>
+            <span>控制本机接口的运行状态</span>
+          </div>
+        </div>
+
+        <div className={`aiApiServiceSurface ${running ? "is-running" : "is-stopped"}`} aria-live="polite">
+          <div className="aiApiServiceState">
+            <span className="aiApiServicePulse" aria-hidden="true" />
+            <div>
+              <strong>{aiApiLoading ? "正在处理服务状态" : running ? "本地 API 正在运行" : "本地 API 已停止"}</strong>
+              <span>{running ? `监听 127.0.0.1:${aiApiInfo?.port ?? aiApiPort}` : "启动后即可通过本机地址调用"}</span>
+            </div>
+          </div>
+          <div className="aiApiServiceActions">
+            {aiApiLogs.length > 0 && (
+              <Button className="aiApiLogsButton" icon={<FundProjectionScreenOutlined />} onClick={() => void openLogWindow()}>
+                操作日志
+              </Button>
+            )}
             <Tooltip title={aiApiStatusTooltip()}>
-              <button
-                type="button"
-                className={`aiApiStatusBadge aiApiStatusBadge-${aiApiInfo?.running ? "running" : "stopped"}`}
-                aria-label={aiApiInfo?.running ? "关闭 AI API 服务" : "开启 AI API 服务"}
-                aria-pressed={Boolean(aiApiInfo?.running)}
-                disabled={aiApiLoading}
+              <Button
+                className={`aiApiServiceToggle ${running ? "is-stop" : "is-start"}`}
+                type={running ? "default" : "primary"}
+                icon={running ? <PoweroffOutlined /> : <ThunderboltOutlined />}
+                loading={aiApiLoading}
+                disabled={!running && selectedAiApiSessionIds.length === 0}
                 onClick={() => void toggleAiApiStatus()}
               >
-                {aiApiLoading ? "处理中" : aiApiInfo?.running ? "运行中" : "已停止"}
-              </button>
-            </Tooltip>
-            {aiApiLogs.length > 0 && (
-              <Tooltip title="查看日志">
-                <Button size="small" type="link" icon={<FundProjectionScreenOutlined />} onClick={() => void openLogWindow()} />
-              </Tooltip>
-            )}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <span style={{ fontSize: "12px", color: "#64748b" }}>自动启动</span>
-            <Tooltip title={aiApiAutoStart ? "已开启随应用自动启动" : "随应用自动启动"}>
-              <Switch
-                checked={aiApiAutoStart}
-                disabled={selectedAiApiSessionIds.length === 0}
-                onChange={(c) => void changeAiApiAutoStart(c)}
-              />
+                {running ? "停止服务" : "启动服务"}
+              </Button>
             </Tooltip>
           </div>
         </div>
-      </div>
+
+        <div className="aiApiAutoStartRow">
+          <div>
+            <strong>随应用自动启动</strong>
+            <span>{selectedAiApiSessionIds.length > 0 ? "启动 HelM 时自动恢复本地 API" : "请先至少选择一个授权会话"}</span>
+          </div>
+          <Tooltip title={aiApiAutoStart ? "已开启随应用自动启动" : "随应用自动启动"}>
+            <Switch
+              checked={aiApiAutoStart}
+              disabled={selectedAiApiSessionIds.length === 0}
+              onChange={(c) => void changeAiApiAutoStart(c)}
+            />
+          </Tooltip>
+        </div>
+      </section>
     );
   };
 
   const renderConfigCard = () => {
     return (
-      <div className="aiApiPanel">
-        <div className="aiApiFormRow">
-          <span className="aiApiFormLabel">监听端口</span>
-          <InputNumber min={1024} max={65535} precision={0} value={aiApiPort} disabled={aiApiInfo?.running} onChange={(v) => v && setAiApiPort(v)} style={{ width: 120 }} />
+      <section className="aiApiCard aiApiConfigCard">
+        <div className="aiApiSectionHeading">
+          <span className="aiApiSectionIcon"><ApiOutlined /></span>
+          <div className="aiApiSectionCopy">
+            <strong>接口配置</strong>
+            <span>仅监听本机回环地址，不对外网开放</span>
+          </div>
         </div>
+
+        <div className="aiApiConfigFields">
+          <div className="aiApiField">
+            <div className="aiApiFieldLabel">
+              <label htmlFor="aiApiPort">监听端口</label>
+              <span>1024–65535</span>
+            </div>
+            <InputNumber id="aiApiPort" min={1024} max={65535} precision={0} value={aiApiPort} disabled={aiApiInfo?.running} onChange={(v) => v && setAiApiPort(v)} />
+          </div>
         {aiApiInfo?.running && aiApiInfo.apiKey && (
           <>
-            <div className="aiApiFormRow">
-              <span className="aiApiFormLabel">API 地址</span>
-              <Input readOnly value={`http://127.0.0.1:${aiApiInfo.port}`} style={{ flex: 1 }} onClick={(event) => event.currentTarget.select()} />
+            <div className="aiApiField aiApiFieldWide">
+              <div className="aiApiFieldLabel">
+                <label htmlFor="aiApiAddress">API 地址</label>
+                <span>点击可全选</span>
+              </div>
+              <Input id="aiApiAddress" readOnly value={`http://127.0.0.1:${aiApiInfo.port}`} onClick={(event) => event.currentTarget.select()} />
             </div>
-            <div className="aiApiFormRow">
-              <span className="aiApiFormLabel">API Key</span>
+            <div className="aiApiField aiApiFieldWide">
+              <div className="aiApiFieldLabel">
+                <label htmlFor="aiApiKey">API Key</label>
+                <span>请勿发送给不受信任的应用</span>
+              </div>
               <Input.Password
+                id="aiApiKey"
                 readOnly
                 value={aiApiInfo.apiKey}
                 className="aiApiKeyInput"
-                style={{ flex: 1 }}
                 onClick={selectApiKeyInput}
                 suffix={(
                   <Tooltip title="重新生成密钥">
@@ -517,18 +585,57 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onApiServerC
             </div>
           </>
         )}
-      </div>
+        {!aiApiInfo?.running && (
+          <div className="aiApiConfigPlaceholder">
+            <LockOutlined />
+            <div><strong>接口凭证尚未生成</strong><span>启动服务后会显示 API 地址与访问密钥</span></div>
+          </div>
+        )}
+        </div>
+      </section>
     );
   };
 
   return (
-    <Modal open={open} title="AI API 控制" className="aiApiModal" footer={null} onCancel={onClose} destroyOnHidden width={480}>
-      <div className="aiApiContent">
-        {renderStatusCard()}
-        {renderConfigCard()}
-        <div className="aiApiPanel">
-          {renderAiApiSessionFormRow()}
+    <Modal open={open} title={null} className="aiApiModal" footer={null} onCancel={onClose} destroyOnHidden width={720} centered>
+      <div className="aiApiModalShell">
+        <header className="aiApiModalHeader">
+          <span className="aiApiModalHeaderIcon" aria-hidden="true"><ThunderboltOutlined /></span>
+          <div className="aiApiModalHeaderCopy">
+            <strong>AI API 控制</strong>
+            <span>管理本地接口、访问凭证与授权会话</span>
+          </div>
+          <span className={`aiApiHeaderStatus ${aiApiInfo?.running ? "is-running" : "is-stopped"}`}>
+            <i aria-hidden="true" />
+            {aiApiLoading ? "处理中" : aiApiInfo?.running ? "服务运行中" : "服务未运行"}
+          </span>
+        </header>
+
+        <div className="aiApiModalBody">
+          <div className="aiApiContent">
+            {renderStatusCard()}
+            {renderConfigCard()}
+            <section className="aiApiCard aiApiSessionsCard">
+              <div className="aiApiSectionHeading">
+                <span className="aiApiSectionIcon"><SafetyCertificateOutlined /></span>
+                <div className="aiApiSectionCopy">
+                  <strong>授权会话</strong>
+                  <span>仅允许已选择的 SSH 会话通过 API 读取字段库</span>
+                </div>
+                <span className="aiApiSessionCount">{selectedAiApiSessionIds.length} / {MAX_AI_API_SESSIONS}</span>
+              </div>
+              {renderAiApiSessionFormRow()}
+            </section>
+          </div>
         </div>
+
+        <footer className="aiApiModalFooter">
+          <div className="aiApiSecurityNote">
+            <LockOutlined />
+            <span>接口仅绑定 127.0.0.1，密钥与授权范围保存在本机。</span>
+          </div>
+          <Button className="aiApiCloseButton" onClick={onClose}>完成</Button>
+        </footer>
       </div>
     </Modal>
   );

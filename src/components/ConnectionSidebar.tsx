@@ -20,7 +20,7 @@ interface ConnectionSidebarProps {
   sessions: RemoteSession[];
   groups: SessionGroup[];
   activeSessionId: string;
-  connectingSessionId: string | null;
+  connectingSessionIds: ReadonlySet<string>;
   onActivate: (session: RemoteSession) => void;
   onAdd: () => void;
   onEdit: (id: string) => void;
@@ -45,7 +45,7 @@ export function ConnectionSidebar({
   sessions,
   groups,
   activeSessionId,
-  connectingSessionId,
+  connectingSessionIds,
   onActivate,
   onAdd,
   onEdit,
@@ -127,7 +127,7 @@ export function ConnectionSidebar({
   }
 
   function openSession(session: RemoteSession) {
-    const state = sessionState(session, connectingSessionId);
+    const state = sessionState(session, connectingSessionIds);
     if (state === "connecting") {
       return;
     }
@@ -206,7 +206,7 @@ export function ConnectionSidebar({
                     <div className="connectionEmpty">暂无连接</div>
                   ) : (
                     section.sessions.map((session) => {
-                      const state = sessionState(session, connectingSessionId);
+                      const state = sessionState(session, connectingSessionIds);
                       const connected = state === "connected";
                       const connecting = state === "connecting";
                       const active = session.id === activeSessionId;
@@ -323,8 +323,8 @@ export function ConnectionSidebar({
   );
 }
 
-function sessionState(session: RemoteSession, connectingSessionId: string | null): ConnectionState {
-  return connectingSessionId === session.id ? "connecting" : session.state;
+function sessionState(session: RemoteSession, connectingSessionIds: ReadonlySet<string>): ConnectionState {
+  return connectingSessionIds.has(session.id) ? "connecting" : session.state;
 }
 
 function sortSessionsByPreference(sessions: RemoteSession[]) {

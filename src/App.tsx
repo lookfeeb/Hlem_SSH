@@ -23,6 +23,7 @@ import { useSettingsPersistence } from "./app/useSettingsPersistence";
 import { useSessionConfigWorkflow } from "./app/useSessionConfigWorkflow";
 import { useSessionRuntime } from "./app/useSessionRuntime";
 import { useSftpFiles } from "./app/useSftpFiles";
+import { planSftpInitialization } from "./app/sftpSessionState";
 import { useTerminalRuntime } from "./app/useTerminalRuntime";
 import { useTrayActions } from "./app/useTrayActions";
 import { useTransferActions } from "./app/useTransferActions";
@@ -51,7 +52,6 @@ import type {
   SftpChangedEvent,
 } from "./types";
 
-const AUTO_SFTP_CONNECT_DELAY_MS = 900;
 const SFTP_REFRESH_DEBOUNCE_MS = 120;
 
 function App() {
@@ -207,6 +207,7 @@ function App() {
     refreshFilesForTransfer,
     searchRemoteFile,
     listRemoteDirectory,
+    ensureSessionSftp,
   } = useSftpFiles({
     activeSession,
     sessionsRef,
@@ -218,9 +219,8 @@ function App() {
     upsertTransfer,
     openTransferCenter: () => setTransferCenterOpen(true),
   });
-  const refreshActiveFilesRef = useRef(refreshActiveFiles);
   const {
-    connectingSessionId,
+    connectingSessionIds,
     resetSessionRuntime,
     activateSession,
     deleteSession,
@@ -248,6 +248,7 @@ function App() {
       const config = configSnapshotRef.current?.data.sessions.find((item) => item.id === configId);
       return config ? config.defaultPath || config.sftp.defaultPath : null;
     },
+    onSessionConnected: ensureSessionSftp,
   });
   const {
     fileSaveRecords,
@@ -303,10 +304,6 @@ function App() {
   }, [sessions]);
 
   useEffect(() => {
-    refreshActiveFilesRef.current = refreshActiveFiles;
-  }, [refreshActiveFiles]);
-
-  useEffect(() => {
     configSnapshotRef.current = configSnapshot;
   }, [configSnapshot]);
 
@@ -314,22 +311,17 @@ function App() {
 
   useEffect(() => {
     if (!appReady) return;
-    if (!activeSession?.connectionId || !activeSession.terminalId || activeSession.state !== "connected" || activeSession.sftpId) return;
-    const connectionKey = `${activeSession.id}:${activeSession.connectionId}`;
-    if (autoSftpConnectionKeysRef.current.has(connectionKey)) return;
-
-    const timer = window.setTimeout(() => {
-      const session = sessionsRef.current.find((item) => item.id === activeSession.id);
-      if (!session || session.connectionId !== activeSession.connectionId || session.state !== "connected" || session.sftpId) return;
-      if (autoSftpConnectionKeysRef.current.has(connectionKey)) return;
-      autoSftpConnectionKeysRef.current.add(connectionKey);
-      void refreshActiveFilesRef.current().catch((error) => {
-        console.warn("[helm] failed to auto connect sftp:", getErrorMessage(error));
+    const plan = planSftpInitialization(sessions, autoSftpConnectionKeysRef.current);
+    for (const target of plan.targets) {
+      autoSftpConnectionKeysRef.current.add(target.connectionKey);
+      void ensureSessionSftp(target.sessionId, target.connectionId).catch((error) => {
+        console.warn("[helm] failed to initialize session sftp:", getErrorMessage(error));
       });
-    }, AUTO_SFTP_CONNECT_DELAY_MS);
-
-    return () => window.clearTimeout(timer);
-  }, [appReady, activeSession?.id, activeSession?.state, activeSession?.connectionId, activeSession?.terminalId, activeSession?.sftpId]);
+    }
+    for (const connectionKey of autoSftpConnectionKeysRef.current) {
+      if (!plan.liveConnectionKeys.has(connectionKey)) autoSftpConnectionKeysRef.current.delete(connectionKey);
+    }
+  }, [appReady, sessions]);
 
   useEffect(() => {
     if (!appReady) return;
@@ -614,7 +606,7 @@ function App() {
                   onCancelConnect={(id) => void cancelConnectingSession(id)}
                   onTransferOpen={() => setTransferCenterOpen(true)}
                   onSettingsOpen={() => setSettingsOpen(true)}
-                  connectingSessionId={connectingSessionId}
+                  connectingSessionIds={connectingSessionIds}
                   transfers={transfers}
                   apiServerRunning={apiServerRunning}
                   apiConfigured={!!currentSettings.aiApiKey}
@@ -628,7 +620,7 @@ function App() {
                       sessions={sidebarSessions}
                       groups={configSnapshot?.data.groups ?? []}
                       activeSessionId={activeConfigId}
-                      connectingSessionId={connectingSessionId}
+                      connectingSessionIds={connectingSessionIds}
                       onActivate={activateConfigSession}
                       onAdd={() => void addSession()}
                       onEdit={(id) => editSession(id)}
@@ -692,7 +684,7 @@ function App() {
                       sessions={sidebarSessions}
                       groups={configSnapshot?.data.groups ?? []}
                       activeSessionId=""
-                      connectingSessionId={connectingSessionId}
+                      connectingSessionIds={connectingSessionIds}
                       onActivate={activateConfigSession}
                       onAdd={() => void addSession()}
                       onEdit={(id) => editSession(id)}
@@ -713,7 +705,7 @@ function App() {
                 <AppStatusBar
                   activeSession={activeSession}
                   sessions={sessions}
-                  connectingSessionId={connectingSessionId}
+                  connectingSessionIds={connectingSessionIds}
                 />
               </>
             </Suspense>
@@ -788,6 +780,7 @@ function App() {
               onSubmit={saveSettings}
               onBackupOpen={() => setBackupOpen(true)}
               onTunnelOpen={() => setTunnelOpen(true)}
+              onCreateSession={(onCreated) => addSession(onCreated)}
               onApiServerChange={setApiServerRunning}
               onSettingsChange={applyConfigSnapshot}
               aiApiOpen={aiApiOpen}

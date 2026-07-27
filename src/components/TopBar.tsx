@@ -20,7 +20,7 @@ interface TopBarProps {
   onCancelConnect: (id: string) => void;
   onTransferOpen: () => void;
   onSettingsOpen: () => void;
-  connectingSessionId: string | null;
+  connectingSessionIds: ReadonlySet<string>;
   transfers: TransferInfo[];
   apiServerRunning: boolean;
   apiConfigured: boolean;
@@ -37,7 +37,7 @@ export function TopBar({
   onCancelConnect,
   onTransferOpen,
   onSettingsOpen,
-  connectingSessionId,
+  connectingSessionIds,
   transfers,
   apiServerRunning,
   apiConfigured,
@@ -99,7 +99,7 @@ export function TopBar({
       onActivate(session.id);
       return;
     }
-    const state = sessionState(session, connectingSessionId);
+    const state = sessionState(session, connectingSessionIds);
     if (state === "connected") {
       onDisconnect(session);
     } else if (state === "connecting") {
@@ -107,7 +107,7 @@ export function TopBar({
     } else if (state === "disconnected" || state === "failed") {
       onConnect(session);
     }
-  }, [activeSessionId, connectingSessionId, onActivate, onCancelConnect, onConnect, onDisconnect]);
+  }, [activeSessionId, connectingSessionIds, onActivate, onCancelConnect, onConnect, onDisconnect]);
 
   return (
     <header className="topBar">
@@ -150,7 +150,7 @@ export function TopBar({
         <div className="sessionTabsViewport" ref={tabsViewportRef}>
           <div className="sessionTabsList" role="tablist" aria-orientation="horizontal">
             {tabSessions.map((session) => {
-              const state = sessionState(session, connectingSessionId);
+              const state = sessionState(session, connectingSessionIds);
               const stateText = sessionStateText(state);
               const active = session.id === activeSessionId;
               return (
@@ -213,8 +213,8 @@ export function TopBar({
   );
 }
 
-function sessionState(session: RemoteSession, connectingSessionId: string | null): ConnectionState {
-  return connectingSessionId === session.id ? "connecting" : session.state;
+function sessionState(session: RemoteSession, connectingSessionIds: ReadonlySet<string>): ConnectionState {
+  return connectingSessionIds.has(session.id) ? "connecting" : session.state;
 }
 
 function sessionStateText(state: ConnectionState) {

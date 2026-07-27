@@ -28,6 +28,14 @@ impl RemoteRuntime {
             .clone()
     }
 
+    pub(super) async fn sftp_open_lock(&self, connection_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.sftp_open_locks.lock().await;
+        locks
+            .entry(connection_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     pub(super) async fn find_connection_by_session(
         &self,
         session_id: &str,
@@ -266,6 +274,11 @@ impl RemoteRuntime {
         &self,
         connection_id: &str,
     ) -> Vec<String> {
+        // Serialize cleanup with `open_sftp`: if an open is already in flight,
+        // wait for it to publish the session and then remove it. If cleanup won
+        // the race, a later open observes the missing SSH connection and fails.
+        let open_lock = self.sftp_open_lock(connection_id).await;
+        let _open_guard = open_lock.lock().await;
         let sftp_ids: Vec<String> = self
             .sftp_sessions
             .read()
@@ -279,6 +292,8 @@ impl RemoteRuntime {
             sessions.remove(id);
             crate::errors::forget_resource_label(id);
         }
+        drop(sessions);
+        self.sftp_open_locks.lock().await.remove(connection_id);
         sftp_ids
     }
 

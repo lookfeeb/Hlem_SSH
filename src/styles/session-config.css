@@ -1,294 +1,721 @@
-/* ─── Session Config Modal ─────────────────────────────────────────────── */
-
-/* 弹窗容器：毛玻璃与深层阴影美化 */
-.sessionConfigModal .ant-modal-content {
-  border-radius: 20px !important;
-  background: rgba(255, 255, 255, 0.85) !important;
-  backdrop-filter: blur(24px) saturate(150%) !important;
-  border: 1px solid rgba(255, 255, 255, 0.6) !important;
-  box-shadow: 0 32px 64px -16px rgba(0,0,0,0.2) !important;
-  overflow: hidden;
-}
-
-.sessionConfigModal .ant-modal-header {
-  padding: 24px 32px 16px;
-  background: transparent !important;
-  border-bottom: 1px solid rgba(0,0,0,0.06);
-}
-
-.sessionConfigModal .ant-modal-close {
-  top: 24px;
-  inset-inline-end: 24px;
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  background: rgba(0,0,0,0.04);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-}
-
-.sessionConfigModal .ant-modal-close:hover {
-  background: rgba(239,68,68,0.15);
-  color: var(--danger);
-}
-
-.sessionConfigModal .ant-modal-body {
-  padding: 0;
-  background: transparent !important;
-  max-height: min(560px, calc(100vh - 220px));
-  overflow-y: auto;
-  overflow-x: hidden;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.sessionConfigModal .ant-modal-body > .ant-form {
-  max-width: 620px;
-  margin: 0 auto;
-  padding-top: 18px;
-}
-
-.sessionConfigModal .ant-modal-body::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
+/* ─── SSH 连接配置弹窗 ─────────────────────────────────────────────────── */
 
 .ant-modal-wrap:has(.sessionConfigModal) {
   overflow: hidden !important;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.ant-modal-container:has(.sessionConfigModal) {
-  padding: 0 !important;
 }
 
 .ant-modal-wrap:has(.sessionConfigModal) .ant-modal-container {
   padding: 0 !important;
 }
 
-.ant-modal-wrap:has(.sessionConfigModal) .ant-modal,
 .sessionConfigModal {
+  max-width: calc(100vw - 48px);
   margin: 0 !important;
   padding: 0 !important;
 }
 
-.ant-modal-wrap:has(.sessionConfigModal)::-webkit-scrollbar {
-  width: 0;
-  height: 0;
+.sessionConfigModal .ant-modal-container {
+  position: relative;
+  height: min(764px, calc(100vh - 20px)) !important;
+  min-height: 620px;
+  display: flex;
+  flex-direction: column;
+  padding: 0 !important;
+  overflow: clip;
+  border: 1px solid rgba(255, 255, 255, .82);
+  border-radius: 24px !important;
+  background: #ffffff !important;
+  box-shadow:
+    0 42px 90px rgba(15, 25, 48, .28),
+    0 14px 32px rgba(54, 74, 120, .18) !important;
 }
 
-/* ─── Tab 改为 macOS 胶囊分段控件 ───────────────────────────────────────── */
-.sessionConfigModal .ant-tabs-nav {
-  margin-bottom: 20px;
-}
-
-/* 去除 nav 下方横线 */
-.sessionConfigModal .ant-tabs-nav::before {
-  display: none !important;
-}
-
-/* Tab 列表整体做成胶囊容器 */
-.sessionConfigModal .ant-tabs-nav-list {
-  background: var(--bg-overlay);
-  border: 1px solid var(--border-light);
-  border-radius: 10px;
-  padding: 3px;
-  gap: 2px;
-}
-
-/* 每个 Tab 项：透明底、圆角 */
-.sessionConfigModal .ant-tabs-tab {
+.sessionConfigModal .ant-modal-header {
+  flex: 0 0 96px !important;
+  min-height: 96px;
   margin: 0 !important;
-  padding: 6px 18px !important;
-  border-radius: 8px !important;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary) !important;
-  background: transparent !important;
-  border: none !important;
-  transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1) !important;
-  gap: 6px;
-  white-space: nowrap;
+  padding: 22px 78px 18px 30px !important;
+  border-bottom: 1px solid #e4e9f2;
+  background: rgba(255, 255, 255, .98) !important;
 }
 
-.sessionConfigModal .ant-tabs-tab:hover {
-  color: var(--accent) !important;
-  background: rgba(59, 130, 246, 0.08) !important;
+.sessionConfigModal .ant-modal-title {
+  height: 100%;
 }
 
-/* 激活 Tab：白色卡片 + 阴影，接近 macOS 分段选择器 */
-.sessionConfigModal .ant-tabs-tab-active {
-  background: #ffffff !important;
-  color: var(--accent) !important;
-  font-weight: 700 !important;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.12), 0 0 0 1px rgba(59,130,246,0.15) !important;
-}
-
-/* 隐藏原来的墨水条 */
-.sessionConfigModal .ant-tabs-ink-bar {
-  display: none !important;
-}
-
-/* ─── 表单标签 ────────────────────────────────────────────────────────────  */
-.sessionConfigModal .ant-form-item-label > label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-  letter-spacing: 0;
-  /* 去掉全大写，更自然 */
-  text-transform: none;
-}
-
-.sessionConfigModal .ant-form-item {
-  margin-bottom: 14px !important;
-}
-
-/* ─── 输入框统一样式 ──────────────────────────────────────────────────────── */
-.sessionConfigModal .ant-input {
-  height: 38px;
-  border-radius: 9px !important;
-  border: 1.5px solid var(--border) !important;
-  background: #ffffff !important;
-  font-size: 13px;
-  padding-inline: 14px;
-  color: var(--text-primary);
-  /* 内嵌阴影给输入框增加凹陷感 */
-  box-shadow: inset 0 1px 2px rgba(0,0,0,0.04) !important;
-  transition: border-color 0.18s, box-shadow 0.18s !important;
-}
-
-.sessionConfigModal .ant-input:hover {
-  border-color: #93c5fd !important;
-}
-
-.sessionConfigModal .ant-input:focus {
-  border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px rgba(59,130,246,0.12), inset 0 1px 2px rgba(0,0,0,0.02) !important;
-  background: #ffffff !important;
-}
-
-/* InputNumber */
-.sessionConfigModal .ant-input-number {
-  border-radius: 9px !important;
-  border: 1.5px solid var(--border) !important;
-  background: #ffffff !important;
-  box-shadow: inset 0 1px 2px rgba(0,0,0,0.04) !important;
-  transition: all 0.18s !important;
-}
-
-.sessionConfigModal .ant-input-number:hover {
-  border-color: #93c5fd !important;
-}
-
-.sessionConfigModal .ant-input-number-focused {
-  border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px rgba(59,130,246,0.12) !important;
-}
-
-/* Select */
-.sessionConfigModal .ant-select-selector {
-  height: 38px !important;
-  border-radius: 9px !important;
-  border: 1.5px solid var(--border) !important;
-  background: #ffffff !important;
-  box-shadow: inset 0 1px 2px rgba(0,0,0,0.04) !important;
+.sessionConfigHeader {
+  position: relative;
+  height: 100%;
+  display: flex;
   align-items: center;
-  padding-inline: 14px 38px !important;
-  transition: all 0.18s !important;
+  gap: 14px;
 }
 
-.sessionConfigModal .ant-select-selection-wrap {
+.sessionConfigHeaderIcon {
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  display: grid;
+  place-items: center;
+  border-radius: 15px;
+  color: #ffffff;
+  background: linear-gradient(145deg, #397af7, #735df2);
+  box-shadow: 0 10px 22px rgba(79, 109, 245, .28);
+  font-size: 22px;
+}
+
+.sessionConfigHeaderCopy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sessionConfigHeaderCopy strong {
+  color: #172033;
+  font-size: 21px;
+  line-height: 1.2;
+  font-weight: 800;
+  letter-spacing: -.25px;
+}
+
+.sessionConfigHeaderCopy span {
+  color: #66758d;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.sessionConfigModal .ant-modal-close {
+  top: 31px !important;
+  inset-inline-end: 28px !important;
+  width: 34px !important;
+  height: 34px !important;
+  border: 1px solid transparent !important;
+  border-radius: 11px !important;
+  color: #78869c !important;
+  background: #f4f6fa !important;
+}
+
+.sessionConfigModal .ant-modal-close:hover,
+.sessionConfigModal .ant-modal-close:focus-visible {
+  border-color: #e0e5ee !important;
+  color: #4f5f77 !important;
+  background: #ffffff !important;
+}
+
+.sessionConfigModal .ant-modal-body {
+  height: calc(100% - 182px);
+  min-height: 0;
+  flex: 0 0 calc(100% - 182px) !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  background: #ffffff;
+}
+
+.sessionConfigShell {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 276px minmax(0, 1fr);
+}
+
+/* ─── 左侧实时预览 ─────────────────────────────────────────────────────── */
+
+.sessionConfigPreview {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 24px 22px 22px;
+  overflow: hidden;
+  border-right: 1px solid #e4e9f2;
+  background: linear-gradient(180deg, #f8faff 0%, #f3f6fb 100%);
+}
+
+.sessionPreviewTopline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 17px;
+}
+
+.sessionPreviewEyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #63718a;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .2px;
+}
+
+.sessionPreviewEyebrow > span {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: #4f6df5;
+  box-shadow: 0 0 0 4px rgba(79, 109, 245, .1);
+}
+
+.sessionPreviewProgressText {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid #dfe5ef;
+  border-radius: 7px;
+  color: #8591a5;
+  background: rgba(255, 255, 255, .7);
+  font-size: 9.5px;
+  font-weight: 800;
+}
+
+.sessionPreviewProgressText.is-ready {
+  border-color: rgba(19, 167, 118, .18);
+  color: #138b65;
+  background: rgba(235, 250, 245, .86);
+}
+
+.sessionPreviewHero {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 13px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid rgba(215, 223, 237, .88);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, .78);
+  box-shadow: 0 10px 24px rgba(41, 58, 94, .055);
+}
+
+.sessionPreviewServerIcon {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(79, 109, 245, .16);
+  border-radius: 15px;
+  color: #4f6df5;
+  background: linear-gradient(145deg, #ffffff, #f4f6ff);
+  box-shadow: 0 8px 18px rgba(54, 74, 120, .09);
+  font-size: 25px;
+}
+
+.sessionPreviewIdentity {
   min-width: 0;
 }
 
-.sessionConfigModal .ant-select-arrow {
-  inset-inline-end: 14px !important;
-  width: 14px;
-  height: 14px;
-  margin-top: -7px;
-  color: #94a3b8;
-  display: inline-flex;
+.sessionPreviewName {
+  display: block;
+  max-width: 100%;
+  margin-bottom: 6px;
+  overflow: hidden;
+  color: #172033;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -.2px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionPreviewAddress {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: #607089;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10.5px;
+}
+
+.sessionPreviewAddress > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionPreviewAddress > small {
+  color: #909bae;
+  font-family: inherit;
+  font-size: 9.5px;
+}
+
+.sessionPreviewAddress.is-empty > span {
+  color: #98a3b5;
+  font-family: inherit;
+}
+
+.sessionPreviewTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 14px;
+}
+
+.sessionPreviewTags > span {
+  padding: 4px 8px;
+  border: 1px solid #dce3ef;
+  border-radius: 999px;
+  color: #62718a;
+  background: rgba(255, 255, 255, .82);
+  font-size: 9.5px;
+  font-weight: 700;
+}
+
+.sessionPreviewTags > .is-active {
+  border-color: rgba(79, 109, 245, .18);
+  color: #4f6df5;
+  background: #eef1ff;
+}
+
+.sessionPreviewProgress {
+  height: 4px;
+  flex: 0 0 4px;
+  margin-bottom: 16px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e4e9f2;
+}
+
+.sessionPreviewProgress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4f6df5, #715ff1);
+  box-shadow: 0 0 8px rgba(79, 109, 245, .28);
+  transition: width .24s ease;
+}
+
+.sessionPreviewList {
+  display: grid;
+  gap: 8px;
+}
+
+.sessionPreviewRow {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 14px;
+  gap: 10px;
   align-items: center;
-  justify-content: center;
-  pointer-events: none;
+  min-height: 52px;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: inherit;
+  background: rgba(255, 255, 255, .5);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color .16s ease,
+    background .16s ease,
+    box-shadow .16s ease,
+    transform .16s ease;
 }
 
-.sessionConfigModal .ant-select-clear {
-  inset-inline-end: 12px !important;
-  width: 16px;
-  height: 16px;
-  margin-top: -8px;
-  display: inline-flex;
+.sessionPreviewRow:hover {
+  border-color: #d9e0ec;
+  background: rgba(255, 255, 255, .9);
+  box-shadow: 0 7px 16px rgba(42, 58, 91, .055);
+  transform: translateY(-1px);
+}
+
+.sessionPreviewRow:focus-visible {
+  outline: 0;
+  border-color: rgba(79, 109, 245, .5);
+  box-shadow: 0 0 0 3px rgba(79, 109, 245, .1);
+}
+
+.sessionPreviewRow.is-complete {
+  border-color: rgba(19, 167, 118, .1);
+  background: rgba(244, 251, 248, .76);
+}
+
+.sessionPreviewStep {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: #5e6ff0;
+  background: #eef1ff;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.sessionPreviewRow.is-complete .sessionPreviewStep {
+  color: #13926a;
+  background: #e9f8f2;
+}
+
+.sessionPreviewStep .anticon {
+  font-size: 11px;
+}
+
+.sessionPreviewRow div {
+  min-width: 0;
+}
+
+.sessionPreviewRow strong,
+.sessionPreviewRow div > span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionPreviewRow strong {
+  margin-bottom: 1px;
+  color: #263249;
+  font-size: 11.5px;
+}
+
+.sessionPreviewRow div > span {
+  color: #8390a5;
+  font-size: 10.5px;
+}
+
+.sessionPreviewRowArrow {
+  color: #a5afbf;
+  font-size: 10px;
+  transition: color .16s ease, transform .16s ease;
+}
+
+.sessionPreviewRow:hover .sessionPreviewRowArrow {
+  color: #4f6df5;
+  transform: translateX(2px);
+}
+
+.sessionPreviewSecurity {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 9px;
   align-items: center;
-  justify-content: center;
+  margin-top: auto;
+  padding: 10px 11px;
+  border: 1px solid rgba(19, 167, 118, .15);
+  border-radius: 12px;
+  color: #487268;
+  background: rgba(235, 250, 245, .72);
 }
 
-.sessionConfigModal .ant-select-allow-clear .ant-select-arrow {
-  display: none;
+.sessionPreviewSecurity > span {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: #13a776;
+  background: #ffffff;
+  font-size: 14px;
 }
 
-.sessionConfigModal .ant-select:not(.ant-select-focused):hover .ant-select-selector {
-  border-color: #93c5fd !important;
+.sessionPreviewSecurity p {
+  margin: 0;
+  font-size: 9.5px;
+  line-height: 1.45;
 }
 
-.sessionConfigModal .ant-select-focused .ant-select-selector {
-  border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px rgba(59,130,246,0.12) !important;
+/* ─── 右侧表单 ─────────────────────────────────────────────────────────── */
+
+.sessionConfigFormPane {
+  min-width: 0;
+  min-height: 0;
+  padding: 25px 28px 24px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #d7deea transparent;
+  background: #ffffff;
 }
 
-/* Password wrapper */
-.sessionConfigModal .ant-input-affix-wrapper {
-  height: 38px;
-  border-radius: 9px !important;
-  border: 1.5px solid var(--border) !important;
+.sessionConfigFormPane::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sessionConfigFormPane::-webkit-scrollbar-thumb {
+  border-radius: 99px;
+  background: #d7deea;
+}
+
+.sessionConfigForm {
+  min-width: 0;
+}
+
+.sessionConfigSection + .sessionConfigSection {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid #edf0f5;
+}
+
+.sessionConfigSectionHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 13px;
+}
+
+.sessionConfigSectionHeading > small {
+  color: #9aa5b6;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.sessionConfigSectionTitle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.sessionConfigSectionTitle > span {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  color: #4f6df5;
+  background: #eef1ff;
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.sessionConfigSectionTitle > strong {
+  color: #273349;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.sessionIdentityGrid,
+.sessionEndpointGrid,
+.sessionAuthGrid,
+.sessionKeyGrid,
+.sessionProxyGrid {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.sessionIdentityGrid {
+  grid-template-columns: 1.4fr .8fr;
+}
+
+.sessionEndpointGrid {
+  grid-template-columns: 1.6fr .55fr .85fr;
+  margin-top: 9px;
+}
+
+.sessionAuthGrid {
+  grid-template-columns: 190px minmax(0, 1fr);
+}
+
+.sessionKeyGrid {
+  grid-template-columns: 1.25fr .75fr;
+}
+
+.sessionProxyGrid {
+  grid-template-columns: .75fr 1.35fr .65fr;
+}
+
+.sessionConfigModal .ant-form-item {
+  min-width: 0;
+  margin-bottom: 0 !important;
+}
+
+.sessionConfigModal .ant-form-item-label {
+  padding-bottom: 7px !important;
+}
+
+.sessionConfigModal .ant-form-item-label > label {
+  height: auto;
+  color: #536279;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sessionRequiredMark {
+  color: #f05252;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.sessionConfigModal .ant-form-item-extra,
+.sessionConfigModal .ant-form-item-explain {
+  min-height: 15px;
+  padding: 4px 2px 0;
+  color: #9aa5b6;
+  font-size: 9.5px;
+  line-height: 1.25;
+}
+
+.sessionConfigModal .ant-form-item-explain-error {
+  color: #e24b4b;
+}
+
+.sessionConfigModal .ant-input,
+.sessionConfigModal .ant-input-affix-wrapper,
+.sessionConfigModal .ant-input-number,
+.sessionConfigModal .ant-select-selector {
+  width: 100%;
+  min-height: 42px !important;
+  border: 1px solid #dce3ed !important;
+  border-radius: 11px !important;
+  color: #243047 !important;
   background: #ffffff !important;
-  box-shadow: inset 0 1px 2px rgba(0,0,0,0.04) !important;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-  padding-inline: 14px !important;
-  align-items: center;
-  transition: all 0.18s !important;
+  box-shadow: 0 1px 2px rgba(18, 31, 54, .025) !important;
+  font-size: 12px !important;
+  transition: border-color .16s ease, box-shadow .16s ease !important;
+}
+
+.sessionConfigModal .ant-input {
+  height: 42px;
+  padding-inline: 12px;
+}
+
+.sessionConfigModal .ant-input-affix-wrapper {
+  height: 42px;
+  padding: 0 12px !important;
 }
 
 .sessionConfigModal .ant-input-affix-wrapper > .ant-input {
-  height: 100% !important;
+  height: 38px !important;
+  min-height: 38px !important;
   padding: 0 !important;
   border: 0 !important;
   border-radius: 0 !important;
-  box-shadow: none !important;
   background: transparent !important;
+  box-shadow: none !important;
 }
 
 .sessionConfigModal .ant-input-affix-wrapper .ant-input-prefix {
-  margin-inline-end: 8px;
+  margin-inline-end: 9px;
 }
 
 .sessionConfigModal .ant-input-affix-wrapper .ant-input-suffix {
   margin-inline-start: 8px;
 }
 
-.sessionConfigModal .ant-input-affix-wrapper:not(.ant-input-affix-wrapper-focused):hover {
-  border-color: #93c5fd !important;
+.sessionConfigModal .ant-input-number {
+  height: 42px;
 }
 
-.sessionConfigModal .ant-input-affix-wrapper-focused {
-  border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px rgba(59,130,246,0.12) !important;
+.sessionConfigModal .ant-input-number-input-wrap {
+  flex: 1;
+}
+
+.sessionConfigModal .ant-input-number-input {
+  height: 40px !important;
+  padding-inline: 12px !important;
+  font-size: 12px !important;
+}
+
+.sessionConfigModal .ant-select {
+  width: 100%;
+  height: 42px;
+}
+
+.sessionConfigModal .ant-select-selector {
+  height: 42px !important;
+  padding-inline: 12px !important;
+  align-items: center;
+}
+
+.sessionConfigModal .ant-input:hover,
+.sessionConfigModal .ant-input-affix-wrapper:hover,
+.sessionConfigModal .ant-input-number:hover,
+.sessionConfigModal .ant-select:not(.ant-select-disabled):hover .ant-select-selector {
+  border-color: #bfcbe0 !important;
+}
+
+.sessionConfigModal .ant-input:focus,
+.sessionConfigModal .ant-input-affix-wrapper-focused,
+.sessionConfigModal .ant-input-number-focused,
+.sessionConfigModal .ant-select-focused .ant-select-selector {
+  border-color: rgba(79, 109, 245, .72) !important;
+  box-shadow: 0 0 0 3px rgba(79, 109, 245, .1) !important;
+}
+
+.sessionConfigModal .ant-form-item-has-error .ant-input,
+.sessionConfigModal .ant-form-item-has-error .ant-input-affix-wrapper,
+.sessionConfigModal .ant-form-item-has-error .ant-input-number,
+.sessionConfigModal .ant-form-item-has-error .ant-select-selector {
+  border-color: rgba(238, 74, 74, .72) !important;
+  box-shadow: 0 0 0 3px rgba(238, 74, 74, .08) !important;
+}
+
+.fullControl {
+  width: 100%;
+}
+
+.sessionFieldHint {
+  display: block;
+  padding: 4px 2px 0;
+  color: #9aa5b6;
+  font-size: 9.5px;
+}
+
+/* ─── 认证切换和私钥 ───────────────────────────────────────────────────── */
+
+.sessionAuthMethodField .ant-form-item-control-input {
+  min-height: 42px;
+}
+
+.sessionConfigModal .sessionAuthSwitch {
+  width: 100%;
+  height: 42px;
+  display: grid !important;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid #e0e6ef;
+  border-radius: 11px;
+  background: #f2f5fa;
+}
+
+.sessionConfigModal .sessionAuthSwitch .ant-radio-button-wrapper {
+  height: 32px !important;
+  display: grid;
+  place-items: center;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 8px !important;
+  color: #7b889c !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 32px !important;
+}
+
+.sessionConfigModal .sessionAuthSwitch .ant-radio-button-wrapper::before {
+  display: none !important;
+}
+
+.sessionConfigModal .sessionAuthSwitch .ant-radio-button-wrapper:hover {
+  color: #4f6df5 !important;
+}
+
+.sessionConfigModal .sessionAuthSwitch .ant-radio-button-wrapper-checked {
+  color: #4f6df5 !important;
+  background: #ffffff !important;
+  box-shadow: 0 2px 7px rgba(37, 52, 82, .1) !important;
+}
+
+.sessionAuthPanel {
+  min-width: 0;
+  animation: session-panel-in .16s ease-out;
+}
+
+@keyframes session-panel-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .sessionConfigModal .privateKeyPathInput.ant-input-affix-wrapper {
-  padding-inline: 14px 6px !important;
-}
-
-.sessionConfigModal .privateKeyPathInput .ant-input {
-  padding-right: 0 !important;
-}
-
-.sessionConfigModal .privateKeyPathInput .ant-input-suffix {
-  margin-inline-start: 6px !important;
+  padding-inline: 12px 6px !important;
 }
 
 .sessionConfigModal .privateKeyBrowseButton {
@@ -296,18 +723,299 @@
   height: 28px !important;
   min-width: 28px !important;
   padding: 0 !important;
+  border: 0 !important;
   border-radius: 8px !important;
-  color: var(--text-secondary) !important;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  color: #7f8ca0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
 }
 
 .sessionConfigModal .privateKeyBrowseButton:hover,
 .sessionConfigModal .privateKeyBrowseButton:focus-visible {
-  color: var(--accent) !important;
-  background: rgba(59, 130, 246, 0.1) !important;
+  color: #4f6df5 !important;
+  background: #eef1ff !important;
 }
+
+.sessionInlineNote {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 8px;
+  color: #8b97aa;
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+.sessionInlineNote > span {
+  color: #6f7ef2;
+  font-weight: 900;
+}
+
+/* ─── 网络路径 ─────────────────────────────────────────────────────────── */
+
+.sessionRouteFormItem .ant-form-item-control-input {
+  min-height: 66px;
+}
+
+.sessionConfigModal .sessionRouteOptions {
+  width: 100%;
+  display: grid !important;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.sessionConfigModal .sessionRouteOptions .ant-radio-button-wrapper {
+  position: relative;
+  min-width: 0;
+  min-height: 66px;
+  height: auto !important;
+  display: block;
+  padding: 11px 12px !important;
+  border: 1px solid #e0e6ef !important;
+  border-radius: 13px !important;
+  color: #263249 !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+  line-height: normal !important;
+  white-space: normal;
+  transition: border-color .16s ease, background .16s ease, transform .16s ease !important;
+}
+
+.sessionConfigModal .sessionRouteOptions .ant-radio-button-label {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 16px;
+  gap: 10px;
+  align-items: center;
+}
+
+.sessionConfigModal .sessionRouteOptions .ant-radio-button {
+  position: absolute !important;
+  width: 0 !important;
+  height: 0 !important;
+  overflow: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.sessionConfigModal .sessionRouteOptions .ant-radio-button-wrapper::before {
+  display: none !important;
+}
+
+.sessionConfigModal .sessionRouteOptions .ant-radio-button-wrapper:hover {
+  border-color: #cdd6e5 !important;
+  transform: translateY(-1px);
+}
+
+.sessionConfigModal .sessionRouteOptions .ant-radio-button-wrapper-checked {
+  border-color: rgba(79, 109, 245, .52) !important;
+  background: linear-gradient(145deg, #fafbff, #f4f6ff) !important;
+  box-shadow: 0 0 0 3px rgba(79, 109, 245, .07) !important;
+}
+
+.sessionRouteIcon {
+  grid-column: 1;
+  grid-row: 1;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #74839a;
+  background: #f2f5fa;
+  font-size: 15px;
+}
+
+.ant-radio-button-wrapper-checked .sessionRouteIcon {
+  color: #4f6df5;
+  background: #e9edff;
+}
+
+.sessionRouteCopy {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+}
+
+.sessionRouteCopy strong,
+.sessionRouteCopy small {
+  display: block;
+}
+
+.sessionRouteCopy strong {
+  margin-bottom: 3px;
+  font-size: 11.5px;
+}
+
+.sessionRouteCopy small {
+  color: #8995a7;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.sessionRouteDot {
+  grid-column: 3;
+  grid-row: 1;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid #c6cfdd;
+  border-radius: 50%;
+  background: #ffffff;
+}
+
+.ant-radio-button-wrapper-checked .sessionRouteDot {
+  border: 4.5px solid #4f6df5;
+}
+
+.sessionGlobalProxyDetail {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 11px;
+  border: 1px solid #e7ebf2;
+  border-radius: 10px;
+  color: #7f8ca0;
+  background: #fafbfd;
+  font-size: 10px;
+}
+
+.sessionGlobalProxyDetail > span {
+  color: #718096;
+  font-size: 8px;
+}
+
+.sessionGlobalProxyDetail p {
+  margin: 0;
+}
+
+.sessionGlobalProxyDetail strong {
+  color: #56657c;
+  font-weight: 800;
+}
+
+.sessionProxyPanel {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid #e3e8f1;
+  border-radius: 13px;
+  background: #f8fafe;
+  animation: session-panel-in .16s ease-out;
+}
+
+/* ─── 底部状态和操作 ───────────────────────────────────────────────────── */
+
+.sessionConfigModal .ant-modal-footer {
+  flex: 0 0 86px !important;
+  min-height: 86px;
+  margin: 0 !important;
+  padding: 0 !important;
+  border-top: 1px solid #e4e9f2;
+  background: #fbfcfe;
+}
+
+.sessionConfigFooter {
+  width: 100%;
+  height: 85px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 28px 19px 30px;
+}
+
+.sessionConfigFooterStatus {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #708098;
+  font-size: 11px;
+}
+
+.sessionConfigFooterStatus > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionConfigFooterStatusIcon {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #13a776;
+  background: #e9f8f2;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.sessionConfigFooterStatus.is-error {
+  color: #d84b4b;
+}
+
+.sessionConfigFooterStatus.is-error .sessionConfigFooterStatusIcon {
+  color: #e24b4b;
+  background: #fff0f0;
+}
+
+.sessionConfigFooterStatus.is-incomplete {
+  color: #7a879a;
+}
+
+.sessionConfigFooterStatus.is-incomplete .sessionConfigFooterStatusIcon {
+  color: #d18b20;
+  background: #fff6e5;
+}
+
+.sessionConfigFooterActions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sessionConfigFooterActions .ant-btn {
+  height: 40px;
+  min-width: 66px;
+  padding: 0 20px;
+  border: 1px solid #d8e0eb;
+  border-radius: 11px !important;
+  color: #536279;
+  background: #ffffff;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.sessionConfigFooterActions .ant-btn:not(:disabled):hover {
+  border-color: #bfcbe0;
+  color: #4f6df5;
+  transform: translateY(-1px);
+}
+
+.sessionConfigFooterActions .ant-btn-primary {
+  min-width: 124px;
+  border: 0;
+  color: #ffffff !important;
+  background: linear-gradient(135deg, #4379f4 0%, #6268ee 58%, #7d5cf2 100%) !important;
+  box-shadow: 0 9px 20px rgba(79, 109, 245, .25) !important;
+}
+
+.sessionConfigFooterActions .ant-btn-primary:not(:disabled):hover {
+  filter: brightness(1.04);
+  box-shadow: 0 11px 24px rgba(79, 109, 245, .3) !important;
+}
+
+.sessionConfigFooterActions .ant-btn:disabled {
+  opacity: .48;
+}
+
+/* ─── 分组下拉管理 ─────────────────────────────────────────────────────── */
 
 .sessionGroupSelectPopup .ant-select-item-option-content {
   min-width: 0;
@@ -336,12 +1044,12 @@
 }
 
 .sessionGroupSelectPopup .sessionGroupOption {
+  width: 100%;
+  min-height: 28px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
   align-items: center;
   gap: 8px;
-  width: 100%;
-  min-height: 28px;
 }
 
 .sessionGroupSelectPopup .sessionGroupOptionName {
@@ -364,15 +1072,12 @@
   padding: 0 !important;
   border-radius: 7px !important;
   color: var(--text-secondary) !important;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 
 .sessionGroupSelectPopup .sessionGroupOptionButton:not(:disabled):hover,
 .sessionGroupSelectPopup .sessionGroupOptionButton:not(:disabled):focus-visible {
   color: var(--accent) !important;
-  background: rgba(59, 130, 246, 0.1) !important;
+  background: rgba(59, 130, 246, .1) !important;
 }
 
 .sessionGroupSelectPopup .sessionGroupOptionButton-save {
@@ -382,7 +1087,7 @@
 .sessionGroupSelectPopup .sessionGroupOptionButton-save:not(:disabled):hover,
 .sessionGroupSelectPopup .sessionGroupOptionButton-save:not(:disabled):focus-visible {
   color: #15803d !important;
-  background: rgba(22, 163, 74, 0.1) !important;
+  background: rgba(22, 163, 74, .1) !important;
 }
 
 .sessionGroupSelectPopup .sessionGroupOptionButton-danger {
@@ -392,7 +1097,7 @@
 .sessionGroupSelectPopup .sessionGroupOptionButton-danger:not(:disabled):hover,
 .sessionGroupSelectPopup .sessionGroupOptionButton-danger:not(:disabled):focus-visible {
   color: var(--danger) !important;
-  background: rgba(239, 68, 68, 0.1) !important;
+  background: rgba(239, 68, 68, .1) !important;
 }
 
 .sessionGroupSelectPopup .sessionGroupOption-editing {
@@ -418,8 +1123,8 @@
   margin: 6px 8px 0;
   padding: 6px 8px;
   border-radius: 8px;
-  background: rgba(239, 68, 68, 0.08);
   color: var(--danger);
+  background: rgba(239, 68, 68, .08);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -447,9 +1152,6 @@
   padding: 0 !important;
   border-radius: 8px !important;
   color: #cbd5e1 !important;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 
 .sessionGroupSelectPopup .sessionGroupCreateButton:not(:disabled) {
@@ -458,13 +1160,7 @@
 
 .sessionGroupSelectPopup .sessionGroupCreateButton:not(:disabled):hover,
 .sessionGroupSelectPopup .sessionGroupCreateButton:not(:disabled):focus-visible {
-  background: rgba(59, 130, 246, 0.1) !important;
-}
-
-.sessionGroupSelectPopup .sessionGroupCreateButton:disabled,
-.sessionGroupSelectPopup .sessionGroupCreateButton.ant-btn-disabled {
-  background: transparent !important;
-  cursor: not-allowed;
+  background: rgba(59, 130, 246, .1) !important;
 }
 
 .sessionGroupSelectPopup .sessionGroupCreateError {
@@ -474,282 +1170,102 @@
   line-height: 1.4;
 }
 
-/* TextArea */
-.sessionConfigModal .ant-input[rows] {
-  height: auto;
+/* ─── 窄窗口适配 ───────────────────────────────────────────────────────── */
+
+@media (max-width: 980px) {
+  .sessionConfigShell {
+    grid-template-columns: 230px minmax(0, 1fr);
+  }
+
+  .sessionConfigPreview {
+    padding: 22px 18px 18px;
+  }
+
+  .sessionPreviewProgressText {
+    display: none;
+  }
+
+  .sessionPreviewHero {
+    grid-template-columns: 44px minmax(0, 1fr);
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .sessionPreviewServerIcon {
+    width: 44px;
+    height: 44px;
+    border-radius: 13px;
+    font-size: 21px;
+  }
+
+  .sessionConfigFormPane {
+    padding-inline: 22px;
+  }
+
+  .sessionEndpointGrid {
+    grid-template-columns: 1.35fr .55fr .8fr;
+  }
 }
 
-/* ─── Footer ─────────────────────────────────────────────────────────────── */
-.sessionConfigModal .ant-modal-footer {
-  margin: 0 !important;
-  padding: 16px 32px 20px;
-  background: transparent !important;
-  border-top: 1px solid rgba(0,0,0,0.06);
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
+@media (max-width: 780px) {
+  .sessionConfigModal {
+    max-width: calc(100vw - 24px);
+  }
+
+  .sessionConfigPreview {
+    display: none;
+  }
+
+  .sessionConfigShell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sessionIdentityGrid,
+  .sessionEndpointGrid,
+  .sessionAuthGrid,
+  .sessionKeyGrid,
+  .sessionProxyGrid,
+  .sessionConfigModal .sessionRouteOptions {
+    grid-template-columns: 1fr;
+  }
+
+  .sessionConfigSectionHeading > small {
+    display: none;
+  }
 }
 
-.sessionConfigModal .ant-modal-footer .ant-btn {
-  height: 36px;
-  padding: 0 20px;
-  border-radius: 9px !important;
-  font-size: 14px;
-  font-weight: 600;
-  transition: all 0.2s !important;
+@media (max-height: 720px) and (min-width: 781px) {
+  .sessionConfigPreview {
+    padding-block: 18px;
+  }
+
+  .sessionPreviewTopline {
+    margin-bottom: 12px;
+  }
+
+  .sessionPreviewHero {
+    padding-block: 11px;
+  }
+
+  .sessionPreviewTags {
+    margin-block: 9px 11px;
+  }
+
+  .sessionPreviewProgress {
+    margin-bottom: 11px;
+  }
+
+  .sessionPreviewList {
+    gap: 6px;
+  }
+
+  .sessionPreviewRow {
+    min-height: 46px;
+    padding-block: 6px;
+  }
+
+  .sessionPreviewSecurity {
+    margin-top: 10px;
+    padding-block: 8px;
+  }
 }
-
-.sessionConfigModal .ant-modal-footer .ant-btn-default {
-  border: 1.5px solid var(--border) !important;
-  color: var(--text-secondary) !important;
-  background: var(--bg-surface) !important;
-}
-
-.sessionConfigModal .ant-modal-footer .ant-btn-default:hover {
-  border-color: var(--accent) !important;
-  color: var(--accent) !important;
-  background: var(--accent-light) !important;
-}
-
-.sessionConfigModal .ant-modal-footer .ant-btn-primary {
-  border: none !important;
-  background: linear-gradient(135deg, #3b82f6 0%, #818cf8 100%) !important;
-  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4) !important;
-  color: #fff !important;
-}
-
-.sessionConfigModal .ant-modal-footer .ant-btn-primary:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(59, 130, 246, 0.5) !important;
-  filter: brightness(1.05);
-}
-
-/* ─── 表单网格布局 ──────────────────────────────────────────────────────── */
-.sessionFormGrid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 16px;
-}
-
-.sessionFormWide {
-  grid-column: 1 / -1;
-}
-
-.sessionProxyInline {
-  display: grid;
-  grid-template-columns: 132px minmax(180px, 1fr) 116px;
-  gap: 12px;
-  align-items: start;
-}
-
-.sessionProxyInline .ant-form-item {
-  margin-bottom: 14px !important;
-  min-width: 0;
-}
-
-.sessionProxyKind .ant-select,
-.sessionProxyHost .ant-input,
-.sessionProxyPort .ant-input-number {
-  width: 100%;
-}
-
-.sessionProxyInline .ant-input,
-.sessionProxyInline .ant-input-number,
-.sessionProxyInline .ant-select,
-.sessionProxyInline .ant-select-selector {
-  height: 38px !important;
-  min-height: 38px !important;
-  box-sizing: border-box;
-}
-
-.sessionProxyInline .ant-input {
-  display: block;
-  line-height: 36px;
-}
-
-.sessionProxyInline .ant-input-number-input {
-  height: 36px !important;
-  line-height: 36px !important;
-}
-
-.fullControl {
-  width: 100%;
-}
-
-/* ─── 新版奢华重构高光美化 ─── */
-
-.sessionConfigModal .ant-modal-content {
-  border-radius: var(--radius-xl) !important;
-  background: rgba(255, 255, 255, 0.95) !important;
-  backdrop-filter: blur(16px) saturate(140%) !important;
-  border: 1px solid rgba(226, 232, 240, 0.8) !important;
-  box-shadow:
-    0 32px 64px -16px rgba(15, 23, 42, 0.22),
-    0 12px 24px -10px rgba(99, 102, 241, 0.15),
-    inset 0 1px 0 rgba(255, 255, 255, 0.9) !important;
-}
-
-.sessionConfigModal .ant-modal-header {
-  padding: 24px 32px 18px !important;
-  margin: 0 !important;
-  border-bottom: 1px solid rgba(226, 232, 240, 0.8) !important;
-}
-
-.sessionConfigModal .ant-modal-close {
-  top: 22px !important;
-  inset-inline-end: 24px !important;
-  width: 32px !important;
-  height: 32px !important;
-  border-radius: 50% !important;
-  background: rgba(241, 245, 249, 0.8) !important;
-  border: 1px solid rgba(226, 232, 240, 0.6) !important;
-  color: var(--text-secondary) !important;
-  transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1) !important;
-  display: flex !important;
-  align-items: center;
-  justify-content: center;
-}
-
-.sessionConfigModal .ant-modal-close:hover {
-  background: rgba(239, 68, 68, 0.08) !important;
-  border-color: rgba(239, 68, 68, 0.3) !important;
-  color: var(--danger) !important;
-  transform: rotate(90deg) scale(1.05);
-}
-
-.sessionConfigModal .ant-modal-body {
-  padding: 0 !important;
-  max-height: 520px !important;
-  overflow-y: auto !important;
-  scrollbar-width: none !important;
-}
-
-.sessionConfigModal .ant-modal-body::-webkit-scrollbar {
-  display: none !important;
-}
-
-/* 表单分段卡片 */
-.formSectionCard {
-  background: rgba(255, 255, 255, 0.5);
-  border: 1px solid rgba(226, 232, 240, 0.8);
-  border-radius: var(--radius-lg);
-  padding: 22px 24px;
-  margin-bottom: 20px;
-  transition: all 0.25s ease;
-  position: relative;
-}
-
-.formSectionCard:hover {
-  border-color: rgba(99, 102, 241, 0.35);
-  box-shadow: 0 8px 24px -10px rgba(99, 102, 241, 0.12);
-}
-
-.formSectionTitle {
-  font-size: 13px;
-  font-weight: 800;
-  color: #6366f1;
-  letter-spacing: 0.5px;
-  margin-bottom: 20px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-
-/* iOS 胶囊分段单选器 */
-.sessionConfigModal .ant-radio-group {
-  display: inline-flex !important;
-  background: rgba(241, 245, 249, 0.8) !important;
-  border: 1px solid rgba(226, 232, 240, 0.6) !important;
-  border-radius: 10px !important;
-  padding: 3px !important;
-  gap: 2px !important;
-}
-
-.sessionConfigModal .ant-radio-button-wrapper {
-  border: none !important;
-  background: transparent !important;
-  border-radius: 8px !important;
-  font-size: 13px !important;
-  font-weight: 500 !important;
-  color: var(--text-secondary) !important;
-  height: 30px !important;
-  line-height: 30px !important;
-  padding: 0 16px !important;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
-  box-shadow: none !important;
-}
-
-.sessionConfigModal .ant-radio-button-wrapper::before {
-  display: none !important;
-}
-
-.sessionConfigModal .ant-radio-button-wrapper:hover {
-  color: #6366f1 !important;
-}
-
-.sessionConfigModal .ant-radio-button-wrapper-checked {
-  background: #ffffff !important;
-  color: #6366f1 !important;
-  font-weight: 700 !important;
-  box-shadow: 0 2px 6px rgba(99, 102, 241, 0.15), 0 1px 2px rgba(0, 0, 0, 0.05) !important;
-}
-
-/* 输入框与选择框聚焦发光阴影重写 */
-.sessionConfigModal .ant-input:focus,
-.sessionConfigModal .ant-input-affix-wrapper-focused,
-.sessionConfigModal .ant-input-number-focused,
-.sessionConfigModal .ant-select-focused .ant-select-selector {
-  border-color: #6366f1 !important;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15), inset 0 1px 2px rgba(0, 0, 0, 0.02) !important;
-}
-
-/* 统一表单控件高度：Input / Select / InputNumber */
-.sessionConfigModal {
-  --session-control-height: 38px;
-  --session-control-inner-height: 36px;
-}
-
-.sessionConfigModal .sessionFormGrid .ant-form-item-control-input {
-  min-height: var(--session-control-height) !important;
-}
-
-.sessionConfigModal .sessionFormGrid .ant-input-affix-wrapper,
-.sessionConfigModal .sessionFormGrid .ant-input-number,
-.sessionConfigModal .sessionFormGrid .ant-select,
-.sessionConfigModal .sessionFormGrid .ant-select-selector {
-  width: 100%;
-  height: var(--session-control-height) !important;
-  min-height: var(--session-control-height) !important;
-  box-sizing: border-box;
-}
-
-.sessionConfigModal .sessionFormGrid .ant-input-affix-wrapper,
-.sessionConfigModal .sessionFormGrid .ant-input-number,
-.sessionConfigModal .sessionFormGrid .ant-select-selector {
-  display: flex !important;
-  align-items: center !important;
-}
-
-.sessionConfigModal .sessionFormGrid .ant-input-affix-wrapper > .ant-input,
-.sessionConfigModal .sessionFormGrid .ant-input-number-input,
-.sessionConfigModal .sessionFormGrid .ant-select-content {
-  height: var(--session-control-inner-height) !important;
-  line-height: var(--session-control-inner-height) !important;
-}
-
-.sessionConfigModal .sessionFormGrid .ant-input-number-input-wrap,
-.sessionConfigModal .sessionFormGrid .ant-select-content {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.sessionConfigModal .sessionFormGrid .ant-input-number-prefix,
-.sessionConfigModal .sessionFormGrid .ant-input-prefix,
-.sessionConfigModal .sessionFormGrid .ant-input-suffix,
-.sessionConfigModal .sessionFormGrid .ant-select-suffix,
-.sessionConfigModal .sessionFormGrid .ant-select-clear {
-  display: inline-flex;
-  align-items: center;
-}
-

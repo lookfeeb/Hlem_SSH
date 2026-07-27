@@ -53,6 +53,7 @@ export function useSftpFiles({
 }: UseSftpFilesOptions) {
   const lastDownloadDirRef = useRef("");
   const refreshRequestSeqRef = useRef<Map<string, number>>(new Map());
+  const sftpConnectRequestsRef = useRef<Map<string, Promise<void>>>(new Map());
   const mountedRef = useMountedRef();
 
   async function openSftpWithFiles(connectionId: string, initialPath: string, username: string, loginPath?: string | null): Promise<OpenSftpResult> {
@@ -69,13 +70,95 @@ export function useSftpFiles({
         return { sftp, path: homePath, files, error: null };
       }
     } catch (error) {
-      if (sftp) {
-        await remoteApi.closeSftp(sftp.sftpId).catch((closeError) => {
-          console.warn("[helm] failed to close sftp after open failure:", getErrorMessage(closeError));
-        });
-      }
-      return { sftp: null, path: initialPath, files: [], error };
+      // Opening the SFTP channel and listing the initial directory are separate
+      // concerns. Keep an opened channel even when the initial path cannot be
+      // listed, otherwise a later retry needlessly tears down and recreates it.
+      return { sftp, path: initialPath, files: [], error };
     }
+  }
+
+  async function ensureSessionSftp(sessionId: string, connectionId?: string) {
+    const session = sessionsRef.current.find((item) => item.id === sessionId);
+    if (
+      !session ||
+      session.state !== "connected" ||
+      !session.connectionId ||
+      (connectionId && session.connectionId !== connectionId) ||
+      session.sftpId
+    ) return;
+
+    const expectedConnectionId = session.connectionId;
+    const requestKey = `${sessionId}:${expectedConnectionId}`;
+    const existing = sftpConnectRequestsRef.current.get(requestKey);
+    if (existing) return existing;
+
+    let request: Promise<void>;
+    request = (async () => {
+      setSessionFilesLoading(sessionId, true);
+      try {
+        const current = sessionsRef.current.find((item) => item.id === sessionId);
+        if (
+          !current ||
+          current.state !== "connected" ||
+          current.connectionId !== expectedConnectionId ||
+          current.sftpId
+        ) return;
+
+        const sftpResult = await openSftpWithFiles(
+          expectedConnectionId,
+          remoteSessionPath(current),
+          current.username,
+          current.loginPath,
+        );
+        if (!sftpResult.sftp) {
+          throw new Error(`SFTP 不可用：${sftpUnavailableMessage(sftpResult.error)}`);
+        }
+
+        const sftp = sftpResult.sftp;
+        const latest = sessionsRef.current.find((item) => item.id === sessionId);
+        if (
+          !mountedRef.current ||
+          !latest ||
+          latest.state !== "connected" ||
+          latest.connectionId !== expectedConnectionId ||
+          latest.sftpId
+        ) {
+          // `sftp_open` is idempotent per SSH connection. The returned id may
+          // already be in use by another concurrent caller, so it must not be
+          // closed merely because this request became stale. SSH disconnect
+          // cleanup owns the channel lifetime.
+          return;
+        }
+
+        sessionsRef.current = sessionsRef.current.map((item) =>
+          item.id === sessionId && item.connectionId === expectedConnectionId && !item.sftpId
+            ? { ...item, currentPath: sftpResult.path, sftpId: sftp.sftpId, files: sftpResult.files }
+            : item,
+        );
+        updateSession(sessionId, (item) =>
+          item.connectionId === expectedConnectionId && !item.sftpId
+            ? {
+                ...item,
+                currentPath: sftpResult.path,
+                sftpId: sftp.sftpId,
+                files: sftpResult.files,
+              }
+            : item,
+        );
+        if (sftpResult.error) {
+          console.warn("[helm] sftp connected but initial directory could not be listed:", getErrorMessage(sftpResult.error));
+        }
+        notifyEditorSessionReconnected(sessionId);
+      } finally {
+        if (mountedRef.current) setSessionFilesLoading(sessionId, false);
+      }
+    })().finally(() => {
+      if (sftpConnectRequestsRef.current.get(requestKey) === request) {
+        sftpConnectRequestsRef.current.delete(requestKey);
+      }
+    });
+    sftpConnectRequestsRef.current.set(requestKey, request);
+    return request;
   }
 
   async function changePath(path: string) {
@@ -106,41 +189,13 @@ export function useSftpFiles({
   async function refreshActiveFiles() {
     const session = activeSession;
     if (!session) return;
+    if (!session.sftpId) {
+      await ensureSessionSftp(session.id, session.connectionId ?? undefined);
+      return;
+    }
     setSessionFilesLoading(session.id, true);
     try {
-      if (session.sftpId) {
-        await refreshFiles(session.sftpId, session.currentPath, session.id);
-        return;
-      }
-      if (session.state !== "connected" || !session.connectionId) return;
-
-      const sftpResult = await openSftpWithFiles(
-        session.connectionId,
-        remoteSessionPath(session),
-        session.username,
-        session.loginPath,
-      );
-      if (!sftpResult.sftp) {
-        throw new Error(`SFTP 不可用：${sftpUnavailableMessage(sftpResult.error)}`);
-      }
-      if (!mountedRef.current) return;
-      const sftp = sftpResult.sftp;
-      sessionsRef.current = sessionsRef.current.map((item) =>
-        item.id === session.id && item.connectionId === session.connectionId
-          ? { ...item, currentPath: sftpResult.path, sftpId: sftp.sftpId, files: sftpResult.files }
-          : item,
-      );
-      updateSession(session.id, (item) =>
-        item.connectionId === session.connectionId
-          ? {
-              ...item,
-              currentPath: sftpResult.path,
-              sftpId: sftp.sftpId,
-              files: sftpResult.files,
-            }
-          : item,
-      );
-      notifyEditorSessionReconnected(session.id);
+      await refreshFiles(session.sftpId, session.currentPath, session.id);
     } finally {
       if (mountedRef.current) setSessionFilesLoading(session.id, false);
     }
@@ -360,6 +415,7 @@ export function useSftpFiles({
   }
 
   return {
+    ensureSessionSftp,
     changePath,
     refreshActiveFiles,
     runFileOperation,

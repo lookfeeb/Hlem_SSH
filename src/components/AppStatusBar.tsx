@@ -8,10 +8,10 @@ import type { RemoteSession } from "../types";
 interface AppStatusBarProps {
   activeSession?: RemoteSession;
   sessions: RemoteSession[];
-  connectingSessionId: string | null;
+  connectingSessionIds: ReadonlySet<string>;
 }
 
-export function AppStatusBar({ activeSession, sessions, connectingSessionId }: AppStatusBarProps) {
+export function AppStatusBar({ activeSession, sessions, connectingSessionIds }: AppStatusBarProps) {
   const [now, setNow] = useState(() => Date.now());
   const [copied, setCopied] = useState(false);
   const mountedRef = useMountedRef();
@@ -28,7 +28,7 @@ export function AppStatusBar({ activeSession, sessions, connectingSessionId }: A
     [sessions],
   );
   const connected = activeSession?.state === "connected";
-  const connecting = Boolean(activeSession && connectingSessionId === activeSession.id);
+  const connecting = Boolean(activeSession && connectingSessionIds.has(activeSession.id));
   const activeHost = activeSession?.host ?? "";
   const statusText = connected
     ? `已连接 ${activeHost}`

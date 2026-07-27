@@ -1,12 +1,17 @@
 import {
+  ApiOutlined,
+  ArrowRightOutlined,
   CheckOutlined,
+  CloudServerOutlined,
+  CodeOutlined,
   CloseOutlined,
   DeleteOutlined,
   EditOutlined,
+  ExclamationCircleOutlined,
   FolderOpenOutlined,
   LockOutlined,
   PlusOutlined,
-  SettingOutlined,
+  SafetyCertificateOutlined,
   GlobalOutlined,
   UserOutlined,
   KeyOutlined,
@@ -81,70 +86,326 @@ export function SessionConfigModal({
   onSubmit,
 }: SessionConfigModalProps) {
   const [form] = Form.useForm<SessionFormValues>();
-  const authMethod = Form.useWatch("authMethod", form);
-  const proxyMode = Form.useWatch("proxyMode", form);
+  const mountedRef = useMountedRef();
+  const [submitting, setSubmitting] = useState(false);
+  const [fieldErrorCount, setFieldErrorCount] = useState(0);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const watchedName = Form.useWatch("name", form);
+  const watchedGroupId = Form.useWatch("groupId", form);
+  const watchedHost = Form.useWatch("host", form);
+  const watchedPort = Form.useWatch("port", form);
+  const watchedUsername = Form.useWatch("username", form);
+  const watchedAuthMethod = Form.useWatch("authMethod", form);
+  const watchedPassword = Form.useWatch("password", form);
+  const watchedPrivateKeyPath = Form.useWatch("privateKeyPath", form);
+  const watchedProxyMode = Form.useWatch("proxyMode", form);
+  const watchedProxyKind = Form.useWatch("proxyKind", form);
+  const watchedProxyHost = Form.useWatch("proxyHost", form);
+  const watchedProxyPort = Form.useWatch("proxyPort", form);
+
+  const authMethod = watchedAuthMethod ?? initialValue.auth.method;
+  const proxyMode = watchedProxyMode ?? proxyModeFromInput(initialValue);
+  const host = watchedHost?.trim() ?? "";
+  const username = watchedUsername?.trim() ?? "";
+  const privateKeyPath = watchedPrivateKeyPath?.trim() ?? "";
+  const importedPrivateKey = initialValue.auth.importedPrivateKey?.trim() ?? "";
+  const passwordRequired = mode === "create" || initialValue.auth.method !== "password";
+  const selectedGroupName = groups.find((group) => group.id === watchedGroupId)?.name ?? "未分组";
+  const previewName = watchedName?.trim() || host || "未命名连接";
+  const previewHost = host || "未填写主机";
+  const previewUsername = username || "未填写用户";
+  const privateKeyParts = privateKeyPath.split(/[\\/]/).filter(Boolean);
+  const privateKeyName = privateKeyParts[privateKeyParts.length - 1];
+  const authDetail =
+    authMethod === "password"
+      ? passwordRequired && !watchedPassword
+        ? "尚未填写密码"
+        : "使用登录密码"
+      : privateKeyName
+        ? "使用 " + privateKeyName
+        : importedPrivateKey
+          ? "使用已导入私钥"
+          : "尚未选择私钥";
+  const proxyKindLabel = watchedProxyKind === "httpConnect" ? "HTTP CONNECT" : "SOCKS5";
+  const proxyDetail =
+    proxyMode === "custom"
+      ? proxyKindLabel + " · " + (watchedProxyHost?.trim() || "未填写地址")
+      : "按全局设置自动选择";
+  const requiredChecks = [
+    !host,
+    !watchedPort || watchedPort < 1 || watchedPort > 65535,
+    !username,
+    authMethod === "password" && passwordRequired && !watchedPassword,
+    authMethod === "privateKey" && !privateKeyPath && !importedPrivateKey,
+    proxyMode === "custom" && !watchedProxyHost?.trim(),
+    proxyMode === "custom" && (!watchedProxyPort || watchedProxyPort < 1 || watchedProxyPort > 65535),
+  ];
+  const missingCount = requiredChecks.filter(Boolean).length;
+  const ready = missingCount === 0 && fieldErrorCount === 0;
+  const serverPreviewReady = Boolean(
+    host &&
+    username &&
+    watchedPort &&
+    watchedPort >= 1 &&
+    watchedPort <= 65535,
+  );
+  const authPreviewReady =
+    authMethod === "password"
+      ? !passwordRequired || Boolean(watchedPassword)
+      : Boolean(privateKeyPath || importedPrivateKey);
+  const proxyPreviewReady =
+    proxyMode === "global" || Boolean(
+      watchedProxyHost?.trim() &&
+      watchedProxyPort &&
+      watchedProxyPort >= 1 &&
+      watchedProxyPort <= 65535,
+    );
+  const previewCompletedCount = [serverPreviewReady, authPreviewReady, proxyPreviewReady]
+    .filter(Boolean).length;
+  const previewProgress = Math.round(previewCompletedCount / 3 * 100);
+
+  function focusPreviewField(field: keyof SessionFormValues) {
+    form.scrollToField(field, {
+      behavior: "smooth",
+      block: "center",
+      focus: true,
+    });
+  }
 
   useEffect(() => {
     if (!open) return;
     form.resetFields();
     form.setFieldsValue(toFormValues(initialValue, mode));
+    setFieldErrorCount(0);
+    setSubmitError(null);
   }, [form, initialValue, mode, open]);
 
+  useEffect(() => {
+    if (!open) return;
+    const hiddenFieldNames: (keyof SessionFormValues)[] = [
+      ...(authMethod === "password" ? ["privateKeyPath", "privateKeyPassphrase"] as const : ["password"] as const),
+      ...(proxyMode === "global" ? ["proxyHost", "proxyPort"] as const : []),
+    ];
+    form.setFields(hiddenFieldNames.map((name) => ({ name, errors: [] })));
+    setFieldErrorCount(form.getFieldsError().filter((field) => field.errors.length > 0).length);
+  }, [authMethod, form, open, proxyMode]);
+
   async function submit() {
-    await form.validateFields();
-    const values = form.getFieldsValue(true);
-    await onSubmit(toSessionInput(values, initialValue, mode));
+    setSubmitError(null);
+    try {
+      const values = await form.validateFields();
+      setSubmitting(true);
+      await onSubmit(toSessionInput(values, initialValue, mode));
+    } catch (error) {
+      if (error && typeof error === "object" && "errorFields" in error) {
+        const errorFields = (error as { errorFields?: unknown[] }).errorFields;
+        setFieldErrorCount(errorFields?.length ?? 0);
+        return;
+      }
+      if (mountedRef.current) setSubmitError(getErrorMessage(error));
+    } finally {
+      if (mountedRef.current) setSubmitting(false);
+    }
   }
 
   return (
     <Modal
       title={
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <div style={{ width: 40, height: 40, background: "linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 20, boxShadow: "0 8px 16px rgba(59,130,246,0.3)" }}>
-            <SettingOutlined />
+        <div className="sessionConfigHeader">
+          <div className="sessionConfigHeaderIcon" aria-hidden="true">
+            <CodeOutlined />
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <span style={{ fontSize: 18, fontWeight: 800, color: "var(--text-primary)" }}>{mode === "create" ? "新建 SSH 连接" : "编辑 SSH 连接"}</span>
-            <span style={{ fontSize: 12, color: "var(--text-secondary)", fontWeight: 500 }}>配置服务器访问凭证与终端安全选项</span>
+          <div className="sessionConfigHeaderCopy">
+            <strong>{mode === "create" ? "新建 SSH 连接" : "编辑 SSH 连接"}</strong>
+            <span>
+              {mode === "create"
+                ? "填写服务器地址与认证方式，创建后即可打开终端和 SFTP"
+                : "修改连接信息后保存，已打开的终端不会被自动重连"}
+            </span>
           </div>
         </div>
       }
       open={open}
-      width={720}
+      width={1080}
       centered
       transitionName=""
       maskTransitionName=""
       onCancel={onCancel}
-      footer={[
-        <Button key="cancel" aria-label="取消" onClick={onCancelButton ?? onCancel}>
-          取消
-        </Button>,
-        <Button key="submit" type="primary" aria-label={mode === "create" ? "创建" : "保存"} onClick={() => void submit()}>
-          {mode === "create" ? "创建" : "保存"}
-        </Button>,
-      ]}
+      footer={
+        <div className="sessionConfigFooter">
+          <div
+            className={
+              "sessionConfigFooterStatus" +
+              (submitError || fieldErrorCount > 0 ? " is-error" : missingCount > 0 ? " is-incomplete" : "")
+            }
+            title={submitError ?? undefined}
+          >
+            <span className="sessionConfigFooterStatusIcon">
+              {submitError || fieldErrorCount > 0 || missingCount > 0
+                ? <ExclamationCircleOutlined />
+                : <CheckOutlined />}
+            </span>
+            <span>
+              {submitError
+                ? submitError
+                : fieldErrorCount > 0
+                  ? "请修正表单中的校验错误"
+                  : missingCount > 0
+                    ? "还有 " + missingCount + " 项必填信息需要完成"
+                    : mode === "create"
+                      ? "必填信息已完成，可以创建连接"
+                      : "必填信息已完成，可以保存更改"}
+            </span>
+          </div>
+          <div className="sessionConfigFooterActions">
+            <Button aria-label="取消" onClick={onCancelButton ?? onCancel} disabled={submitting}>
+              取消
+            </Button>
+            <Button
+              type="primary"
+              aria-label={mode === "create" ? "创建连接" : "保存更改"}
+              icon={<ArrowRightOutlined />}
+              iconPosition="end"
+              loading={submitting}
+              disabled={!ready}
+              onClick={() => void submit()}
+            >
+              {mode === "create" ? "创建连接" : "保存更改"}
+            </Button>
+          </div>
+        </div>
+      }
       destroyOnHidden
       className="sessionConfigModal"
     >
-      <Form form={form} layout="vertical" requiredMark={false} autoComplete="off">
-        <BaseFields
-          mode={mode}
-          groups={groups}
-          onCreateGroup={onCreateGroup}
-          onUpdateGroup={onUpdateGroup}
-          onDeleteGroup={onDeleteGroup}
-          authMethod={authMethod ?? initialValue.auth.method}
-          proxyMode={proxyMode ?? proxyModeFromInput(initialValue)}
-          existingSessions={existingSessions}
-          editingSessionId={editingSessionId}
-        />
-      </Form>
+      <div className="sessionConfigShell">
+        <aside className="sessionConfigPreview" aria-label="连接配置实时预览">
+          <div className="sessionPreviewTopline">
+            <div className="sessionPreviewEyebrow">
+              <span aria-hidden="true" />
+              实时预览
+            </div>
+            <span className={"sessionPreviewProgressText" + (previewCompletedCount === 3 ? " is-ready" : "")}>
+              {previewCompletedCount === 3 ? "配置完成" : previewCompletedCount + "/3 完成"}
+            </span>
+          </div>
+
+          <div className="sessionPreviewHero">
+            <div className="sessionPreviewServerIcon" aria-hidden="true">
+              <CloudServerOutlined />
+            </div>
+            <div className="sessionPreviewIdentity">
+              <strong className="sessionPreviewName" title={previewName}>{previewName}</strong>
+              <div className={"sessionPreviewAddress" + (host ? "" : " is-empty")}>
+                <span>{host ? previewUsername + "@" + previewHost : "等待填写主机地址"}</span>
+                <small>SSH · 端口 {watchedPort || "—"}</small>
+              </div>
+            </div>
+          </div>
+
+          <div className="sessionPreviewTags">
+            <span className="is-active">SSH</span>
+            <span>{authMethod === "password" ? "密码认证" : "私钥认证"}</span>
+            <span>{proxyMode === "custom" ? "自定义代理" : "跟随全局代理"}</span>
+          </div>
+
+          <div className="sessionPreviewProgress" aria-hidden="true">
+            <span style={{ width: previewProgress + "%" }} />
+          </div>
+
+          <div className="sessionPreviewList" aria-label="配置完成情况">
+            <button
+              type="button"
+              className={"sessionPreviewRow" + (serverPreviewReady ? " is-complete" : " is-pending")}
+              aria-label="定位到服务器信息"
+              onClick={() => focusPreviewField(
+                !host ? "host" : !username ? "username" : !watchedPort || watchedPort < 1 || watchedPort > 65535 ? "port" : "name",
+              )}
+            >
+              <span className="sessionPreviewStep">
+                {serverPreviewReady ? <CheckOutlined /> : "01"}
+              </span>
+              <div><strong>服务器信息</strong><span>{selectedGroupName} · {previewUsername}</span></div>
+              <ArrowRightOutlined className="sessionPreviewRowArrow" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className={"sessionPreviewRow" + (authPreviewReady ? " is-complete" : " is-pending")}
+              aria-label="定位到身份认证"
+              onClick={() => focusPreviewField(
+                authPreviewReady ? "authMethod" : authMethod === "password" ? "password" : "privateKeyPath",
+              )}
+            >
+              <span className="sessionPreviewStep">
+                {authPreviewReady ? <CheckOutlined /> : "02"}
+              </span>
+              <div><strong>身份认证</strong><span>{authDetail}</span></div>
+              <ArrowRightOutlined className="sessionPreviewRowArrow" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className={"sessionPreviewRow" + (proxyPreviewReady ? " is-complete" : " is-pending")}
+              aria-label="定位到网络路径"
+              onClick={() => focusPreviewField(
+                proxyPreviewReady
+                  ? "proxyMode"
+                  : !watchedProxyHost?.trim()
+                    ? "proxyHost"
+                    : "proxyPort",
+              )}
+            >
+              <span className="sessionPreviewStep">
+                {proxyPreviewReady ? <CheckOutlined /> : "03"}
+              </span>
+              <div><strong>网络路径</strong><span>{proxyDetail}</span></div>
+              <ArrowRightOutlined className="sessionPreviewRowArrow" aria-hidden="true" />
+            </button>
+          </div>
+          <div className="sessionPreviewSecurity">
+            <span><SafetyCertificateOutlined /></span>
+            <p>凭证将加密保存在本机，不会上传到远程服务。</p>
+          </div>
+        </aside>
+
+        <div className="sessionConfigFormPane">
+          <Form
+            form={form}
+            layout="vertical"
+            requiredMark={false}
+            autoComplete="off"
+            className="sessionConfigForm"
+            onValuesChange={() => {
+              setSubmitError(null);
+              setFieldErrorCount(form.getFieldsError().filter((field) => field.errors.length > 0).length);
+            }}
+            onFieldsChange={() => {
+              setFieldErrorCount(form.getFieldsError().filter((field) => field.errors.length > 0).length);
+            }}
+          >
+            <BaseFields
+              mode={mode}
+              initialAuthMethod={initialValue.auth.method}
+              hasImportedPrivateKey={Boolean(initialValue.auth.importedPrivateKey)}
+              groups={groups}
+              onCreateGroup={onCreateGroup}
+              onUpdateGroup={onUpdateGroup}
+              onDeleteGroup={onDeleteGroup}
+              authMethod={authMethod}
+              proxyMode={proxyMode}
+              existingSessions={existingSessions}
+              editingSessionId={editingSessionId}
+            />
+          </Form>
+        </div>
+      </div>
     </Modal>
   );
 }
 
 function BaseFields({
   mode,
+  initialAuthMethod,
+  hasImportedPrivateKey,
   groups,
   onCreateGroup,
   onUpdateGroup,
@@ -155,6 +416,8 @@ function BaseFields({
   editingSessionId,
 }: {
   mode: "create" | "edit";
+  initialAuthMethod: "password" | "privateKey";
+  hasImportedPrivateKey: boolean;
   groups: SessionGroup[];
   onCreateGroup: (name: string) => Promise<string | null>;
   onUpdateGroup: (groupId: string, name: string) => Promise<void>;
@@ -164,14 +427,23 @@ function BaseFields({
   existingSessions: { id: string; name: string; host: string }[];
   editingSessionId?: string;
 }) {
+  const passwordRequired = mode === "create" || initialAuthMethod !== "password";
+
   return (
     <>
-      <div className="formSectionCard">
-        <div className="formSectionTitle">服务器连接凭据</div>
-        <div className="sessionFormGrid">
+      <section className="sessionConfigSection">
+        <div className="sessionConfigSectionHeading">
+          <div className="sessionConfigSectionTitle">
+            <span>01</span>
+            <strong>服务器信息</strong>
+          </div>
+          <small>用于在连接列表中识别这台主机</small>
+        </div>
+        <div className="sessionIdentityGrid">
           <Form.Item
             label="连接名称"
             name="name"
+            extra="留空则自动生成连接名称"
             rules={[{
               validator: (_, value) => {
                 if (!value || !value.trim()) return Promise.resolve();
@@ -190,8 +462,10 @@ function BaseFields({
             onUpdateGroup={onUpdateGroup}
             onDeleteGroup={onDeleteGroup}
           />
+        </div>
+        <div className="sessionEndpointGrid">
           <Form.Item
-            label="主机地址"
+            label={<span>主机地址 <b className="sessionRequiredMark">*</b></span>}
             name="host"
             rules={[
               { required: true, message: "请输入主机地址" },
@@ -210,19 +484,39 @@ function BaseFields({
           >
             <Input placeholder="192.168.1.10" autoComplete="off" prefix={<GlobalOutlined style={{ color: "var(--text-muted)" }} />} />
           </Form.Item>
-          <Form.Item label="端口" name="port" rules={[{ required: true, message: "请输入端口" }]}>
+          <Form.Item
+            label={<span>端口 <b className="sessionRequiredMark">*</b></span>}
+            name="port"
+            rules={[
+              { required: true, message: "请输入端口" },
+              { type: "number", min: 1, max: 65535, message: "端口范围为 1–65535" },
+            ]}
+          >
             <InputNumber min={1} max={65535} precision={0} className="fullControl" autoComplete="off" prefix={<LinkOutlined style={{ color: "var(--text-muted)" }} />} />
           </Form.Item>
-          <Form.Item label="用户名" name="username" rules={[{ required: true, message: "请输入用户名" }]}>
+          <Form.Item
+            label={<span>用户名 <b className="sessionRequiredMark">*</b></span>}
+            name="username"
+            rules={[{ required: true, whitespace: true, message: "请输入用户名" }]}
+          >
             <Input placeholder="root" autoComplete="off" prefix={<UserOutlined style={{ color: "var(--text-muted)" }} />} />
           </Form.Item>
         </div>
-      </div>
-      <div className="formSectionCard">
-        <div className="formSectionTitle">安全认证与网络代理</div>
-        <div className="sessionFormGrid">
-          <Form.Item label="认证方式" name="authMethod" className="sessionFormWide">
+      </section>
+
+      <section className="sessionConfigSection">
+        <div className="sessionConfigSectionHeading">
+          <div className="sessionConfigSectionTitle">
+            <span>02</span>
+            <strong>身份认证</strong>
+          </div>
+          <small>切换方式后仅校验当前可见字段</small>
+        </div>
+        <div className="sessionAuthGrid">
+          <div>
+            <Form.Item label="认证方式" name="authMethod" className="sessionAuthMethodField">
             <Radio.Group
+              className="sessionAuthSwitch"
               optionType="button"
               buttonStyle="solid"
               options={[
@@ -230,46 +524,88 @@ function BaseFields({
                 { label: "私钥", value: "privateKey" },
               ]}
             />
-          </Form.Item>
-          {authMethod === "password" && (
-            <Form.Item
-              label="密码"
-              name="password"
-              className="sessionFormWide"
-              rules={mode === "create" ? [{ required: true, message: "请输入密码" }] : undefined}
-            >
-              <Input.Password
-                placeholder={mode === "create" ? "请输入本次连接密码" : "已保存的密码不会回显；留空则保持不变"}
-                autoComplete="new-password"
-                prefix={<LockOutlined style={{ color: "var(--text-muted)" }} />}
-              />
             </Form.Item>
-          )}
-          {authMethod === "privateKey" && (
-            <>
-              <PrivateKeyPathField />
-              <Form.Item label="私钥密码短语" name="privateKeyPassphrase" className="sessionFormWide">
+            <span className="sessionFieldHint">凭证仅保存在本机</span>
+          </div>
+          <div className="sessionAuthPanel">
+            {authMethod === "password" && (
+              <Form.Item
+                label={<span>登录密码 {passwordRequired && <b className="sessionRequiredMark">*</b>}</span>}
+                name="password"
+                rules={passwordRequired ? [{ required: true, message: "请输入登录密码" }] : undefined}
+                extra={mode === "edit" && !passwordRequired ? "留空将继续使用已保存的密码" : undefined}
+              >
                 <Input.Password
-                  placeholder={mode === "create" ? "如私钥有密码短语请输入" : "已保存的密码短语不会回显；留空则保持不变"}
+                  placeholder={passwordRequired ? "输入登录密码" : "已保存的密码不会回显"}
                   autoComplete="new-password"
                   prefix={<LockOutlined style={{ color: "var(--text-muted)" }} />}
                 />
               </Form.Item>
-            </>
-          )}
-          <Form.Item label="代理策略" name="proxyMode" className="sessionFormWide">
+            )}
+            {authMethod === "privateKey" && (
+              <>
+                <div className="sessionKeyGrid">
+                  <PrivateKeyPathField hasImportedPrivateKey={hasImportedPrivateKey} />
+                  <Form.Item label="私钥口令" name="privateKeyPassphrase" extra="无口令请留空">
+                    <Input.Password
+                      placeholder={mode === "create" ? "可选" : "留空则保持不变"}
+                      autoComplete="new-password"
+                      prefix={<LockOutlined style={{ color: "var(--text-muted)" }} />}
+                    />
+                  </Form.Item>
+                </div>
+                <div className="sessionInlineNote">
+                  <span>i</span>
+                  支持 OpenSSH、PEM、PPK 等格式；创建连接前仅检查私钥是否已选择。
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section className="sessionConfigSection sessionNetworkSection">
+        <div className="sessionConfigSectionHeading">
+          <div className="sessionConfigSectionTitle">
+            <span>03</span>
+            <strong>网络路径</strong>
+          </div>
+          <small>大多数情况下保持默认即可</small>
+        </div>
+        <Form.Item name="proxyMode" className="sessionRouteFormItem">
             <Radio.Group
+              className="sessionRouteOptions"
               optionType="button"
               buttonStyle="solid"
-              options={[
-                { label: "跟随系统", value: "global" },
-                { label: "单独指定", value: "custom" },
-              ]}
-            />
-          </Form.Item>
-          {proxyMode === "custom" && (
-            <div className="sessionProxyInline sessionFormWide">
-              <Form.Item label="代理类型" name="proxyKind" className="sessionProxyKind">
+            >
+              <Radio.Button value="global">
+                <span className="sessionRouteIcon"><GlobalOutlined /></span>
+                <span className="sessionRouteCopy">
+                  <strong>跟随全局设置</strong>
+                  <small>继承应用设置，未配置代理时直接连接</small>
+                </span>
+                <span className="sessionRouteDot" />
+              </Radio.Button>
+              <Radio.Button value="custom">
+                <span className="sessionRouteIcon"><ApiOutlined /></span>
+                <span className="sessionRouteCopy">
+                  <strong>单独指定代理</strong>
+                  <small>只为当前连接配置 SOCKS5 或 HTTP</small>
+                </span>
+                <span className="sessionRouteDot" />
+              </Radio.Button>
+            </Radio.Group>
+        </Form.Item>
+        {proxyMode === "global" && (
+          <div className="sessionGlobalProxyDetail">
+            <span>●</span>
+            <p><strong>当前策略：</strong>继承全局代理配置，未启用时自动直连</p>
+          </div>
+        )}
+        {proxyMode === "custom" && (
+          <div className="sessionProxyPanel">
+            <div className="sessionProxyGrid">
+              <Form.Item label="代理类型" name="proxyKind">
                 <Select
                   options={[
                     { label: "SOCKS5", value: "socks5" },
@@ -277,16 +613,31 @@ function BaseFields({
                   ]}
                 />
               </Form.Item>
-              <Form.Item label="代理主机" name="proxyHost" className="sessionProxyHost" rules={[{ required: true, message: "请输入代理主机" }]}>
+              <Form.Item
+                label={<span>代理地址 <b className="sessionRequiredMark">*</b></span>}
+                name="proxyHost"
+                rules={[{ required: true, whitespace: true, message: "请输入代理地址" }]}
+              >
                 <Input placeholder="127.0.0.1" autoComplete="off" prefix={<GlobalOutlined style={{ color: "var(--text-muted)" }} />} />
               </Form.Item>
-              <Form.Item label="代理端口" name="proxyPort" className="sessionProxyPort" rules={[{ required: true, message: "请输入代理端口" }]}>
+              <Form.Item
+                label={<span>端口 <b className="sessionRequiredMark">*</b></span>}
+                name="proxyPort"
+                rules={[
+                  { required: true, message: "请输入代理端口" },
+                  { type: "number", min: 1, max: 65535, message: "端口范围为 1–65535" },
+                ]}
+              >
                 <InputNumber min={1} max={65535} precision={0} className="fullControl" autoComplete="off" prefix={<LinkOutlined style={{ color: "var(--text-muted)" }} />} />
               </Form.Item>
             </div>
-          )}
-        </div>
-      </div>
+            <div className="sessionInlineNote">
+              <span>i</span>
+              代理只负责建立 SSH 通道，终端与 SFTP 将复用同一连接策略。
+            </div>
+          </div>
+        )}
+      </section>
     </>
   );
 }
@@ -628,7 +979,7 @@ function GroupSelectField({
   }
 
   return (
-    <Form.Item label="分组" name="groupId">
+    <Form.Item label="分组" name="groupId" extra="可在下拉列表底部新建分组">
       <Select<string, GroupSelectOption>
         key={groupSelectKey}
         allowClear
@@ -690,8 +1041,8 @@ function GroupSelectField({
 }
 
 /** 私钥路径字段：含系统文件选择器按钮（Tauri dialog） */
-function PrivateKeyPathField() {
-  const form = Form.useFormInstance();
+function PrivateKeyPathField({ hasImportedPrivateKey }: { hasImportedPrivateKey: boolean }) {
+  const form = Form.useFormInstance<SessionFormValues>();
   const mountedRef = useMountedRef();
 
   async function browse() {
@@ -715,7 +1066,18 @@ function PrivateKeyPathField() {
   }
 
   return (
-    <Form.Item label="私钥文件路径" name="privateKeyPath" className="sessionFormWide">
+    <Form.Item
+      label={<span>私钥文件 <b className="sessionRequiredMark">*</b></span>}
+      name="privateKeyPath"
+      rules={[
+        {
+          validator: (_, value) =>
+            value?.trim() || hasImportedPrivateKey
+              ? Promise.resolve()
+              : Promise.reject("请选择私钥文件"),
+        },
+      ]}
+    >
       <Input
         className="privateKeyPathInput"
         placeholder="选择或输入私钥文件路径"

@@ -16,7 +16,7 @@ use russh::{
     Channel, ChannelMsg, ChannelWriteHalf, Disconnect,
 };
 use russh_sftp::{
-    client::{fs::DirEntry, SftpSession},
+    client::SftpSession,
     protocol::{FileAttributes, FileType as SftpFileType, OpenFlags},
 };
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,6 @@ const TELEMETRY_FAST_TIMEOUT_MS: u64 = 8_000;
 const TELEMETRY_SLOW_TIMEOUT_MS: u64 = 12_000;
 const MAX_SFTP_TRANSFER_CONCURRENCY: usize = 4;
 const SFTP_TRANSFER_POOL_SIZE: usize = 4;
-const SFTP_OWNER_LOOKUP_TIMEOUT_MS: u64 = 1_500;
 const MAX_SFTP_SEARCH_CONCURRENCY: usize = 12;
 const MAX_SFTP_SEARCH_DIRS: usize = 800;
 const MAX_SFTP_SEARCH_ENTRIES: usize = 6000;
@@ -360,6 +359,7 @@ pub struct RemoteRuntime {
     telemetry_jobs: Arc<RwLock<HashMap<String, TelemetryJobRecord>>>,
     forwards: Arc<RwLock<HashMap<String, ForwardRecord>>>,
     connection_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    sftp_open_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -878,6 +878,105 @@ PROC 42 sshd 1.5 20.0
     async fn new_runtime_has_no_stale_handles() {
         let runtime = RemoteRuntime::default();
         assert!(runtime.ensure_no_stale_handles().await);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the local Paramiko SFTP fixture; run explicitly with HELM_TEST_SFTP_PORT and HELM_TEST_SFTP_FINGERPRINT"]
+    async fn concurrent_sftp_open_reuses_one_session_per_connection() {
+        let port: u16 = std::env::var("HELM_TEST_SFTP_PORT")
+            .expect("HELM_TEST_SFTP_PORT is required")
+            .parse()
+            .expect("HELM_TEST_SFTP_PORT must be a valid u16");
+        let fingerprint = std::env::var("HELM_TEST_SFTP_FINGERPRINT")
+            .expect("HELM_TEST_SFTP_FINGERPRINT is required");
+        let connection_id = "local-sftp-reuse-test".to_string();
+        let session_id = "local-sftp-reuse-session".to_string();
+        let verification = HostKeyVerification {
+            session_id: session_id.clone(),
+            host: "127.0.0.1".to_string(),
+            port,
+            algorithm: String::new(),
+            fingerprint: String::new(),
+            expected_fingerprint: Some(fingerprint.clone()),
+        };
+        let client = RemoteClient {
+            verification,
+            trusted: Some(KnownHostEntry {
+                host: "127.0.0.1".to_string(),
+                port,
+                algorithm: String::new(),
+                fingerprint,
+                trusted_at: now(),
+            }),
+            observed: Arc::new(StdMutex::new(None)),
+            remote_forwards: Arc::new(RwLock::new(HashMap::new())),
+        };
+        let socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut handle = client::connect_stream(
+            Arc::new(client::Config {
+                inactivity_timeout: None,
+                nodelay: true,
+                ..Default::default()
+            }),
+            socket,
+            client,
+        )
+        .await
+        .unwrap();
+        assert!(handle
+            .authenticate_password("helm-test", "helm-test")
+            .await
+            .unwrap()
+            .success());
+
+        let runtime = RemoteRuntime::default();
+        runtime.connections.write().await.insert(
+            connection_id.clone(),
+            ConnectionRecord {
+                info: ConnectionInfo {
+                    connection_id: connection_id.clone(),
+                    session_id,
+                    host: "127.0.0.1".to_string(),
+                    port,
+                    username: "helm-test".to_string(),
+                    status: RuntimeStatus::Connected,
+                    connected_at: now(),
+                },
+                handle: Arc::new(Mutex::new(handle)),
+                remote_forwards: Arc::new(RwLock::new(HashMap::new())),
+            },
+        );
+
+        let opened =
+            futures_util::future::join_all((0..8).map(|_| runtime.open_sftp(&connection_id))).await;
+        let infos: Vec<SftpInfo> = opened.into_iter().map(Result::unwrap).collect();
+        assert!(infos.iter().all(|info| info.sftp_id == infos[0].sftp_id));
+        assert_eq!(runtime.sftp_sessions.read().await.len(), 1);
+
+        let list_started_at = Instant::now();
+        let files = runtime
+            .sftp_list(&infos[0].sftp_id, "/".to_string())
+            .await
+            .unwrap();
+        assert!(
+            list_started_at.elapsed() < Duration::from_secs(1),
+            "initial SFTP list should not wait for a secondary SSH exec channel"
+        );
+        assert!(files.iter().any(|entry| entry.name == "fixture.txt"));
+
+        runtime.close_sftp(&infos[0].sftp_id).await.unwrap();
+        let connection = runtime
+            .connections
+            .write()
+            .await
+            .remove(&connection_id)
+            .unwrap();
+        let _ = connection
+            .handle
+            .lock()
+            .await
+            .disconnect(Disconnect::ByApplication, "test complete", "en")
+            .await;
     }
 
     #[tokio::test]
