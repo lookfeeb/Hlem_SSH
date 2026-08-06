@@ -15,6 +15,8 @@ export const vaultApi = {
     call<ConfigSnapshot>("backup_record_delete", { recordId, deleteFile }),
   backupRecordsClear: () => call<ConfigSnapshot>("backup_records_clear"),
   settingsUpdate: (settings: AppSettings) => call<ConfigSnapshot>("settings_update", { settings }),
+  connectionSectionStateUpdate: (collapsedSectionIds: string[]) =>
+    call<ConfigSnapshot>("connection_section_state_update", { collapsedSectionIds }),
   groupCreate: (input: GroupInput) => call<ConfigSnapshot>("group_create", { input }),
   groupUpdate: (groupId: string, input: GroupInput) => call<ConfigSnapshot>("group_update", { groupId, input }),
   groupDelete: (groupId: string) => call<ConfigSnapshot>("group_delete", { groupId }),

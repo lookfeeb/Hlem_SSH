@@ -1,5 +1,17 @@
 import { Form, Input, Modal, Radio, Tree } from "antd";
-import { ArrowRightOutlined, CopyOutlined, EditOutlined, FolderAddOutlined, InfoCircleOutlined, SwapOutlined } from "@ant-design/icons";
+import {
+  ArrowRightOutlined,
+  CheckCircleFilled,
+  CopyOutlined,
+  EditOutlined,
+  FileAddOutlined,
+  FileTextOutlined,
+  FolderAddOutlined,
+  FolderOpenOutlined,
+  FolderOutlined,
+  InfoCircleOutlined,
+  SwapOutlined,
+} from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
 import type { RemoteFileEntry } from "../../types";
 import { getBaseName } from "../../lib/path";
@@ -12,6 +24,7 @@ export type FileDialogState =
 
 export interface FileDialogsProps {
   dialog: FileDialogState | null;
+  currentPath: string;
   treeData: DataNode[];
   directoryExpandedKeys: string[];
   onDialogChange: (dialog: FileDialogState | null) => void;
@@ -23,6 +36,7 @@ export interface FileDialogsProps {
 
 export function FileDialogs({
   dialog,
+  currentPath,
   treeData,
   directoryExpandedKeys,
   onDialogChange,
@@ -31,38 +45,88 @@ export function FileDialogs({
   onExpandChange,
   onTreeSelect,
 }: FileDialogsProps) {
+  const createDialog = dialog?.kind === "create" ? dialog : null;
+  const createLabel = createDialog?.entryType === "directory" ? "新建目录" : "新建文件";
+
   return (
     <Modal
       open={Boolean(dialog)}
       title={dialogTitle(dialog)}
-      okText="执行"
+      okText={createDialog ? createLabel : dialog?.kind === "rename" ? "保存" : "执行"}
       cancelText="取消"
+      width={createDialog ? 540 : undefined}
+      centered={Boolean(createDialog)}
       onCancel={() => onDialogChange(null)}
       onOk={onSubmit}
+      okButtonProps={createDialog ? {
+        disabled: !createDialog.name.trim(),
+        icon: createDialog.entryType === "directory" ? <FolderAddOutlined /> : <FileAddOutlined />,
+      } : undefined}
       destroyOnHidden
-      className="fileOperationModal"
+      className={`fileOperationModal ${createDialog ? "fileCreateModal" : ""}`}
     >
-      {dialog?.kind === "create" && (
+      {createDialog && (
         <Form layout="vertical" className="fileCreateForm">
-          <Form.Item label="类型">
+          <Form.Item
+            className="fileCreateTypeItem"
+            label={(
+              <span className="fileCreateFieldHeading">
+                <strong>创建类型</strong>
+                <small>选择要添加到当前目录的项目</small>
+              </span>
+            )}
+          >
             <Radio.Group
-              value={dialog.entryType}
-              onChange={(event) => onDialogChange({ ...dialog, entryType: event.target.value })}
-              options={[
-                { label: "文件", value: "file" },
-                { label: "目录", value: "directory" },
-              ]}
-            />
+              className="fileCreateTypePicker"
+              value={createDialog.entryType}
+              onChange={(event) => onDialogChange({ ...createDialog, entryType: event.target.value })}
+            >
+              <Radio value="file">
+                <span className="fileCreateTypeIcon"><FileTextOutlined /></span>
+                <span className="fileCreateTypeCopy">
+                  <strong>文件</strong>
+                  <small>配置、脚本或文本内容</small>
+                </span>
+                <CheckCircleFilled className="fileCreateTypeSelected" />
+              </Radio>
+              <Radio value="directory">
+                <span className="fileCreateTypeIcon"><FolderOutlined /></span>
+                <span className="fileCreateTypeCopy">
+                  <strong>目录</strong>
+                  <small>用于整理文件和子目录</small>
+                </span>
+                <CheckCircleFilled className="fileCreateTypeSelected" />
+              </Radio>
+            </Radio.Group>
           </Form.Item>
-          <Form.Item label="名称">
+          <Form.Item
+            className="fileCreateNameItem"
+            label={(
+              <span className="fileCreateFieldHeading">
+                <strong>{createDialog.entryType === "file" ? "文件名称" : "目录名称"}</strong>
+                <small>请输入清晰且易识别的名称</small>
+              </span>
+            )}
+          >
             <Input
               autoFocus
-              placeholder={dialog.entryType === "file" ? "new-file.txt" : "new-folder"}
-              value={dialog.name}
-              onChange={(event) => onDialogChange({ ...dialog, name: event.target.value })}
+              allowClear
+              size="large"
+              className="fileCreateNameInput"
+              prefix={createDialog.entryType === "file" ? <FileTextOutlined /> : <FolderOutlined />}
+              placeholder={createDialog.entryType === "file" ? "例如：config.yaml" : "例如：uploads"}
+              value={createDialog.name}
+              onChange={(event) => onDialogChange({ ...createDialog, name: event.target.value })}
               onPressEnter={onSubmit}
             />
           </Form.Item>
+          <div className="fileCreateLocation" title={currentPath || "/"}>
+            <span className="fileCreateLocationIcon"><FolderOpenOutlined /></span>
+            <span className="fileCreateLocationCopy">
+              <small>创建位置</small>
+              <code>{currentPath || "/"}</code>
+            </span>
+          </div>
         </Form>
       )}
       {dialog?.kind === "rename" && (
@@ -151,9 +215,12 @@ function dialogTitle(dialog: FileDialogState | null) {
   const iconStyle = { marginRight: 8, color: "var(--accent-2)" };
   if (dialog.kind === "create") {
     return (
-      <span className="fileDialogTitle">
-        <FolderAddOutlined style={iconStyle} />
-        新建文件或目录
+      <span className="fileDialogTitle fileDialogTitleDetailed">
+        <span className="fileDialogTitleIcon"><FolderAddOutlined /></span>
+        <span className="fileDialogTitleCopy">
+          <strong>新建文件或目录</strong>
+          <small>在当前远程路径中添加新项目</small>
+        </span>
       </span>
     );
   }

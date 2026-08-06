@@ -2,8 +2,19 @@ use tauri::{AppHandle, State};
 
 use super::{connect_session, ensure_vault_unlocked, AppResult, AppState};
 use crate::remote::{
-    ForwardInfo, ForwardLocalOptions, ForwardRemoteOptions, ServerTelemetry, TelemetryJobInfo,
+    ForwardInfo, ForwardLocalOptions, ForwardRemoteOptions, LatencyProbeResult, ServerTelemetry,
+    TelemetryJobInfo,
 };
+
+#[tauri::command]
+pub async fn latency_probe(
+    state: State<'_, AppState>,
+    connection_id: String,
+    samples: Option<u8>,
+) -> AppResult<LatencyProbeResult> {
+    ensure_vault_unlocked(&state)?;
+    state.remote.probe_latency(&connection_id, samples).await
+}
 
 #[tauri::command]
 pub async fn telemetry_start(

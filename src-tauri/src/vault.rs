@@ -10,9 +10,10 @@ use zeroize::Zeroize;
 use crate::{
     backup::extract_backup_payload,
     config::{
-        validate_group_input, validate_session_input, validate_settings, validate_tunnel_input,
-        AppSettings, BackupRecord, ConfigSnapshot, GroupInput, KnownHostEntry, SessionConfig,
-        SessionGroup, SessionInput, TunnelConfig, TunnelInput, VaultData,
+        migrate_vault_data, validate_group_input, validate_session_input, validate_settings,
+        validate_tunnel_input, AppSettings, BackupRecord, ConfigSnapshot, GroupInput,
+        KnownHostEntry, SessionConfig, SessionGroup, SessionInput, TunnelConfig, TunnelInput,
+        VaultData,
     },
     crypto::{self, CryptoSession, EncryptedVault},
     errors::{AppError, AppResult},
@@ -152,7 +153,11 @@ impl VaultStore {
 
     pub fn unlock(&mut self, master_password: &str) -> AppResult<ConfigSnapshot> {
         let encrypted = read_encrypted(&self.path)?;
-        let (data, crypto) = crypto::decrypt_with_password(master_password, &encrypted)?;
+        let (mut data, crypto) = crypto::decrypt_with_password(master_password, &encrypted)?;
+        if migrate_vault_data(&mut data) {
+            let encrypted = crypto::encrypt_with_session(&crypto, &data)?;
+            write_encrypted(&self.path, &encrypted)?;
+        }
         self.unlocked = Some(UnlockedVault {
             data: data.clone(),
             crypto,
@@ -180,6 +185,27 @@ impl VaultStore {
         self.mutate(|data| {
             validate_settings(&settings)?;
             data.settings = settings;
+            Ok(())
+        })
+    }
+
+    pub fn connection_section_state_update(
+        &mut self,
+        collapsed_section_ids: Vec<String>,
+    ) -> AppResult<ConfigSnapshot> {
+        self.mutate(|data| {
+            let allowed_builtin = ["favorites", "recent", "ungrouped", "all"];
+            let mut normalized = Vec::new();
+            for section_id in collapsed_section_ids {
+                let section_id = section_id.trim();
+                let allowed = allowed_builtin.contains(&section_id)
+                    || data.groups.iter().any(|group| group.id == section_id);
+                if allowed && !normalized.iter().any(|current| current == section_id) {
+                    normalized.push(section_id.to_string());
+                }
+            }
+            crate::config::validate_collapsed_connection_section_ids(&normalized)?;
+            data.settings.collapsed_connection_section_ids = normalized;
             Ok(())
         })
     }
@@ -233,8 +259,9 @@ impl VaultStore {
         let payload = extract_backup_payload(bytes)?;
         let unlocked = self.unlocked()?;
         let encrypted = read_encrypted_bytes(&payload)?;
-        let data = crypto::decrypt_with_key(&unlocked.crypto.key, &encrypted)
+        let mut data = crypto::decrypt_with_key(&unlocked.crypto.key, &encrypted)
             .map_err(backup_decrypt_error)?;
+        migrate_vault_data(&mut data);
         Ok(ConfigSnapshot { data })
     }
 
@@ -248,8 +275,9 @@ impl VaultStore {
         let encrypted = read_encrypted_bytes(&payload)?;
         let vault_path = self.path.clone();
         let unlocked = self.unlocked_mut()?;
-        let data = crypto::decrypt_with_key(&unlocked.crypto.key, &encrypted)
+        let mut data = crypto::decrypt_with_key(&unlocked.crypto.key, &encrypted)
             .map_err(backup_decrypt_error)?;
+        migrate_vault_data(&mut data);
         let encrypted = crypto::encrypt_with_session(&unlocked.crypto, &data)?;
         write_encrypted(&vault_path, &encrypted)?;
         unlocked.data = data.clone();
@@ -406,6 +434,9 @@ impl VaultStore {
                     session.group_id = default_group_id.clone();
                 }
             }
+            data.settings
+                .collapsed_connection_section_ids
+                .retain(|section_id| section_id != group_id);
             Ok(())
         })
     }
@@ -460,6 +491,7 @@ impl VaultStore {
                 .find(|session| session.id == session_id)
                 .ok_or_else(|| AppError::NotFound(format!("会话 {}", session_id)))?;
             session.last_connected_at = Some(crate::config::now());
+            session.connection_count = session.connection_count.saturating_add(1);
             Ok(())
         })
     }
@@ -472,6 +504,7 @@ impl VaultStore {
                 .find(|session| session.id == session_id)
                 .ok_or_else(|| AppError::NotFound(format!("会话 {}", session_id)))?;
             session.last_connected_at = None;
+            session.connection_count = 0;
             Ok(())
         })
     }
@@ -733,6 +766,70 @@ mod tests {
         let (_snapshot, delete_paths) = store.add_backup_records(vec![first, second]).unwrap();
         assert_eq!(store.snapshot().unwrap().data.backup_records.len(), 1);
         assert_eq!(delete_paths.len(), 1);
+    }
+
+    #[test]
+    fn connection_count_increments_once_per_mark_and_resets_with_recent_history() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+        let snapshot = store.create_session(session_input("节点A", None)).unwrap();
+        let session_id = snapshot.data.sessions[0].id.clone();
+
+        let snapshot = store.mark_session_recent(&session_id).unwrap();
+        assert_eq!(snapshot.data.sessions[0].connection_count, 1);
+        assert!(snapshot.data.sessions[0].last_connected_at.is_some());
+
+        let snapshot = store.mark_session_recent(&session_id).unwrap();
+        assert_eq!(snapshot.data.sessions[0].connection_count, 2);
+
+        store.lock();
+        let snapshot = store.unlock("pass-123456").unwrap();
+        assert_eq!(snapshot.data.sessions[0].connection_count, 2);
+
+        let snapshot = store.clear_session_recent(&session_id).unwrap();
+        assert_eq!(snapshot.data.sessions[0].connection_count, 0);
+        assert!(snapshot.data.sessions[0].last_connected_at.is_none());
+    }
+
+    #[test]
+    fn persists_connection_section_state_and_prunes_deleted_groups() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+        let snapshot = store
+            .create_group(GroupInput {
+                name: "生产".to_string(),
+                parent_id: None,
+            })
+            .unwrap();
+        let group_id = snapshot.data.groups.last().unwrap().id.clone();
+
+        let snapshot = store
+            .connection_section_state_update(vec![
+                "recent".to_string(),
+                group_id.clone(),
+                "recent".to_string(),
+                "search".to_string(),
+            ])
+            .unwrap();
+        assert_eq!(
+            snapshot.data.settings.collapsed_connection_section_ids,
+            vec!["recent".to_string(), group_id.clone()]
+        );
+
+        store.lock();
+        let snapshot = store.unlock("pass-123456").unwrap();
+        assert_eq!(
+            snapshot.data.settings.collapsed_connection_section_ids,
+            vec!["recent".to_string(), group_id.clone()]
+        );
+
+        let snapshot = store.delete_group(&group_id).unwrap();
+        assert_eq!(
+            snapshot.data.settings.collapsed_connection_section_ids,
+            vec!["recent".to_string()]
+        );
     }
 
     #[test]

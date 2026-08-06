@@ -56,6 +56,16 @@ pub fn settings_update(
 }
 
 #[tauri::command]
+pub fn connection_section_state_update(
+    state: State<'_, AppState>,
+    collapsed_section_ids: Vec<String>,
+) -> AppResult<ConfigSnapshot> {
+    with_store(&state, |store| {
+        store.connection_section_state_update(collapsed_section_ids)
+    })
+}
+
+#[tauri::command]
 pub fn tunnel_create(state: State<'_, AppState>, input: TunnelInput) -> AppResult<ConfigSnapshot> {
     with_store(&state, |store| store.create_tunnel(input))
 }

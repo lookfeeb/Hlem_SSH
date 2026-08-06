@@ -35,12 +35,16 @@ impl RemoteRuntime {
             crate::errors::register_resource_label(&info.sftp_id, &label);
         }
         let transfer_sessions = Arc::new(RwLock::new(vec![sftp.clone()]));
+        let transfer_pool_ready = Arc::new(AtomicBool::new(false));
+        let transfer_pool_notify = Arc::new(Notify::new());
         let record = SftpRecord {
             info: info.clone(),
             session: sftp,
             transfer_sessions: transfer_sessions.clone(),
             transfer_cursor: Arc::new(Mutex::new(0)),
             transfer_slots: Arc::new(Semaphore::new(MAX_SFTP_TRANSFER_CONCURRENCY)),
+            transfer_pool_ready: transfer_pool_ready.clone(),
+            transfer_pool_notify: transfer_pool_notify.clone(),
         };
         self.sftp_sessions
             .write()
@@ -67,6 +71,8 @@ impl RemoteRuntime {
                     pool.write().await.push(Arc::new(session));
                 }
             }
+            transfer_pool_ready.store(true, Ordering::Release);
+            transfer_pool_notify.notify_waiters();
         });
 
         Ok(info)
@@ -300,13 +306,11 @@ impl RemoteRuntime {
                 "文件超过 10MB，暂不支持直接编辑".to_string(),
             ));
         }
-        let remote = sftp.open(path).await.map_err(remote_error)?;
+        let mut remote = sftp.open(path).await.map_err(remote_error)?;
+        remote.set_read_limit(size).map_err(remote_error)?;
         let mut data = Vec::with_capacity(size as usize);
-        remote
-            .take(size)
-            .read_to_end(&mut data)
-            .await
-            .map_err(remote_error)?;
+        remote.read_to_end(&mut data).await.map_err(remote_error)?;
+        remote.shutdown().await.map_err(remote_error)?;
         String::from_utf8(data)
             .map_err(|_| AppError::InvalidInput("只支持 UTF-8 文本文件编辑".to_string()))
     }
@@ -411,7 +415,13 @@ async fn open_sftp_channel_from_channel(channel: Channel<client::Msg>) -> AppRes
         .request_subsystem(true, "sftp")
         .await
         .map_err(remote_error)?;
-    SftpSession::new(channel.into_stream())
-        .await
-        .map_err(remote_error)
+    SftpSession::new_with_config(
+        channel.into_stream(),
+        SftpClientConfig {
+            request_timeout_secs: SFTP_REQUEST_TIMEOUT_SECS,
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(remote_error)
 }

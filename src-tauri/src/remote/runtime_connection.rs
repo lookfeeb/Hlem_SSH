@@ -10,7 +10,7 @@ impl RemoteRuntime {
     {
         let app = app.clone();
         let this = self.clone();
-        Box::pin(async move { this.connect_inner(&app, session, trusted, true).await })
+        Box::pin(async move { this.connect_inner(&app, session, trusted, true, true).await })
     }
 
     pub fn connect_new(
@@ -22,7 +22,25 @@ impl RemoteRuntime {
     {
         let app = app.clone();
         let this = self.clone();
-        Box::pin(async move { this.connect_inner(&app, session, trusted, false).await })
+        Box::pin(async move {
+            this.connect_inner(&app, session, trusted, false, true)
+                .await
+        })
+    }
+
+    pub(super) fn connect_automation(
+        &self,
+        app: &AppHandle,
+        session: SessionConfig,
+        trusted: Option<KnownHostEntry>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<ConnectionInfo>> + Send + '_>>
+    {
+        let app = app.clone();
+        let this = self.clone();
+        Box::pin(async move {
+            this.connect_inner(&app, session, trusted, true, false)
+                .await
+        })
     }
 
     async fn connect_inner(
@@ -31,11 +49,21 @@ impl RemoteRuntime {
         session: SessionConfig,
         trusted: Option<KnownHostEntry>,
         reuse_existing: bool,
+        notify_ui: bool,
     ) -> AppResult<ConnectionInfo> {
+        let connection_started = Instant::now();
         let session_lock = self.connection_lock(&session.id).await;
         let _session_guard = session_lock.lock().await;
+        let lock_wait_ms = connection_started.elapsed().as_millis();
         if reuse_existing {
             if let Some(existing) = self.find_connection_by_session(&session.id).await {
+                log::info!(
+                    "SSH connection reused: session={} host={} lock_wait_ms={} total_ms={}",
+                    session.name,
+                    session.host,
+                    lock_wait_ms,
+                    connection_started.elapsed().as_millis()
+                );
                 return Ok(existing.info);
             }
         }
@@ -67,25 +95,43 @@ impl RemoteRuntime {
                 })
         });
         let observed = Arc::new(StdMutex::new(None));
+        let diagnostics = Arc::new(StdMutex::new(RemoteClientDiagnostics::default()));
         let client = RemoteClient {
             verification: verification.clone(),
             trusted,
             observed: observed.clone(),
             remote_forwards: remote_forwards.clone(),
+            diagnostics: diagnostics.clone(),
         };
-        events::emit(
-            app,
-            events::SSH_STATUS,
-            ConnectionInfo {
-                connection_id: connection_id.clone(),
-                session_id: session.id.clone(),
-                host: session.host.clone(),
-                port: session.port,
-                username: session.username.clone(),
-                status: RuntimeStatus::Connecting,
-                connected_at: now(),
-            },
+        let connection_route = if session.ssh.proxy.is_some() {
+            "proxy"
+        } else {
+            "direct"
+        };
+        log::info!(
+            "SSH connecting: session={} host={} port={} user={} route={}",
+            session.name,
+            session.host,
+            session.port,
+            session.username,
+            connection_route
         );
+        if notify_ui {
+            events::emit(
+                app,
+                events::SSH_STATUS,
+                ConnectionInfo {
+                    connection_id: connection_id.clone(),
+                    session_id: session.id.clone(),
+                    host: session.host.clone(),
+                    port: session.port,
+                    username: session.username.clone(),
+                    status: RuntimeStatus::Connecting,
+                    connected_at: now(),
+                    disconnect_reason: None,
+                },
+            );
+        }
 
         // inactivity_timeout 交给 keepalive 机制统一判断，避免空闲但健康的连接被提前回收。
         let config = client::Config {
@@ -106,21 +152,99 @@ impl RemoteRuntime {
         let proxy = session.ssh.proxy.clone();
         let config = Arc::new(config);
         let observed_for_connect = observed.clone();
-        let mut handle = match timeout(connect_timeout, async move {
-            let socket = connect_tcp_for_ssh(&server_host, server_port, proxy.as_ref()).await?;
-            if config.as_ref().nodelay {
-                if let Err(error) = socket.set_nodelay(true) {
-                    return Err(AppError::Remote(error.to_string()));
+        let diagnostics_for_connect = diagnostics.clone();
+        let session_name_for_connect = session.name.clone();
+        let server_host_for_log = server_host.clone();
+        let (mut handle, successful_attempt, tcp_ms, handshake_ms) = match timeout(connect_timeout, async move {
+            for attempt in 1..=2 {
+                if attempt > 1 {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                }
+
+                if let Ok(mut guard) = observed_for_connect.lock() {
+                    *guard = None;
+                }
+                if let Ok(mut guard) = diagnostics_for_connect.lock() {
+                    *guard = RemoteClientDiagnostics::default();
+                }
+
+                let attempt_started = Instant::now();
+                let tcp_started = Instant::now();
+                let socket =
+                    connect_tcp_for_ssh(&server_host, server_port, proxy.as_ref()).await?;
+                let tcp_ms = tcp_started.elapsed().as_millis();
+                let local_address = socket
+                    .local_addr()
+                    .map(|address| address.to_string())
+                    .unwrap_or_else(|error| format!("unknown ({error})"));
+                let peer_address = socket
+                    .peer_addr()
+                    .map(|address| address.to_string())
+                    .unwrap_or_else(|error| format!("unknown ({error})"));
+                log::info!(
+                    "SSH TCP connected: session={} attempt={} target={}:{} local={} transport_peer={} tcp_ms={}",
+                    session_name_for_connect,
+                    attempt,
+                    server_host_for_log,
+                    server_port,
+                    local_address,
+                    peer_address,
+                    tcp_ms
+                );
+                if config.as_ref().nodelay {
+                    if let Err(error) = socket.set_nodelay(true) {
+                        return Err(AppError::Remote(format!(
+                            "设置 SSH TCP_NODELAY 失败：{error}"
+                        )));
+                    }
+                }
+                let handshake_started = Instant::now();
+                match client::connect_stream(config.clone(), socket, client.clone()).await {
+                    Ok(handle) => {
+                        let handshake_ms = handshake_started.elapsed().as_millis();
+                        log::info!(
+                            "SSH handshake complete: session={} attempt={} tcp_ms={} handshake_ms={} attempt_total_ms={}",
+                            session_name_for_connect,
+                            attempt,
+                            tcp_ms,
+                            handshake_ms,
+                            attempt_started.elapsed().as_millis()
+                        );
+                        return Ok((handle, attempt, tcp_ms, handshake_ms));
+                    }
+                    Err(error) if attempt == 1 && is_transient_connect_error(&error) => {
+                        log::warn!(
+                            "SSH transient handshake failure, retrying once: session={} host={} port={} error={}",
+                            session_name_for_connect,
+                            server_host_for_log,
+                            server_port,
+                            format_ssh_transport_error(&error)
+                        );
+                    }
+                    Err(error) => {
+                        return Err(map_connect_error(
+                            error,
+                            &observed_for_connect,
+                            &diagnostics_for_connect,
+                        ));
+                    }
                 }
             }
-            client::connect_stream(config, socket, client)
-                .await
-                .map_err(|error| map_connect_error(error, &observed_for_connect))
+            unreachable!("SSH handshake retry loop always returns")
         })
         .await
         {
-            Ok(Ok(handle)) => handle,
+            Ok(Ok(result)) => result,
             Ok(Err(error)) => {
+                log::warn!(
+                    "SSH connect failed: session={} host={} port={} user={} route={} error={}",
+                    session.name,
+                    session.host,
+                    session.port,
+                    session.username,
+                    connection_route,
+                    error
+                );
                 if let AppError::HostKeyUntrusted(payload) | AppError::HostKeyChanged(payload) =
                     &error
                 {
@@ -128,10 +252,48 @@ impl RemoteRuntime {
                 }
                 return Err(error);
             }
-            Err(_) => return Err(AppError::Remote("SSH 连接超时".to_string())),
+            Err(_) => {
+                let error = AppError::Remote(format!(
+                    "SSH 连接超时：TCP、协议协商或密钥交换未在 {} 毫秒内完成",
+                    session.ssh.connect_timeout_ms.max(1_000)
+                ));
+                log::warn!(
+                    "SSH connect timed out: session={} host={} port={} user={} route={} timeout_ms={}",
+                    session.name,
+                    session.host,
+                    session.port,
+                    session.username,
+                    connection_route,
+                    session.ssh.connect_timeout_ms.max(1_000)
+                );
+                return Err(error);
+            }
         };
 
-        authenticate(&mut handle, &session).await?;
+        let authentication_started = Instant::now();
+        if let Err(error) = authenticate(&mut handle, &session).await {
+            let diagnostic = observed_disconnect_reason_from_diagnostics(&diagnostics).await;
+            let error = match diagnostic {
+                Some(reason) => AppError::Remote(format!("SSH 认证阶段失败：{reason}")),
+                None => error,
+            };
+            log::warn!(
+                "SSH authentication failed: session={} host={} port={} user={} error={}",
+                session.name,
+                session.host,
+                session.port,
+                session.username,
+                error
+            );
+            return Err(error);
+        }
+        let authentication_ms = authentication_started.elapsed().as_millis();
+        log::info!(
+            "SSH authentication complete: session={} attempt={} auth_ms={}",
+            session.name,
+            successful_attempt,
+            authentication_ms
+        );
         let handle = Arc::new(Mutex::new(handle));
         let info = ConnectionInfo {
             connection_id: connection_id.clone(),
@@ -141,6 +303,7 @@ impl RemoteRuntime {
             username: session.username.clone(),
             status: RuntimeStatus::Connected,
             connected_at: now(),
+            disconnect_reason: None,
         };
         crate::errors::register_resource_label(&connection_id, &session.name);
         self.connections.write().await.insert(
@@ -149,9 +312,26 @@ impl RemoteRuntime {
                 info: info.clone(),
                 handle: handle.clone(),
                 remote_forwards,
+                diagnostics,
             },
         );
-        events::emit(app, events::SSH_STATUS, info.clone());
+        if notify_ui {
+            events::emit(app, events::SSH_STATUS, info.clone());
+        }
+        log::info!(
+            "SSH connected: session={} host={} port={} user={} route={} attempt={} lock_wait_ms={} tcp_ms={} handshake_ms={} auth_ms={} total_ms={}",
+            session.name,
+            session.host,
+            session.port,
+            session.username,
+            connection_route,
+            successful_attempt,
+            lock_wait_ms,
+            tcp_ms,
+            handshake_ms,
+            authentication_ms,
+            connection_started.elapsed().as_millis()
+        );
 
         Ok(info)
     }
@@ -160,7 +340,30 @@ impl RemoteRuntime {
         self.shutdown_connection(app, connection_id).await
     }
 
+    pub(super) async fn disconnect_automation(
+        &self,
+        app: &AppHandle,
+        connection_id: &str,
+    ) -> AppResult<()> {
+        self.shutdown_connection_with_reason(
+            app,
+            connection_id,
+            Some("AI API 主动断开".to_string()),
+        )
+        .await
+    }
+
     pub async fn shutdown_connection(&self, app: &AppHandle, connection_id: &str) -> AppResult<()> {
+        self.shutdown_connection_with_reason(app, connection_id, None)
+            .await
+    }
+
+    async fn shutdown_connection_with_reason(
+        &self,
+        app: &AppHandle,
+        connection_id: &str,
+        disconnect_reason: Option<String>,
+    ) -> AppResult<()> {
         let record = self
             .connections
             .write()
@@ -168,7 +371,7 @@ impl RemoteRuntime {
             .remove(connection_id)
             .ok_or_else(|| AppError::missing_connection(connection_id))?;
 
-        self.close_children_for_connection(app, &record).await;
+        self.close_children_for_connection(app, &record, None).await;
         let disconnect_result = record
             .handle
             .lock()
@@ -179,6 +382,7 @@ impl RemoteRuntime {
 
         let mut info = record.info;
         info.status = RuntimeStatus::Disconnected;
+        info.disconnect_reason = disconnect_reason;
         events::emit(app, events::SSH_STATUS, info);
         crate::errors::forget_resource_label(connection_id);
         disconnect_result
@@ -245,9 +449,12 @@ impl RemoteRuntime {
                 let label =
                     crate::errors::resource_label(&id).unwrap_or_else(|| record.info.host.clone());
                 log::warn!("连接已断开，正在清理: {label} ({})", record.info.host);
-                self.close_children_for_connection(app, &record).await;
+                let disconnect_reason = observed_disconnect_reason(&record).await;
+                self.close_children_for_connection(app, &record, Some(&disconnect_reason))
+                    .await;
                 let mut info = record.info;
                 info.status = RuntimeStatus::Disconnected;
+                info.disconnect_reason = Some(disconnect_reason);
                 events::emit(app, events::SSH_STATUS, info);
                 crate::errors::forget_resource_label(&id);
             }

@@ -1,175 +1,455 @@
-/* ─── 常用命令折叠抽屉面板 ───────────────────────────────────────────── */
-.quickCommandDrawer {
-  height: 0;
-  border-bottom: 1px solid transparent;
-  background: linear-gradient(180deg, #f1f5ff 0%, #f8faff 100%);
+/* ─── SFTP 右侧停靠常用命令栏 ─────────────────────────────────────────── */
+.quickCommandDockResizer {
+  position: relative;
+  z-index: 2;
+  display: block;
+  width: 7px;
+  min-width: 7px;
+  height: 100%;
+  padding: 0;
+  cursor: col-resize;
+  background: linear-gradient(90deg, #f6f7fb, #eef1f7 50%, #f6f7fb);
+  border: 0;
+  border-right: 1px solid #dde3ee;
+  border-left: 1px solid #dde3ee;
+  outline: 0;
+  touch-action: none;
+}
+
+.quickCommandDockResizer::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 2px;
+  height: 38px;
+  border-radius: 999px;
+  background: #b9c2d5;
+  transform: translateY(-50%);
+  transition: height .18s ease, background .18s ease, box-shadow .18s ease;
+}
+
+.quickCommandDockResizer:hover::after,
+.quickCommandDockResizer:focus-visible::after {
+  height: 50px;
+  background: var(--accent-2);
+  box-shadow: 0 0 10px rgba(99, 102, 241, .35);
+}
+
+.quickCommandDockResizer:focus-visible {
+  box-shadow: inset 0 0 0 2px rgba(99, 102, 241, .28);
+}
+
+body.isResizingQuickCommandDock,
+body.isResizingQuickCommandDock * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+.quickCommandDock {
+  container-name: quick-command-dock;
+  container-type: inline-size;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
   overflow: hidden;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-4px);
-  transition: opacity .14s ease, transform .14s ease, border-color .14s ease;
-  contain: layout paint style;
+  background:
+    radial-gradient(420px 180px at 0 0, rgba(99, 102, 241, .075), transparent 72%),
+    linear-gradient(180deg, #fbfaff 0%, #f6f8fd 100%);
 }
 
-.quickCommandDrawer-open {
-  height: auto;
-  border-bottom-color: rgba(99, 102, 241, .2);
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0);
-}
-
-.quickCommandDrawerHeader {
+.quickCommandDockHeader {
   display: flex;
+  flex: 0 0 52px;
+  min-width: 0;
+  height: 52px;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  height: 34px;
-  min-height: 34px;
-  padding: 0 10px;
-  border-bottom: 1px solid rgba(221, 230, 241, .6);
-  background: linear-gradient(180deg, #ffffff 0%, #f8faff 100%);
+  gap: 10px;
+  padding: 0 11px;
+  border-bottom: 1px solid rgba(218, 222, 237, .9);
+  background: rgba(255, 255, 255, .78);
 }
 
-.quickCommandDrawerTitle {
+.quickCommandDockIdentity {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 9px;
+}
+
+.quickCommandDockIcon {
+  display: grid;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  color: #ffffff;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 850;
+  background: linear-gradient(135deg, #5d69e8, #7357dd);
+  border-radius: 9px;
+  box-shadow: 0 8px 17px -9px rgba(91, 103, 232, .82);
+}
+
+.quickCommandDockCopy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.quickCommandDockCopy strong {
+  overflow: hidden;
+  color: #172238;
+  font-size: 12px;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quickCommandDockCopy small {
+  overflow: hidden;
+  color: #8b96a8;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quickCommandDockState {
   display: inline-flex;
+  flex: 0 0 auto;
+  height: 21px;
   align-items: center;
-  gap: 6px;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: .3px;
-}
-
-.quickCommandDrawerTitle .anticon {
-  font-size: 13px;
-}
-
-.quickCommandDrawerTitle small {
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
-.quickCommandDrawer .quickCommandAdd {
-  width: auto;
-  height: 24px;
-  min-height: 24px;
-  padding: 0 9px;
-  border: 1px solid rgba(232, 238, 246, .8);
-  border-radius: 5px;
-  background: rgba(255, 255, 255, .8);
-  color: var(--accent);
-  font-size: 12px;
   gap: 5px;
-  transition: all .18s;
+  padding: 0 7px;
+  color: #5b55d5;
+  font-size: 9px;
+  font-weight: 750;
+  white-space: nowrap;
+  background: #f0efff;
+  border: 1px solid #dcd9ff;
+  border-radius: 999px;
 }
 
-.quickCommandDrawer .quickCommandAdd:hover {
-  background: #ffffff;
-  border-color: rgba(99, 102, 241, .45);
-  box-shadow: 0 3px 8px -2px rgba(99, 102, 241, .2);
+.quickCommandDockState::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #685df0;
 }
 
-.quickCommandDrawer .quickCommandScrollList {
-  max-height: calc(min(190px, 38vh) - 34px);
-  overflow-y: auto;
-  padding: 8px 10px;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, .35) transparent;
+.quickCommandDockControls {
   display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: 6px;
-  contain: content;
+  flex: 0 0 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 9px 7px;
 }
 
-.quickCommandDrawer .quickCommandScrollList::-webkit-scrollbar {
+.quickCommandSearch {
+  display: flex;
+  min-width: 0;
+  height: 32px;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  color: #7d889b;
+  background: #ffffff;
+  border: 1px solid #d9dfeb;
+  border-radius: 8px;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, .025);
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+
+.quickCommandSearch:focus-within {
+  border-color: rgba(99, 102, 241, .6);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, .1);
+}
+
+.quickCommandSearch > .anticon {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.quickCommandSearch input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  color: #344057;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 10px;
+}
+
+.quickCommandSearch button {
+  display: grid;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0;
+  color: #8e99ab;
+  background: #f6f7fa;
+  border: 1px solid #e5e8ef;
+  border-radius: 6px;
+  font-size: 9px;
+}
+
+.quickCommandSearch button:hover {
+  color: var(--accent-2);
+  background: #f0efff;
+  border-color: #dcd9ff;
+}
+
+.quickCommandCreateButton {
+  display: inline-flex;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: #ffffff;
+  background: linear-gradient(135deg, #5d69e8, #7257dc);
+  border: 0;
+  border-radius: 8px;
+  box-shadow: 0 8px 18px -9px rgba(91, 103, 232, .75);
+  font-size: 12px;
+  transition: box-shadow .18s ease, transform .18s ease;
+}
+
+.quickCommandCreateButton:hover {
+  box-shadow: 0 10px 22px -10px rgba(91, 103, 232, .9);
+  transform: translateY(-1px);
+}
+
+.quickCommandDockBody {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0 8px 8px;
+}
+
+.quickCommandCardList {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 7px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 8px 3px 2px 1px;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99, 102, 241, .3) transparent;
+}
+
+.quickCommandCardList::-webkit-scrollbar {
   width: 5px;
 }
 
-.quickCommandDrawer .quickCommandScrollList::-webkit-scrollbar-thumb {
+.quickCommandCardList::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(99, 102, 241, .28);
+}
+
+.quickCommandCard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 62px;
+  flex: 0 0 62px;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 7px 7px 8px;
+  background: rgba(255, 255, 255, .94);
+  border: 1px solid #dfe4ed;
   border-radius: 10px;
-  background: rgba(99, 102, 241, .22);
+  box-shadow: 0 4px 11px -10px rgba(15, 23, 42, .5);
+  transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease, background .18s ease;
 }
 
-.quickCommandDrawer .quickCommandTag {
-  display: inline-flex;
+.quickCommandCard:hover,
+.quickCommandCard:focus-within {
+  background: linear-gradient(135deg, #f8f8ff, #ffffff 68%);
+  border-color: rgba(91, 103, 232, .44);
+  box-shadow: 0 9px 20px -14px rgba(91, 103, 232, .65), 0 0 0 2px rgba(91, 103, 232, .05);
+  transform: translateY(-1px);
+}
+
+.quickCommandCardMain {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  min-width: 0;
   align-items: center;
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid rgba(99, 102, 241, .18);
-  border-radius: 14px;
-  background: #ffffff;
-  color: #1e293b;
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background .18s, border-color .18s, box-shadow .18s;
-  position: relative;
-  overflow: hidden;
-  min-width: 108px;
-  max-width: 220px;
-}
-
-.quickCommandDrawer .quickCommandTag:hover {
-  background: #f5f6fe;
-  border-color: rgba(99, 102, 241, .4);
-  box-shadow: 0 2px 6px -1px rgba(99, 102, 241, .15);
-}
-
-.quickCommandDrawer .quickCommandTag:active {
-  box-shadow: none;
-}
-
-.quickCommandDrawer .quickCommandTagActions {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 0 6px 0 18px;
-  background: linear-gradient(to right, rgba(245, 246, 254, 0) 0%, #f5f6fe 18px, #f5f6fe 100%);
-  border-radius: 0 13px 13px 0;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity .15s;
-}
-
-.quickCommandDrawer .quickCommandTag:hover .quickCommandTagActions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.quickCommandDrawer .quickCommandTagActions .ant-btn-sm {
-  width: 22px;
-  height: 22px;
-  min-width: 22px;
-  font-size: 11px;
+  gap: 8px;
   padding: 0;
-  border-radius: 50%;
+  text-align: left;
+  background: transparent;
+  border: 0;
 }
 
-.quickCommandDrawer .quickCommandTagActions .ant-btn-sm:hover {
-  background: rgba(99, 102, 241, .16) !important;
+.quickCommandCardIcon {
+  display: grid;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  color: #5d68dd;
+  font-size: 11px;
+  background: #eef0ff;
+  border: 1px solid #dfe3ff;
+  border-radius: 8px;
 }
 
-.quickCommandDrawer .quickCommandTagActions .ant-btn-dangerous:hover {
-  background: rgba(239, 68, 68, .12) !important;
+.quickCommandCard:nth-child(3n + 2) .quickCommandCardIcon {
+  color: #25806f;
+  background: #eaf8f5;
+  border-color: #d5eee8;
 }
 
-.quickCommandDrawer .quickCommandTagActions .ant-btn-sm .anticon {
+.quickCommandCard:nth-child(3n) .quickCommandCardIcon {
+  color: #b5751e;
+  background: #fff7e8;
+  border-color: #f6e2bd;
+}
+
+.quickCommandCardCopy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.quickCommandCardNameLine {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.quickCommandCardNameLine strong {
+  overflow: hidden;
+  color: #263249;
+  font-size: 10px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quickCommandCardCopy code {
+  overflow: hidden;
+  color: #7d899c;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quickCommandCardActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.quickCommandRunButton,
+.quickCommandMoreButton {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  padding: 0;
+  border-radius: 8px;
+  transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease, background .16s ease;
+}
+
+.quickCommandRunButton {
+  color: #ffffff;
+  background: linear-gradient(135deg, #6370e8, #7659dc);
+  border: 0;
+  box-shadow: 0 6px 12px -7px rgba(91, 103, 232, .8);
   font-size: 12px;
 }
 
-.quickCommandDrawer .quickCommandEmpty {
-  width: 100%;
+.quickCommandRunButton:hover {
+  box-shadow: 0 8px 15px -7px rgba(91, 103, 232, .9);
+  transform: translateY(-1px);
+}
+
+.quickCommandMoreButton {
+  color: #8b96a8;
+  background: #f5f7fa;
+  border: 1px solid #e2e7ef;
+  font-size: 13px;
+}
+
+.quickCommandMoreButton:hover {
+  color: var(--accent-2);
+  background: #f0f1ff;
+  border-color: #d9ddff;
+}
+
+.quickCommandDock .quickCommandEmpty {
+  display: flex;
+  min-height: 126px;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 12px;
+  color: #919cad;
   text-align: center;
-  color: var(--text-muted);
-  font-size: 12px;
-  padding: 16px 0;
+  background: rgba(255, 255, 255, .62);
+  border: 1px dashed #dce3ed;
+  border-radius: 10px;
+}
+
+.quickCommandDock .quickCommandEmpty > .anticon {
+  margin-bottom: 2px;
+  color: #737ce0;
+  font-size: 22px;
+}
+
+.quickCommandDock .quickCommandEmpty strong {
+  color: #4b576d;
+  font-size: 11px;
+}
+
+.quickCommandDock .quickCommandEmpty span:last-child {
+  color: #929daf;
+  font-size: 9px;
+}
+
+@container quick-command-dock (max-width: 315px) {
+  .quickCommandDockState {
+    display: none;
+  }
+
+  .quickCommandDockHeader,
+  .quickCommandDockControls {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .quickCommandCard {
+    gap: 5px;
+    padding-right: 5px;
+  }
+
+  .quickCommandCardActions {
+    gap: 3px;
+  }
 }
 
 .fileContent .ant-table-header th {
@@ -318,4 +598,3 @@ body.isResizingColumn .ant-table-cell {
     rgba(16, 185, 129, .08) 100%) !important;
   box-shadow: inset 3px 0 0 var(--success), 0 0 12px rgba(16, 185, 129, .15);
 }
-

@@ -74,6 +74,13 @@ export function useTerminalRuntime({
   }
 
   function handleTerminalClosed(payload: TerminalClosedEvent) {
+    const sessionId = terminalSessionMapRef.current.get(payload.terminalId);
+    if (sessionId) {
+      writeTerminalEntryDirect(
+        payload.terminalId,
+        createTerminalEntry("system", "终端通道已关闭"),
+      );
+    }
     terminalSessionMapRef.current.delete(payload.terminalId);
     forgetTerminalDirect(payload.terminalId);
     setSessions((current) => {
@@ -81,7 +88,13 @@ export function useTerminalRuntime({
       const next = current.map((session) => {
         if (session.terminalId !== payload.terminalId) return session;
         changed = true;
-        return { ...session, terminalId: null };
+        return {
+          ...session,
+          terminalId: null,
+          connectionNotice: session.state === "connected"
+            ? "终端通道已关闭；SSH 仍保持连接，可新开终端继续操作"
+            : session.connectionNotice,
+        };
       });
       return changed ? next : current;
     });

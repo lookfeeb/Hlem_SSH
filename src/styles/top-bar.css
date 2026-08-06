@@ -576,3 +576,99 @@
   box-shadow: 0 4px 10px -3px rgba(239, 68, 68, .55), 0 0 0 2px #ffffff !important;
   font-weight: 700 !important;
 }
+
+/* 无系统标题栏时，顶部栏同时承担拖动区和窗口控制区。 */
+.topBar {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) max-content;
+  height: 54px;
+  cursor: default;
+}
+
+.brand,
+.sessionTabs,
+.sessionTabsViewport,
+.sessionTabsList,
+.toolbar {
+  height: 54px;
+}
+
+.brand {
+  padding-inline: 14px;
+}
+
+.sessionTabs {
+  padding-inline: 10px;
+}
+
+.sessionTabsViewport {
+  display: flex;
+  align-items: center;
+}
+
+.sessionTabsList {
+  display: inline-flex;
+}
+
+.topBarRight {
+  display: flex;
+  min-width: max-content;
+  height: 54px;
+  align-items: center;
+  border-left: 1px solid rgba(236, 241, 247, .7);
+  background: linear-gradient(90deg, rgba(255, 255, 255, .72) 0%, rgba(248, 251, 255, .92) 100%);
+}
+
+.topBarRight .toolbar {
+  border-left: 0;
+  background: transparent;
+}
+
+.mainWindowControls {
+  display: flex;
+  height: 54px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px 0 6px;
+  border-left: 1px solid rgba(226, 232, 240, .8);
+}
+
+.mainWindowControl {
+  display: inline-flex;
+  width: 32px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(214, 222, 234, .9);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .82);
+  color: #66748a;
+  cursor: pointer;
+  transition: background .18s ease, border-color .18s ease, color .18s ease, transform .18s ease;
+}
+
+.mainWindowControl:hover,
+.mainWindowControl:focus-visible {
+  border-color: #c4ccda;
+  outline: none;
+  background: #eef2f8;
+  color: #35435b;
+  transform: translateY(-1px);
+}
+
+.mainWindowControl.close {
+  border-color: #f0d6dc;
+  background: #fff6f7;
+  color: #bd5366;
+}
+
+.mainWindowControl.close:hover,
+.mainWindowControl.close:focus-visible {
+  border-color: #eabac4;
+  background: #fdecef;
+  color: #a9384d;
+}
+
+.mainWindowControl .anticon {
+  font-size: 13px;
+}

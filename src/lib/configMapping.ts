@@ -17,6 +17,8 @@ export function configToRemoteSession(config: SessionConfig, index: number): Rem
     accent: ACCENTS[index % ACCENTS.length],
     favorite: Boolean(config.favorite),
     lastConnectedAt: config.lastConnectedAt ?? null,
+    connectionCount: config.connectionCount ?? 0,
+    createdAt: config.createdAt,
     currentPath: initialRemotePath(config.username, config.defaultPath || config.sftp.defaultPath),
     loginPath: null,
     connectionId: null,

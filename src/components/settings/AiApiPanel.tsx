@@ -13,7 +13,7 @@ import {
 } from "@ant-design/icons";
 import { Button, Input, InputNumber, Modal, Select, Switch, Tooltip, message } from "antd";
 import type { MouseEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { AppSettings, ConfigSnapshot } from "../../types";
 import { appApi, type ApiServerInfo, type ApiLogEntry } from "../../api/appApi";
 import { appEvents } from "../../api/appEvents";
@@ -32,7 +32,7 @@ interface AiApiPanelProps {
   onSettingsChange: (snapshot: ConfigSnapshot) => void;
 }
 
-const MAX_AI_API_SESSIONS = 5;
+const MAX_AI_API_SESSIONS = 20;
 
 function compactAiApiSessionRows(rows: Array<string | null | undefined>) {
   const ids: string[] = [];
@@ -71,8 +71,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
   const [aiApiAutoStart, setAiApiAutoStart] = useState(() => initialValue.aiApiAutoStart ?? false);
   const mountedRef = useMountedRef();
   const setSafeTimeout = useTimeoutRegistry();
-  const autoStartPendingRef = useRef(false);
-  const autoStartAttemptedRef = useRef(false);
   const [aiApiSessionRows, setAiApiSessionRows] = useState<Array<string | null>>(() => initialAiApiSessionRows(initialValue, sessions));
   const [aiApiLogs, setAiApiLogs] = useState<ApiLogEntry[]>([]);
   const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null);
@@ -86,7 +84,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
 
   useEffect(() => {
     if (!open) return;
-    autoStartAttemptedRef.current = false;
     setAiApiSessionRows(initialAiApiSessionRows(initialValue, sessions));
     setAiApiPort(initialValue.aiApiPort ?? 19880);
     setAiApiAutoStart(initialValue.aiApiAutoStart ?? false);
@@ -116,15 +113,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
     });
     return () => { mounted = false; if (unlisten) unlisten(); };
   }, [open]);
-
-  useEffect(() => {
-    if (!open || autoStartAttemptedRef.current || autoStartPendingRef.current || aiApiLoading || aiApiInfo?.running || selectedAiApiSessionIds.length === 0) return;
-    autoStartAttemptedRef.current = true;
-    autoStartPendingRef.current = true;
-    void startAiApi().finally(() => {
-      autoStartPendingRef.current = false;
-    });
-  }, [aiApiInfo?.running, aiApiLoading, open, selectedAiApiSessionIds.join("|")]);
 
   async function refreshAiApiStatus() {
     try {
@@ -165,7 +153,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
   }
 
   async function stopAiApi() {
-    autoStartAttemptedRef.current = true;
     setAiApiLoading(true);
     try {
       await appApi.apiServerStop();
@@ -189,7 +176,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
       await stopAiApi();
       return;
     }
-    autoStartAttemptedRef.current = true;
     await startAiApi();
   }
 
@@ -229,7 +215,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
 
   function addAiApiSessionTooltip(sessionId: string | null, isLastRow: boolean) {
     if (!isLastRow) return "";
-    if (aiApiSessionRows.length >= MAX_AI_API_SESSIONS) return "最多指定 5 个会话";
+    if (aiApiSessionRows.length >= MAX_AI_API_SESSIONS) return "最多指定 20 个会话";
     const selectedIds = compactAiApiSessionRows(aiApiSessionRows);
     const hasUnusedSession = sessions.some((session) => !selectedIds.includes(session.id));
     if (!hasUnusedSession) return sessions.length > 0 ? "新建 SSH 会话并自动加入授权" : "新建首个 SSH 会话并自动加入授权";
@@ -286,15 +272,15 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
         setAiApiInfo(info);
         onApiServerChange(info.running);
         if (info.running) {
-          message.success(nextSessionIds.length > 0 ? "指定会话已更新" : "已清除会话限制，API 已热更新");
+          message.success("指定会话已更新");
         } else {
-          message.warning("API 服务已停止，仅保存会话配置");
+          message.warning(nextSessionIds.length > 0 ? "API 服务已停止，仅保存会话配置" : "授权会话已清空，API 已停止");
         }
       } catch (error) {
         if (mountedRef.current) message.error(`热更新 API 会话失败：${getErrorMessage(error)}`);
       }
     } else {
-      message.success(nextSessionIds.length > 0 ? "指定会话已更新" : "已清除会话限制");
+      message.success(nextSessionIds.length > 0 ? "指定会话已更新" : "授权会话已清空");
     }
   }
 
@@ -342,7 +328,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
         const existing = await WebviewWindow.getByLabel("api-logs");
         if (!mountedRef.current) return;
         if (existing) { await existing.setFocus(); return; }
-        const webview = new WebviewWindow("api-logs", { url: "index.html?logWindow=1", title: "AI API 操作日志", width: 680, height: 480, minWidth: 480, minHeight: 320, resizable: true });
+        const webview = new WebviewWindow("api-logs", { url: "index.html?logWindow=1", title: "AI API 操作日志", width: 680, height: 480, minWidth: 480, minHeight: 320, resizable: true, devtools: import.meta.env.DEV });
         await webview.once("tauri://error", (event) => {
           if (mountedRef.current) message.error(getErrorMessage(event.payload));
         });
@@ -620,7 +606,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
                 <span className="aiApiSectionIcon"><SafetyCertificateOutlined /></span>
                 <div className="aiApiSectionCopy">
                   <strong>授权会话</strong>
-                  <span>仅允许已选择的 SSH 会话通过 API 读取字段库</span>
+                  <span>仅允许已选择的 SSH 会话通过 API 执行操作</span>
                 </div>
                 <span className="aiApiSessionCount">{selectedAiApiSessionIds.length} / {MAX_AI_API_SESSIONS}</span>
               </div>

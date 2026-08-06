@@ -5,6 +5,69 @@ use tokio::{io::AsyncWriteExt, sync::mpsc, task::JoinHandle};
 const TELEMETRY_FRAME_CHANNEL_CAPACITY: usize = 4;
 const TELEMETRY_STREAM_INIT_TIMEOUT_MS: u64 = 5_000;
 
+async fn measure_ssh_latency(handle: &SshHandle) -> AppResult<f64> {
+    let handle = timeout(
+        Duration::from_millis(LATENCY_PROBE_TIMEOUT_MS),
+        handle.lock(),
+    )
+    .await
+    .map_err(|_| AppError::Remote("等待 SSH 延迟探测通道超时".to_string()))?;
+    let started = Instant::now();
+    timeout(
+        Duration::from_millis(LATENCY_PROBE_TIMEOUT_MS),
+        handle.send_ping(),
+    )
+    .await
+    .map_err(|_| AppError::Remote("SSH 延迟探测超时".to_string()))?
+    .map_err(remote_error)?;
+    Ok((started.elapsed().as_secs_f64() * 1_000.0).max(0.001))
+}
+
+fn latency_for_telemetry(latency_ms: f64) -> u128 {
+    latency_ms.ceil().max(1.0) as u128
+}
+
+struct LatencyStatistics {
+    min_ms: f64,
+    average_ms: f64,
+    median_ms: f64,
+    max_ms: f64,
+    jitter_ms: f64,
+}
+
+fn latency_statistics(samples: &[f64]) -> Option<LatencyStatistics> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let min_ms = sorted[0];
+    let max_ms = *sorted.last().unwrap_or(&min_ms);
+    let middle = sorted.len() / 2;
+    let median_ms = if sorted.len().is_multiple_of(2) {
+        (sorted[middle - 1] + sorted[middle]) / 2.0
+    } else {
+        sorted[middle]
+    };
+    let average_ms = samples.iter().sum::<f64>() / samples.len() as f64;
+    let jitter_ms = (samples
+        .iter()
+        .map(|value| {
+            let delta = *value - average_ms;
+            delta * delta
+        })
+        .sum::<f64>()
+        / samples.len() as f64)
+        .sqrt();
+    Some(LatencyStatistics {
+        min_ms,
+        average_ms,
+        median_ms,
+        max_ms,
+        jitter_ms,
+    })
+}
+
 /// One frame produced by the long-lived telemetry shell loop.
 struct TelemetryFrame {
     tag: String,
@@ -39,10 +102,7 @@ impl TelemetryStream {
                     ChannelMsg::Data { data } => {
                         buf.extend_from_slice(&data);
                         // Drain as many complete frames as the buffer currently holds.
-                        loop {
-                            let Some(boundary) = find_frame_boundary(&buf) else {
-                                break;
-                            };
+                        while let Some(boundary) = find_frame_boundary(&buf) {
                             let body =
                                 String::from_utf8_lossy(&buf[..boundary.body_end]).into_owned();
                             let tag = boundary.tag;
@@ -177,11 +237,63 @@ fn memchr_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 impl RemoteRuntime {
+    pub async fn probe_latency(
+        &self,
+        connection_id: &str,
+        requested_samples: Option<u8>,
+    ) -> AppResult<LatencyProbeResult> {
+        let connection = self.connection(connection_id).await?;
+        let sample_count = requested_samples
+            .unwrap_or(DEFAULT_LATENCY_PROBE_SAMPLES)
+            .clamp(1, MAX_LATENCY_PROBE_SAMPLES);
+        let mut samples = Vec::with_capacity(sample_count as usize);
+        let mut failed_samples = 0u8;
+
+        for index in 0..sample_count {
+            match measure_ssh_latency(&connection.handle).await {
+                Ok(value) => samples.push(value),
+                Err(error) => {
+                    failed_samples = failed_samples.saturating_add(1);
+                    log::debug!("SSH latency sample failed: {error}");
+                }
+            }
+            if index + 1 < sample_count {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+
+        if samples.is_empty() {
+            return Err(AppError::Remote(format!(
+                "SSH 延迟测试失败：{} 次探测均未收到响应",
+                sample_count
+            )));
+        }
+
+        let stats = latency_statistics(&samples)
+            .ok_or_else(|| AppError::Remote("SSH 延迟测试没有有效样本".to_string()))?;
+
+        Ok(LatencyProbeResult {
+            connection_id: connection_id.to_string(),
+            samples_ms: samples,
+            min_ms: stats.min_ms,
+            average_ms: stats.average_ms,
+            median_ms: stats.median_ms,
+            max_ms: stats.max_ms,
+            jitter_ms: stats.jitter_ms,
+            failed_samples,
+            measured_at: now(),
+        })
+    }
+
     pub async fn telemetry_snapshot(&self, connection_id: &str) -> AppResult<ServerTelemetry> {
         let connection = self.connection(connection_id).await?;
         let fallback_ip = connection.info.host;
         let mut snapshot = empty_telemetry(&fallback_ip, 0);
-        let base = self
+        let latency_ms = measure_ssh_latency(&connection.handle)
+            .await
+            .map(latency_for_telemetry)
+            .unwrap_or(0);
+        let mut base = self
             .telemetry_sample(
                 connection_id,
                 TELEMETRY_BASE_COMMAND,
@@ -189,8 +301,10 @@ impl RemoteRuntime {
                 &fallback_ip,
             )
             .await?;
+        base.snapshot.network.latency_ms = latency_ms;
         let mut last_network: Option<(Vec<NetworkBytes>, Instant)> = None;
-        merge_telemetry(&mut snapshot, base, true, &mut last_network);
+        let mut last_cpu: Option<CpuTicks> = None;
+        merge_telemetry(&mut snapshot, base, true, &mut last_network, &mut last_cpu);
 
         for (command, timeout_ms) in [
             (TELEMETRY_PROCESS_COMMAND, TELEMETRY_FAST_TIMEOUT_MS),
@@ -201,7 +315,13 @@ impl RemoteRuntime {
                 .telemetry_sample(connection_id, command, timeout_ms, &fallback_ip)
                 .await
             {
-                merge_telemetry(&mut snapshot, sample, false, &mut last_network);
+                merge_telemetry(
+                    &mut snapshot,
+                    sample,
+                    false,
+                    &mut last_network,
+                    &mut last_cpu,
+                );
             }
         }
 
@@ -272,6 +392,7 @@ impl RemoteRuntime {
 
             let mut snapshot = empty_telemetry(&fallback_ip, 0);
             let mut last_network: Option<(Vec<NetworkBytes>, Instant)> = None;
+            let mut last_cpu: Option<CpuTicks> = None;
             let mut base_interval =
                 tokio::time::interval(Duration::from_millis(job_info.interval_ms));
             let mut process_interval = tokio::time::interval(Duration::from_millis(
@@ -303,16 +424,29 @@ impl RemoteRuntime {
                     _ = ip_interval.tick() => ("ip", TELEMETRY_SLOW_TIMEOUT_MS, false),
                 };
 
-                let started = Instant::now();
-                match stream.sample(tag, timeout_ms).await {
+                let latency_future = async {
+                    if update_latency {
+                        measure_ssh_latency(&ssh_handle).await.ok()
+                    } else {
+                        None
+                    }
+                };
+                let (sample_result, measured_latency) =
+                    tokio::join!(stream.sample(tag, timeout_ms), latency_future);
+                match sample_result {
                     Ok(body) => {
                         consecutive_failures = 0;
-                        let sample = parse_telemetry_body(
-                            &body,
-                            &fallback_ip,
-                            started.elapsed().as_millis(),
+                        let latency_ms = measured_latency
+                            .map(latency_for_telemetry)
+                            .unwrap_or(snapshot.network.latency_ms);
+                        let sample = parse_telemetry_body(&body, &fallback_ip, latency_ms);
+                        merge_telemetry(
+                            &mut snapshot,
+                            sample,
+                            update_latency,
+                            &mut last_network,
+                            &mut last_cpu,
                         );
-                        merge_telemetry(&mut snapshot, sample, update_latency, &mut last_network);
                         emit_telemetry_snapshot(&app_handle, &job_info, snapshot.clone());
                     }
                     Err(error) => {
@@ -412,10 +546,12 @@ pub(super) fn parse_telemetry_body(
 ) -> ParsedTelemetry {
     let snapshot = parse_linux_telemetry(body, fallback_ip, latency_ms);
     let network_bytes = parse_network_bytes(body);
+    let cpu_ticks = parse_cpu_ticks(body);
     ParsedTelemetry {
         output: body.to_string(),
         snapshot,
         network_bytes,
+        cpu_ticks,
     }
 }
 
@@ -451,5 +587,16 @@ mod tests {
         let buf = b"DATA\n__HELM_TM_END__:disk\r\n";
         let boundary = find_frame_boundary(buf).expect("frame found");
         assert_eq!(boundary.tag, "disk");
+    }
+
+    #[test]
+    fn latency_statistics_keep_sub_millisecond_precision_and_true_median() {
+        let stats = latency_statistics(&[0.4, 1.2, 0.8, 1.6]).expect("statistics");
+        assert_eq!(stats.min_ms, 0.4);
+        assert_eq!(stats.max_ms, 1.6);
+        assert!((stats.average_ms - 1.0).abs() < f64::EPSILON);
+        assert!((stats.median_ms - 1.0).abs() < f64::EPSILON);
+        assert!(stats.jitter_ms > 0.0);
+        assert_eq!(latency_for_telemetry(0.001), 1);
     }
 }

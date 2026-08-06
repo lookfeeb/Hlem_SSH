@@ -219,8 +219,8 @@ export function SessionConfigModal({
             <strong>{mode === "create" ? "新建 SSH 连接" : "编辑 SSH 连接"}</strong>
             <span>
               {mode === "create"
-                ? "填写服务器地址与认证方式，创建后即可打开终端和 SFTP"
-                : "修改连接信息后保存，已打开的终端不会被自动重连"}
+                ? "填写服务器地址与认证方式，保存后由你决定何时连接"
+                : "保存只影响下次手动连接，已打开的终端保持当前连接"}
             </span>
           </div>
         </div>
@@ -253,7 +253,7 @@ export function SessionConfigModal({
                   : missingCount > 0
                     ? "还有 " + missingCount + " 项必填信息需要完成"
                     : mode === "create"
-                      ? "必填信息已完成，可以创建连接"
+                      ? "必填信息已完成，可以保存连接"
                       : "必填信息已完成，可以保存更改"}
             </span>
           </div>
@@ -263,14 +263,14 @@ export function SessionConfigModal({
             </Button>
             <Button
               type="primary"
-              aria-label={mode === "create" ? "创建连接" : "保存更改"}
+              aria-label={mode === "create" ? "保存连接" : "保存更改"}
               icon={<ArrowRightOutlined />}
-              iconPosition="end"
+              iconPlacement="end"
               loading={submitting}
               disabled={!ready}
               onClick={() => void submit()}
             >
-              {mode === "create" ? "创建连接" : "保存更改"}
+              {mode === "create" ? "保存连接" : "保存更改"}
             </Button>
           </div>
         </div>

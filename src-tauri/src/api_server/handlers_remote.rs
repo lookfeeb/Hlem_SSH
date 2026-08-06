@@ -6,17 +6,19 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{Json, Response},
 };
-use futures_util::TryStreamExt;
+use futures_util::{stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
+
+use crate::remote::{ExecResult, RemoteRuntime};
 
 use super::auth::{verify_auth, verify_session_access};
 use super::field_catalog;
 use super::guard::check_dangerous_command;
 use super::{
-    allowed_session_ids_snapshot, friendly_error_detail, map_remote_error, push_log,
-    push_log_with_response, take_chars, truncate_for_log, ApiError, ApiServerState,
+    allowed_session_ids_snapshot, command_log_detail, friendly_error_detail, map_remote_error,
+    push_log, push_log_with_response, response_log_preview, ApiError, ApiServerState,
 };
 
 const MAX_API_EXEC_TIMEOUT_MS: u64 = 5 * 60_000;
@@ -82,6 +84,56 @@ pub(super) struct ExecBody {
     command: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    safety_mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LatencyBody {
+    session_id: String,
+    #[serde(default)]
+    samples: Option<u8>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchExecItem {
+    #[serde(default)]
+    id: Option<String>,
+    command: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct BatchExecBody {
+    session_id: String,
+    commands: Vec<BatchExecItem>,
+    #[serde(default)]
+    parallel: bool,
+    #[serde(default = "default_stop_on_error")]
+    stop_on_error: bool,
+    #[serde(default)]
+    safety_mode: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchExecItemResult {
+    index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<ExecResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn default_stop_on_error() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -121,6 +173,82 @@ fn elapsed_ms(start: std::time::Instant) -> u64 {
     start.elapsed().as_millis() as u64
 }
 
+fn strict_safety_mode(value: Option<&str>) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    match value
+        .unwrap_or("balanced")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "balanced" | "standard" => Ok(false),
+        "strict" => Ok(true),
+        _ => Err(bad_request("safetyMode 仅支持 balanced 或 strict")),
+    }
+}
+
+async fn ensure_api_session_ready(
+    state: &ApiServerState,
+    session_id: &str,
+    require_sftp: bool,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let (connected, sftp_available) = state.remote.api_session_status(session_id).await;
+    if !connected {
+        let bundle = {
+            let store = state
+                .vault
+                .lock()
+                .map_err(|_| internal_error("内部锁错误"))?;
+            crate::commands::build_session_for_connect(&store, session_id)
+                .map_err(internal_error)?
+        };
+        state
+            .remote
+            .api_connect_session(&state.app, bundle.0, bundle.1)
+            .await
+            .map_err(|error| map_remote_error(error.to_string(), state))?;
+    }
+    if require_sftp && (!connected || !sftp_available) {
+        state
+            .remote
+            .api_ensure_sftp(session_id)
+            .await
+            .map_err(|error| map_remote_error(error, state))?;
+    }
+    Ok(())
+}
+
+fn exec_success(result: &ExecResult) -> bool {
+    !result.timed_out && result.exit_status.unwrap_or(1) == 0
+}
+
+async fn run_batch_exec_item(
+    remote: &RemoteRuntime,
+    session_id: &str,
+    index: usize,
+    item: BatchExecItem,
+) -> BatchExecItemResult {
+    let timeout_ms = item
+        .timeout_ms
+        .unwrap_or(30_000)
+        .clamp(1, MAX_API_EXEC_TIMEOUT_MS);
+    match remote.api_exec(session_id, &item.command, timeout_ms).await {
+        Ok(result) => BatchExecItemResult {
+            index,
+            id: item.id,
+            success: exec_success(&result),
+            result: Some(result),
+            error: None,
+        },
+        Err(error) => BatchExecItemResult {
+            index,
+            id: item.id,
+            success: false,
+            result: None,
+            error: Some(error),
+        },
+    }
+}
+
 // ─── Auth probe ────────────────────────────────────────────────────────────────
 
 /// 鉴权探活 + 端点目录。
@@ -134,10 +262,12 @@ pub async fn auth_check(
         "auth": "Authorization: Bearer <api_key>",
         "rest": {
             "GET /api/fields": "field catalog",
-            "GET /api/sessions": "list connected sessions",
+            "GET /api/sessions": "list authorized sessions and connection status",
             "POST /api/connect": "{sessionId} → ConnectionInfo",
             "POST /api/disconnect": "{sessionId} → {success}",
-            "POST /api/exec": "{sessionId, command, timeoutMs?} → ExecResult",
+            "POST /api/exec": "{sessionId, command, timeoutMs?, safetyMode?} → ExecResult; auto-connect",
+            "POST /api/exec/batch": "{sessionId, commands[], parallel?, stopOnError?, safetyMode?}",
+            "POST /api/latency": "{sessionId, samples?} → SSH RTT statistics",
             "GET /api/files?sessionId=&path=": "list files",
             "PUT /api/upload?sessionId=&remotePath=": "raw bytes body, → {success, remotePath, size}",
             "GET /api/download?sessionId=&path=": "supports Range",
@@ -171,7 +301,7 @@ pub async fn rest_fields(
 
 // ─── REST: 会话生命周期 / 命令执行 / 文件列出 ───────────────────────────────────
 
-/// `GET /api/sessions` — 列出已连接会话。
+/// `GET /api/sessions` — 列出已授权的配置会话及实时连接状态。
 pub async fn rest_sessions(
     headers: HeaderMap,
     AxumState(state): AxumState<ApiServerState>,
@@ -179,10 +309,27 @@ pub async fn rest_sessions(
     require_auth(&state, &headers).await?;
 
     let start = std::time::Instant::now();
-    let mut sessions = state.remote.list_connected_sessions().await;
     let allowed_session_ids = allowed_session_ids_snapshot(&state);
-    if !allowed_session_ids.is_empty() {
-        sessions.retain(|session| allowed_session_ids.contains(&session.session_id));
+    let configured_sessions = {
+        let store = state
+            .vault
+            .lock()
+            .map_err(|_| internal_error("内部锁错误"))?;
+        store.snapshot().map_err(internal_error)?.data.sessions
+    };
+    let mut sessions = Vec::new();
+    for session in configured_sessions {
+        if !allowed_session_ids.contains(&session.id) {
+            continue;
+        }
+        let (connected, sftp_available) = state.remote.api_session_status(&session.id).await;
+        sessions.push(SessionItem {
+            session_id: session.id,
+            name: session.name,
+            host: format!("{}:{}", session.host, session.port),
+            connected,
+            sftp_available,
+        });
     }
     let elapsed = elapsed_ms(start);
     push_log(
@@ -297,7 +444,8 @@ pub async fn rest_exec(
     if body.session_id.is_empty() || body.command.is_empty() {
         return Err(bad_request("缺少 sessionId 或 command"));
     }
-    if let Some(reason) = check_dangerous_command(&body.command) {
+    let strict = strict_safety_mode(body.safety_mode.as_deref())?;
+    if let Some(reason) = check_dangerous_command(&body.command, strict) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiError {
@@ -306,13 +454,14 @@ pub async fn rest_exec(
         ));
     }
     verify_session_access(&state, &body.session_id)?;
+    ensure_api_session_ready(&state, &body.session_id, false).await?;
 
     let timeout_ms = body
         .timeout_ms
         .unwrap_or(30_000)
         .clamp(1, MAX_API_EXEC_TIMEOUT_MS);
     let start = std::time::Instant::now();
-    let detail = truncate_for_log(&body.command, 77);
+    let detail = command_log_detail(&body.command, 77);
 
     match state
         .remote
@@ -321,27 +470,9 @@ pub async fn rest_exec(
     {
         Ok(result) => {
             let elapsed = elapsed_ms(start);
-            let success = !result.timed_out && result.exit_status.unwrap_or(1) == 0;
-            // 日志里只截一段输出当预览
-            let preview: String = {
-                let mut buf = String::new();
-                buf.push_str(&result.stdout);
-                buf = take_chars(&buf, 2000);
-                if buf.is_empty() { None } else { Some(buf) }.unwrap_or_default()
-            };
-            push_log_with_response(
-                &state,
-                "rest/exec",
-                &detail,
-                success,
-                elapsed,
-                if preview.is_empty() {
-                    None
-                } else {
-                    Some(preview)
-                },
-            )
-            .await;
+            let success = exec_success(&result);
+            let preview = response_log_preview(&body.command, &result.stdout, 2_000);
+            push_log_with_response(&state, "rest/exec", &detail, success, elapsed, preview).await;
             Ok(Json(serde_json::to_value(result).unwrap_or_default()))
         }
         Err(e) => {
@@ -359,6 +490,127 @@ pub async fn rest_exec(
     }
 }
 
+/// `POST /api/latency` — 使用 SSH 原生 ping 测量应用到终端的真实往返延迟。
+pub async fn rest_latency(
+    headers: HeaderMap,
+    AxumState(state): AxumState<ApiServerState>,
+    Json(body): Json<LatencyBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    require_auth(&state, &headers).await?;
+    if body.session_id.is_empty() {
+        return Err(bad_request("缺少 sessionId"));
+    }
+    verify_session_access(&state, &body.session_id)?;
+    ensure_api_session_ready(&state, &body.session_id, false).await?;
+
+    let start = std::time::Instant::now();
+    match state
+        .remote
+        .api_probe_latency(&body.session_id, body.samples)
+        .await
+    {
+        Ok(result) => {
+            push_log(
+                &state,
+                "rest/latency",
+                &format!("{} → {:.1}ms", body.session_id, result.median_ms),
+                true,
+                elapsed_ms(start),
+            )
+            .await;
+            Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+        }
+        Err(error) => {
+            push_log(
+                &state,
+                "rest/latency",
+                &friendly_error_detail(&format!("{} → {}", body.session_id, error), &state),
+                false,
+                elapsed_ms(start),
+            )
+            .await;
+            Err(map_remote_error(error, &state))
+        }
+    }
+}
+
+/// `POST /api/exec/batch` — 一次请求执行多条命令，支持最多 4 路并行。
+pub async fn rest_exec_batch(
+    headers: HeaderMap,
+    AxumState(state): AxumState<ApiServerState>,
+    Json(body): Json<BatchExecBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    require_auth(&state, &headers).await?;
+    if body.session_id.is_empty() {
+        return Err(bad_request("缺少 sessionId"));
+    }
+    if body.commands.is_empty() || body.commands.len() > 32 {
+        return Err(bad_request("commands 数量必须在 1–32 之间"));
+    }
+    let strict = strict_safety_mode(body.safety_mode.as_deref())?;
+    for item in &body.commands {
+        if item.command.trim().is_empty() {
+            return Err(bad_request("commands 中存在空命令"));
+        }
+        if let Some(reason) = check_dangerous_command(&item.command, strict) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ApiError {
+                    error: format!("批量命令被拒绝: {}", reason),
+                }),
+            ));
+        }
+    }
+    verify_session_access(&state, &body.session_id)?;
+    ensure_api_session_ready(&state, &body.session_id, false).await?;
+
+    let start = std::time::Instant::now();
+    let session_id = body.session_id.clone();
+    let mut results = if body.parallel {
+        let remote = state.remote.clone();
+        stream::iter(body.commands.into_iter().enumerate().map(|(index, item)| {
+            let remote = remote.clone();
+            let session_id = session_id.clone();
+            async move { run_batch_exec_item(&remote, &session_id, index, item).await }
+        }))
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await
+    } else {
+        let mut results = Vec::with_capacity(body.commands.len());
+        for (index, item) in body.commands.into_iter().enumerate() {
+            let result = run_batch_exec_item(&state.remote, &session_id, index, item).await;
+            let should_stop = body.stop_on_error && !result.success;
+            results.push(result);
+            if should_stop {
+                break;
+            }
+        }
+        results
+    };
+    results.sort_by_key(|item| item.index);
+    let success = results.iter().all(|item| item.success);
+    let duration_ms = elapsed_ms(start);
+    push_log(
+        &state,
+        "rest/exec-batch",
+        &format!(
+            "{} 条 / {}",
+            results.len(),
+            if body.parallel { "并行" } else { "顺序" }
+        ),
+        success,
+        duration_ms,
+    )
+    .await;
+    Ok(Json(serde_json::json!({
+        "success": success,
+        "parallel": body.parallel,
+        "durationMs": duration_ms,
+        "results": results
+    })))
+}
+
 /// `GET /api/files?sessionId=&path=` — 列出远端目录。
 pub async fn rest_files(
     headers: HeaderMap,
@@ -371,6 +623,7 @@ pub async fn rest_files(
         return Err(bad_request("缺少 sessionId"));
     }
     verify_session_access(&state, &query.session_id)?;
+    ensure_api_session_ready(&state, &query.session_id, true).await?;
 
     let start = std::time::Instant::now();
     match state
@@ -424,6 +677,7 @@ pub async fn upload_file_raw(
     }
 
     verify_session_access(&state, &query.session_id)?;
+    ensure_api_session_ready(&state, &query.session_id, true).await?;
 
     let start = std::time::Instant::now();
 
@@ -476,6 +730,7 @@ pub async fn download_file(
     require_auth(&state, &headers).await?;
 
     verify_session_access(&state, &query.session_id)?;
+    ensure_api_session_ready(&state, &query.session_id, true).await?;
     let start = std::time::Instant::now();
 
     let sftp = match state.remote.find_sftp_for_session(&query.session_id).await {
@@ -594,6 +849,9 @@ pub async fn download_file(
                 .await;
                 return Err(internal_error(format!("seek 远程文件失败: {}", e)));
             }
+        }
+        if let Err(e) = remote_file.set_read_limit(send_len) {
+            return Err(internal_error(format!("设置读取范围失败: {}", e)));
         }
 
         let limited = remote_file.take(send_len);

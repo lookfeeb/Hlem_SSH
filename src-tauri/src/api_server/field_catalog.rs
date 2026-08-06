@@ -2,7 +2,7 @@ use serde_json::Value;
 
 const API_FIELD_CATALOG_JSON: &str = r###"
 {
-  "version": 1,
+  "version": 2,
   "title": "HelM AI API 字段库",
   "description": "本地 SSH/SFTP 网关，仅提供 HTTP REST。",
   "auth": {
@@ -30,7 +30,7 @@ const API_FIELD_CATALOG_JSON: &str = r###"
       "category": "会话",
       "method": "GET",
       "path": "/api/sessions",
-      "summary": "列出已连接会话",
+      "summary": "列出已授权会话及其 SSH/SFTP 实时状态",
       "responseSchema": "SessionItem[]"
     },
     {
@@ -53,15 +53,31 @@ const API_FIELD_CATALOG_JSON: &str = r###"
       "category": "操作",
       "method": "POST",
       "path": "/api/exec",
-      "summary": "在远端会话执行命令并一次性返回结果",
+      "summary": "自动连接会话并执行命令；默认均衡安全模式",
       "bodySchema": "ExecBody",
       "responseSchema": "ExecResult"
+    },
+    {
+      "category": "操作",
+      "method": "POST",
+      "path": "/api/exec/batch",
+      "summary": "一次执行 1–32 条命令，支持最多 4 路并行",
+      "bodySchema": "BatchExecBody",
+      "responseSchema": "BatchExecResponse"
+    },
+    {
+      "category": "诊断",
+      "method": "POST",
+      "path": "/api/latency",
+      "summary": "自动连接并使用 SSH 原生 ping 测真实往返延迟",
+      "bodySchema": "LatencyBody",
+      "responseSchema": "LatencyProbeResult"
     },
     {
       "category": "文件",
       "method": "GET",
       "path": "/api/files",
-      "summary": "列出远端目录文件",
+      "summary": "自动连接并列出远端目录文件",
       "querySchema": "FilesQuery",
       "responseSchema": "FileEntry[]"
     },
@@ -202,12 +218,54 @@ const API_FIELD_CATALOG_JSON: &str = r###"
       { "name": "port", "type": "number", "description": "SSH 端口" },
       { "name": "username", "type": "string", "description": "登录用户名" },
       { "name": "status", "type": "string", "description": "连接状态" },
-      { "name": "connectedAt", "type": "string", "description": "连接时间" }
+      { "name": "connectedAt", "type": "string", "description": "连接时间" },
+      { "name": "disconnectReason", "type": "string | null", "description": "断开原因；服务器未提供详情时会明确说明" }
     ],
     "ExecBody": [
       { "name": "sessionId", "type": "string", "required": true, "description": "会话 ID" },
       { "name": "command", "type": "string", "required": true, "description": "要执行的命令" },
-      { "name": "timeoutMs", "type": "number", "required": false, "description": "超时时间，默认 30000" }
+      { "name": "timeoutMs", "type": "number", "required": false, "description": "超时时间，默认 30000" },
+      { "name": "safetyMode", "type": "balanced | strict", "required": false, "description": "默认 balanced；strict 额外拦截远程脚本、find -delete、重启等" }
+    ],
+    "BatchExecBody": [
+      { "name": "sessionId", "type": "string", "required": true, "description": "会话 ID" },
+      { "name": "commands", "type": "BatchExecItem[]", "required": true, "description": "1–32 条命令" },
+      { "name": "parallel", "type": "boolean", "required": false, "description": "是否最多 4 路并行，默认 false" },
+      { "name": "stopOnError", "type": "boolean", "required": false, "description": "顺序模式遇错即停，默认 true" },
+      { "name": "safetyMode", "type": "balanced | strict", "required": false, "description": "命令安全模式" }
+    ],
+    "BatchExecItem": [
+      { "name": "id", "type": "string", "required": false, "description": "调用方自定义标识" },
+      { "name": "command", "type": "string", "required": true, "description": "命令" },
+      { "name": "timeoutMs", "type": "number", "required": false, "description": "单条命令超时" }
+    ],
+    "BatchExecResponse": [
+      { "name": "success", "type": "boolean", "description": "全部已执行命令是否成功" },
+      { "name": "parallel", "type": "boolean", "description": "是否并行执行" },
+      { "name": "durationMs", "type": "number", "description": "批次总耗时" },
+      { "name": "results", "type": "BatchExecItemResult[]", "description": "按输入顺序排列的结果" }
+    ],
+    "BatchExecItemResult": [
+      { "name": "index", "type": "number", "description": "原始命令索引" },
+      { "name": "id", "type": "string", "required": false, "description": "调用方传入的自定义标识" },
+      { "name": "success", "type": "boolean", "description": "命令是否正常退出" },
+      { "name": "result", "type": "ExecResult", "required": false, "description": "成功发起执行时的结果" },
+      { "name": "error", "type": "string", "required": false, "description": "无法执行时的具体错误" }
+    ],
+    "LatencyBody": [
+      { "name": "sessionId", "type": "string", "required": true, "description": "会话 ID" },
+      { "name": "samples", "type": "number", "required": false, "description": "采样次数 1–10，默认 5" }
+    ],
+    "LatencyProbeResult": [
+      { "name": "connectionId", "type": "string", "description": "复用的 SSH 连接 ID" },
+      { "name": "samplesMs", "type": "number[]", "description": "成功样本" },
+      { "name": "minMs", "type": "number", "description": "最低延迟" },
+      { "name": "averageMs", "type": "number", "description": "平均延迟" },
+      { "name": "medianMs", "type": "number", "description": "中位延迟，UI 默认展示" },
+      { "name": "maxMs", "type": "number", "description": "最高延迟" },
+      { "name": "jitterMs", "type": "number", "description": "标准差抖动" },
+      { "name": "failedSamples", "type": "number", "description": "失败样本数" },
+      { "name": "measuredAt", "type": "string", "description": "测试完成时间" }
     ],
     "ExecResult": [
       { "name": "stdout", "type": "string", "description": "标准输出" },
@@ -306,10 +364,12 @@ const API_FIELD_CATALOG_JSON: &str = r###"
   "rules": [
     "所有端点都需要 Authorization: Bearer <api_key>。",
     "POST/PUT/PATCH 请求默认使用 Content-Type: application/json；/api/upload 例外，body 是原始字节流。",
-    "操作前先 POST /api/connect。错误中含“未连接”时，先连接再重试。",
+    "exec、exec/batch、latency、files、upload、download 会自动建立并复用 SSH/SFTP 连接；无需先调用 connect。",
+    "授权会话为空时 API 不会启动；运行中清空授权会话会立即停止服务。",
     "未知主机密钥不会自动信任，需用户在 HelM 主窗口确认指纹。",
     "exec 默认 30s 超时；超时返回 exitStatus=124 且 timedOut=true。",
-    "危险命令会被拒绝，不要尝试规避。"
+    "balanced 仅拦截根目录删除、磁盘破坏、关键系统文件覆盖等灾难性操作；strict 额外拦截常见高风险管理命令。",
+    "本地 API 日志会隐藏常见令牌、密码、认证头和私钥内容。"
   ]
 }
 "###;
@@ -325,7 +385,7 @@ mod tests {
     #[test]
     fn catalog_json_is_valid() {
         let catalog = catalog_json().expect("api field catalog should be valid json");
-        assert_eq!(catalog["version"].as_u64(), Some(1));
+        assert_eq!(catalog["version"].as_u64(), Some(2));
         assert!(catalog["endpoints"]
             .as_array()
             .is_some_and(|items| !items.is_empty()));

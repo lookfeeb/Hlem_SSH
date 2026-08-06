@@ -164,6 +164,19 @@ pub async fn local_expand_paths(paths: Vec<String>) -> AppResult<Vec<LocalExpand
 }
 
 #[tauri::command]
+pub async fn local_create_directories(paths: Vec<String>) -> AppResult<()> {
+    for path in paths {
+        if path.trim().is_empty() {
+            return Err(AppError::InvalidInput("本地目录路径不能为空".to_string()));
+        }
+        tokio::fs::create_dir_all(&path)
+            .await
+            .map_err(|error| AppError::Io(format!("创建本地目录 {path} 失败：{error}")))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn check_update(
     current_version: String,
     current_arch: String,
@@ -848,6 +861,31 @@ mod tests {
         pkcs8::{EncodePublicKey, LineEnding},
         RsaPrivateKey,
     };
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn creates_local_directories_recursively() {
+        let root = tempdir().expect("temp directory");
+        let nested = root.path().join("download").join("empty").join("nested");
+        local_create_directories(vec![nested.to_string_lossy().to_string()])
+            .await
+            .expect("create directories");
+        assert!(nested.is_dir());
+    }
+
+    #[tokio::test]
+    async fn reports_local_directory_creation_path() {
+        let root = tempdir().expect("temp directory");
+        let blocking_file = root.path().join("blocking-file");
+        std::fs::write(&blocking_file, b"file").expect("write blocking file");
+        let nested = blocking_file.join("child");
+        let error = local_create_directories(vec![nested.to_string_lossy().to_string()])
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(&nested.to_string_lossy().to_string()));
+    }
 
     #[test]
     fn compares_semver_like_versions() {

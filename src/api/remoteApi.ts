@@ -5,6 +5,7 @@ import type {
   ForwardInfo,
   ForwardStatusEvent,
   HostKeyVerification,
+  LatencyProbeResult,
   RemoteFileEntry,
   ServerTelemetry,
   SftpChangedEvent,
@@ -39,6 +40,7 @@ export const remoteApi = {
     call<ConfigSnapshot>("ssh_trust_host_key", { sessionId, algorithm, fingerprint }),
   openTerminal: (connectionId: string, cols = 100, rows = 30) =>
     call<TerminalInfo>("terminal_open", { connectionId, cols, rows }),
+  startTerminal: (terminalId: string) => call<void>("terminal_start", { terminalId }),
   writeTerminal: (terminalId: string, data: string) => call<void>("terminal_write", { terminalId, data }),
   resizeTerminal: (terminalId: string, cols: number, rows: number) =>
     call<void>("terminal_resize", { terminalId, cols, rows }),
@@ -106,6 +108,8 @@ export const remoteApi = {
   stopTelemetry: (jobId: string) => call<void>("telemetry_stop", { jobId }),
   telemetrySnapshot: (connectionId: string) =>
     call<ServerTelemetry>("telemetry_snapshot", { connectionId }, { retries: 1, timeoutMs: 45_000 }),
+  probeLatency: (connectionId: string, samples = 5) =>
+    call<LatencyProbeResult>("latency_probe", { connectionId, samples }, { timeoutMs: 30_000 }),
   startLocalForward: (
     sessionId: string,
     bindHost: string,

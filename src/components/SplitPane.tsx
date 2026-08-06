@@ -9,6 +9,8 @@ interface SplitPaneProps {
   defaultTopHeight?: number;
 }
 
+const SPLIT_HANDLE_HEIGHT = 10;
+
 export function SplitPane({
   top,
   bottom,
@@ -30,7 +32,7 @@ export function SplitPane({
 
   const clampTopHeight = useCallback(
     (value: number, containerHeight: number) => {
-      const maxTop = Math.max(minTop, containerHeight - minBottom);
+      const maxTop = Math.max(minTop, containerHeight - minBottom - SPLIT_HANDLE_HEIGHT);
       return clamp(value, minTop, maxTop);
     },
     [minTop, minBottom],

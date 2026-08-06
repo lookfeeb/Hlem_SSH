@@ -18,7 +18,7 @@ pub(super) fn verify_auth(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let token = auth.strip_prefix("Bearer ").unwrap_or("");
-    if token != expected {
+    if expected.is_empty() || token != expected {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ApiError {
@@ -34,11 +34,7 @@ pub(super) fn verify_session_access(
     session_id: &str,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
     let allowed_session_ids = allowed_session_ids_snapshot(state);
-    if !allowed_session_ids.is_empty()
-        && !allowed_session_ids
-            .iter()
-            .any(|allowed| allowed == session_id)
-    {
+    if !session_is_authorized(&allowed_session_ids, session_id) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiError {
@@ -47,4 +43,31 @@ pub(super) fn verify_session_access(
         ));
     }
     Ok(())
+}
+
+fn session_is_authorized(allowed_session_ids: &[String], session_id: &str) -> bool {
+    allowed_session_ids
+        .iter()
+        .any(|allowed| allowed == session_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderMap;
+
+    use super::{session_is_authorized, verify_auth};
+
+    #[test]
+    fn empty_api_key_never_authenticates() {
+        assert!(verify_auth(&HeaderMap::new(), "").is_err());
+    }
+
+    #[test]
+    fn empty_session_allowlist_authorizes_nothing() {
+        assert!(!session_is_authorized(&[], "session-a"));
+        assert!(session_is_authorized(
+            &["session-a".to_string()],
+            "session-a"
+        ));
+    }
 }

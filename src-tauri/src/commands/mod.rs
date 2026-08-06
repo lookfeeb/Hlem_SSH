@@ -32,19 +32,19 @@ use crate::{
 
 pub use api_server_cmd::{
     api_server_logs, api_server_regenerate_key, api_server_start, api_server_status,
-    api_server_stop, api_server_update_sessions,
+    api_server_stop, api_server_update_sessions, spawn_api_server_autostart,
 };
 pub use backup::{
     backup_record_delete, backup_record_restore, backup_records_clear, backup_run_now,
     spawn_auto_backup_scheduler,
 };
 pub use desktop::{
-    check_update, download_update, install_update, local_expand_paths, local_path_exists,
-    open_database_dir, open_external_url, open_path_dir,
+    check_update, download_update, install_update, local_create_directories, local_expand_paths,
+    local_path_exists, open_database_dir, open_external_url, open_path_dir,
 };
 pub use remote::{
     forward_list, forward_start_dynamic, forward_start_local, forward_start_remote, forward_stop,
-    telemetry_snapshot, telemetry_start, telemetry_stop,
+    latency_probe, telemetry_snapshot, telemetry_start, telemetry_stop,
 };
 pub use sessions::{
     group_create, group_delete, group_update, session_clear_recent, session_create, session_delete,
@@ -59,12 +59,12 @@ pub use sftp::{
 };
 pub use terminal::{
     ssh_exec, ssh_exec_on_connection, terminal_close, terminal_open, terminal_resize,
-    terminal_write,
+    terminal_start, terminal_write,
 };
 pub use vault::{
-    config_snapshot, settings_update, tunnel_create, tunnel_delete, tunnel_update,
-    vault_backup_export, vault_backup_import, vault_migrate, vault_needs_migration,
-    vault_skip_migration,
+    config_snapshot, connection_section_state_update, settings_update, tunnel_create,
+    tunnel_delete, tunnel_update, vault_backup_export, vault_backup_import, vault_migrate,
+    vault_needs_migration, vault_skip_migration,
 };
 
 // ─── Constants ─────────────────────────────────────────────────────────────────

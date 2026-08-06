@@ -228,6 +228,7 @@ pub(super) async fn run_transfer(
                 await_progress_ticker(progress_handle, &info.transfer_id).await;
 
                 result?;
+                remote.shutdown().await.map_err(remote_error)?;
 
                 let final_bytes = bytes_done.load(Ordering::Relaxed);
                 emit_transfer_progress(runtime, app, &info.transfer_id, final_bytes, 0.0).await;
@@ -341,6 +342,7 @@ pub(super) async fn run_transfer(
                 await_progress_ticker(progress_handle, &info.transfer_id).await;
 
                 result?;
+                remote.shutdown().await.map_err(remote_error)?;
 
                 let final_bytes = bytes_done.load(Ordering::Relaxed);
                 emit_transfer_progress(runtime, app, &info.transfer_id, final_bytes, 0.0).await;
@@ -504,6 +506,74 @@ where
     R: tokio::io::AsyncRead + Unpin + ?Sized,
     W: tokio::io::AsyncWrite + Unpin + ?Sized,
 {
+    copy_n_async_inner(
+        src,
+        dst,
+        limit,
+        CopyAsyncOptions {
+            buffer_size,
+            cancel,
+            paused,
+            bytes_done,
+            flush_destination: true,
+        },
+    )
+    .await
+}
+
+pub(super) async fn copy_n_async_without_flush<R, W>(
+    src: &mut R,
+    dst: &mut W,
+    limit: u64,
+    buffer_size: usize,
+    cancel: &AtomicBool,
+    paused: &AtomicBool,
+    bytes_done: &AtomicU64,
+) -> AppResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin + ?Sized,
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    copy_n_async_inner(
+        src,
+        dst,
+        limit,
+        CopyAsyncOptions {
+            buffer_size,
+            cancel,
+            paused,
+            bytes_done,
+            flush_destination: false,
+        },
+    )
+    .await
+}
+
+struct CopyAsyncOptions<'a> {
+    buffer_size: usize,
+    cancel: &'a AtomicBool,
+    paused: &'a AtomicBool,
+    bytes_done: &'a AtomicU64,
+    flush_destination: bool,
+}
+
+async fn copy_n_async_inner<R, W>(
+    src: &mut R,
+    dst: &mut W,
+    limit: u64,
+    options: CopyAsyncOptions<'_>,
+) -> AppResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin + ?Sized,
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    let CopyAsyncOptions {
+        buffer_size,
+        cancel,
+        paused,
+        bytes_done,
+        flush_destination,
+    } = options;
     let mut buffer = vec![0u8; buffer_size];
     let mut remaining = limit;
     while remaining > 0 {
@@ -530,7 +600,9 @@ where
         bytes_done.fetch_add(read as u64, Ordering::Relaxed);
         remaining -= read as u64;
     }
-    dst.flush().await.map_err(remote_error)?;
+    if flush_destination {
+        dst.flush().await.map_err(remote_error)?;
+    }
     Ok(())
 }
 
@@ -550,6 +622,7 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
         cancel,
         paused,
     } = options;
+    sftp_record.wait_for_transfer_pool().await;
     {
         let init_sftp = sftp_record.next_transfer_session().await;
         let mut remote = init_sftp
@@ -559,7 +632,6 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
             )
             .await
             .map_err(remote_error)?;
-        remote.flush().await.map_err(remote_error)?;
         remote.shutdown().await.map_err(remote_error)?;
     }
 
@@ -622,7 +694,7 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
                         .map_err(remote_error)?;
                 }
 
-                copy_n_async(
+                copy_n_async_without_flush(
                     &mut local_file,
                     &mut remote_file,
                     len,
@@ -631,7 +703,8 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
                     &task_paused,
                     &task_bytes_done,
                 )
-                .await
+                .await?;
+                remote_file.shutdown().await.map_err(remote_error)
             }
             .await;
 
@@ -671,6 +744,16 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
         return Err(error);
     }
 
+    // 各分片 shutdown 只等待 WRITE ACK 并关闭 handle；所有分片结束后统一
+    // 做一次 fsync，避免 OpenSSH 上每个分片各触发一次昂贵的整文件落盘。
+    let sync_sftp = sftp_record.next_transfer_session().await;
+    let mut sync_file = sync_sftp
+        .open_with_flags(request.remote_path.clone(), OpenFlags::WRITE)
+        .await
+        .map_err(remote_error)?;
+    sync_file.sync_all().await.map_err(remote_error)?;
+    sync_file.shutdown().await.map_err(remote_error)?;
+
     let verify_sftp = sftp_record.next_transfer_session().await;
     let remote_size = verify_sftp
         .metadata(request.remote_path.clone())
@@ -706,6 +789,7 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
         cancel,
         paused,
     } = options;
+    sftp_record.wait_for_transfer_pool().await;
     // 1) 预分配本地文件：File::create 截断 + set_len 拓展到目标长度。
     //    随后 drop 原始 handle，每个 task 用 OpenOptions 各自重新打开
     //    （Windows 默认 share_mode 允许多写者，每 handle 自带 seek 位置）。
@@ -751,7 +835,7 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
 
         // 每个 task 抓一个 transfer 池里的 SftpSession（轮询）。
         // 池里只有 1 个时多 task 共用同一 session，仍可借多 File handle 并行；
-        // 池满（6 个）时各 task 拿到独立 session，并行更彻底。
+        // 池满（4 个）时各 task 拿到独立 session，并行更彻底。
         let task_sftp = sftp_record.next_transfer_session().await;
         let task_remote_path = request.remote_path.clone();
         let task_local_path = request.local_path.clone();
@@ -771,6 +855,7 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
                         .await
                         .map_err(remote_error)?;
                 }
+                remote_file.set_read_limit(len).map_err(remote_error)?;
 
                 let mut local_file = OpenOptions::new()
                     .write(true)
@@ -793,7 +878,8 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
                     &task_paused,
                     &task_bytes_done,
                 )
-                .await
+                .await?;
+                remote_file.shutdown().await.map_err(remote_error)
             }
             .await;
 

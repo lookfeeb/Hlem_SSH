@@ -751,7 +751,7 @@ function TunnelConfigModal({
       centered
       closable={!submitting}
       keyboard={!submitting}
-      maskClosable={!submitting}
+      mask={{ closable: !submitting }}
     >
       <div className="tunnelConfigLayout">
         <aside className="tunnelConfigSidebar">

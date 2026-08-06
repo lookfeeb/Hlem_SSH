@@ -33,6 +33,7 @@ pub(super) fn merge_telemetry(
     sample: ParsedTelemetry,
     update_latency: bool,
     last_network: &mut Option<(Vec<NetworkBytes>, Instant)>,
+    last_cpu: &mut Option<CpuTicks>,
 ) {
     let sampled_at = Instant::now();
     if !sample.network_bytes.is_empty() {
@@ -87,9 +88,25 @@ pub(super) fn merge_telemetry(
         *last_network = Some((current_interfaces, sampled_at));
     }
 
+    if let Some(current_cpu) = sample.cpu_ticks {
+        if let Some(previous_cpu) = *last_cpu {
+            let total_delta = current_cpu.total.saturating_sub(previous_cpu.total);
+            let idle_delta = current_cpu.idle.saturating_sub(previous_cpu.idle);
+            if total_delta > 0 {
+                target.cpu = ((100.0 * total_delta.saturating_sub(idle_delta) as f64
+                    / total_delta as f64)
+                    * 10.0)
+                    .round()
+                    / 10.0;
+            }
+        }
+        *last_cpu = Some(current_cpu);
+    }
+
     let source = sample.snapshot;
     if has_telemetry_tag(&sample.output, "UPTIME") {
         target.uptime = source.uptime;
+        target.uptime_seconds = source.uptime_seconds;
     }
     if has_telemetry_tag(&sample.output, "MEM") {
         target.memory = source.memory;
@@ -113,8 +130,26 @@ pub(super) fn merge_telemetry(
         target.disks = source.disks;
     }
     if update_latency {
-        target.network.latency_ms = source.network.latency_ms;
+        let measured = source.network.latency_ms;
+        target.network.latency_ms = if measured == 0 || target.network.latency_ms == 0 {
+            measured
+        } else {
+            // 轻量平滑，避免公网链路的单次抖动让徽章来回跳动。
+            (target.network.latency_ms * 3 + measured) / 4
+        };
     }
+}
+
+pub(super) fn parse_cpu_ticks(output: &str) -> Option<CpuTicks> {
+    output.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        if parts.next()? != "CPUTIME" {
+            return None;
+        }
+        let total = parts.next()?.parse::<u64>().ok()?;
+        let idle = parts.next()?.parse::<u64>().ok()?;
+        (total >= idle).then_some(CpuTicks { total, idle })
+    })
 }
 
 pub(super) fn bytes_per_second_to_kib(bytes: u64, seconds: f64) -> f64 {
@@ -143,6 +178,7 @@ pub(super) fn parse_linux_telemetry(
                     .and_then(|value| value.parse::<u64>().ok())
                     .unwrap_or(0);
                 telemetry.uptime = format_uptime(seconds);
+                telemetry.uptime_seconds = Some(seconds);
             }
             Some("MEM") => {
                 telemetry.memory = UsageMetric {
@@ -251,6 +287,7 @@ pub(super) fn empty_telemetry(ip: &str, latency_ms: u128) -> ServerTelemetry {
         ip: ip.to_string(),
         ipv6: String::new(),
         uptime: "未知".to_string(),
+        uptime_seconds: None,
         cpu: 0.0,
         memory: UsageMetric { used: 0, total: 0 },
         swap: UsageMetric { used: 0, total: 0 },
@@ -279,47 +316,44 @@ pub(super) fn parse_u64(value: Option<&str>) -> u64 {
 }
 
 pub(super) fn format_uptime(seconds: u64) -> String {
-    let days = seconds / 86_400;
-    let hours = (seconds % 86_400) / 3_600;
+    let hours = seconds / 3_600;
     let minutes = (seconds % 3_600) / 60;
-    if days >= 365 {
-        let years = days / 365;
-        let months = (days % 365) / 30;
-        if months > 0 {
-            format!("{years} 年 {months} 月")
-        } else {
-            format!("{years} 年")
-        }
-    } else if days >= 30 {
-        let months = days / 30;
-        let remaining_days = days % 30;
-        if remaining_days > 0 {
-            format!("{months} 月 {remaining_days} 天")
-        } else {
-            format!("{months} 月")
-        }
-    } else if days > 0 {
-        if hours > 0 {
-            format!("{days} 天 {hours} 小时")
-        } else {
-            format!("{days} 天")
-        }
-    } else if hours > 0 {
-        format!("{hours} 小时 {minutes} 分钟")
-    } else {
-        format!("{minutes} 分钟")
-    }
+    let remaining_seconds = seconds % 60;
+    format!("{hours} 小时 {minutes:02} 分钟 {remaining_seconds:02} 秒")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::format_uptime;
+    use super::*;
 
     #[test]
-    fn formats_uptime_with_compact_largest_units() {
-        assert_eq!(format_uptime(59 * 60), "59 分钟");
-        assert_eq!(format_uptime(25 * 3_600), "1 天 1 小时");
-        assert_eq!(format_uptime(30 * 86_400), "1 月");
-        assert_eq!(format_uptime(400 * 86_400), "1 年 1 月");
+    fn formats_uptime_as_cumulative_hours_minutes_and_seconds() {
+        assert_eq!(format_uptime(59 * 60 + 7), "0 小时 59 分钟 07 秒");
+        assert_eq!(format_uptime(25 * 3_600 + 61), "25 小时 01 分钟 01 秒");
+        assert_eq!(format_uptime(400 * 86_400), "9600 小时 00 分钟 00 秒");
+    }
+
+    #[test]
+    fn cpu_usage_is_calculated_from_consecutive_proc_stat_samples() {
+        let mut target = empty_telemetry("127.0.0.1", 0);
+        let mut last_network = None;
+        let mut last_cpu = None;
+        let first = ParsedTelemetry {
+            output: "CPUTIME 100 60\n".to_string(),
+            snapshot: empty_telemetry("127.0.0.1", 0),
+            network_bytes: Vec::new(),
+            cpu_ticks: parse_cpu_ticks("CPUTIME 100 60\n"),
+        };
+        merge_telemetry(&mut target, first, false, &mut last_network, &mut last_cpu);
+        assert_eq!(target.cpu, 0.0);
+
+        let second = ParsedTelemetry {
+            output: "CPUTIME 200 110\n".to_string(),
+            snapshot: empty_telemetry("127.0.0.1", 0),
+            network_bytes: Vec::new(),
+            cpu_ticks: parse_cpu_ticks("CPUTIME 200 110\n"),
+        };
+        merge_telemetry(&mut target, second, false, &mut last_network, &mut last_cpu);
+        assert_eq!(target.cpu, 50.0);
     }
 }

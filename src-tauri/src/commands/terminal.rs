@@ -29,6 +29,16 @@ pub async fn terminal_write(
 }
 
 #[tauri::command]
+pub async fn terminal_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    terminal_id: String,
+) -> AppResult<()> {
+    ensure_vault_unlocked(&state)?;
+    state.remote.terminal_start(&app, &terminal_id).await
+}
+
+#[tauri::command]
 pub async fn terminal_resize(
     state: State<'_, AppState>,
     terminal_id: String,

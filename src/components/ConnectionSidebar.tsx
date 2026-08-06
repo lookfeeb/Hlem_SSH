@@ -13,7 +13,13 @@ import {
   StarOutlined,
 } from "@ant-design/icons";
 import { Button, Input, Modal, Tooltip } from "antd";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  normalizeCollapsedConnectionSectionIds,
+  shouldPersistConnectionSectionId,
+  toggleCollapsedConnectionSectionId,
+} from "../app/connectionSectionState";
+import { sortConnectionsByCount, sortConnectionsByCreatedAt } from "../app/connectionOrdering";
 import type { ConnectionState, RemoteSession, SessionGroup } from "../types";
 
 interface ConnectionSidebarProps {
@@ -29,8 +35,9 @@ interface ConnectionSidebarProps {
   onDisconnect: (session: RemoteSession) => void;
   onCancelConnect: (id: string) => void;
   onFavoriteChange: (sessionId: string, favorite: boolean) => void;
-  onMarkRecent: (sessionId: string) => void;
   onClearRecent: (sessionId: string) => void;
+  collapsedSectionIds: string[];
+  onCollapsedSectionIdsChange: (sectionIds: string[]) => Promise<void>;
 }
 
 type SessionSection = {
@@ -54,12 +61,22 @@ export function ConnectionSidebar({
   onDisconnect,
   onCancelConnect,
   onFavoriteChange,
-  onMarkRecent,
   onClearRecent,
+  collapsedSectionIds,
+  onCollapsedSectionIdsChange,
 }: ConnectionSidebarProps) {
   const [searchQuery, setSearchQuery] = useState("");
-  const [collapsedSectionIds, setCollapsedSectionIds] = useState<Set<string>>(new Set());
+  const normalizedCollapsedSectionIds = normalizeCollapsedConnectionSectionIds(collapsedSectionIds);
+  const persistedCollapsedKey = normalizedCollapsedSectionIds.join("\u0000");
+  const [localCollapsedSectionIds, setLocalCollapsedSectionIds] = useState<Set<string>>(
+    () => new Set(normalizedCollapsedSectionIds),
+  );
+  const collapseChangeVersionRef = useRef(0);
   const query = searchQuery.trim().toLowerCase();
+
+  useEffect(() => {
+    setLocalCollapsedSectionIds(new Set(normalizedCollapsedSectionIds));
+  }, [persistedCollapsedKey]);
 
   const sections = useMemo<SessionSection[]>(() => {
     const matchedSessions = query
@@ -68,14 +85,16 @@ export function ConnectionSidebar({
         )
       : sessions;
 
-    const sortSessionList = (items: RemoteSession[]) => sortSessionsByPreference(items);
+    const sortSessionList = (items: RemoteSession[]) => sortConnectionsByCreatedAt(items);
 
     if (query) {
       return [{ id: "search", name: "搜索结果", sessions: sortSessionList(matchedSessions) }];
     }
 
     const favoriteSessions = sortSessionList(matchedSessions.filter((session) => session.favorite));
-    const recentSessions = sortSessionsByRecent(matchedSessions.filter((session) => session.lastConnectedAt)).slice(0, MAX_RECENT_SESSIONS);
+    const recentSessions = sortConnectionsByCount(
+      matchedSessions.filter((session) => session.lastConnectedAt),
+    ).slice(0, MAX_RECENT_SESSIONS);
     const prioritySections: SessionSection[] = [
       ...(favoriteSessions.length > 0 ? [{ id: "favorites", name: "收藏连接", sessions: favoriteSessions }] : []),
       ...(recentSessions.length > 0 ? [{ id: "recent", name: "最近连接", sessions: recentSessions }] : []),
@@ -97,8 +116,7 @@ export function ConnectionSidebar({
         ungroupedSessions.push(session);
       }
     }
-    const grouped = [...groups]
-      .sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name))
+    const grouped = sortConnectionsByCreatedAt(groups)
       .map((group) => ({
         id: group.id,
         name: group.name || "未命名分组",
@@ -115,14 +133,14 @@ export function ConnectionSidebar({
   }, [groups, query, sessions]);
 
   function toggleSection(sectionId: string) {
-    setCollapsedSectionIds((current) => {
-      const next = new Set(current);
-      if (next.has(sectionId)) {
-        next.delete(sectionId);
-      } else {
-        next.add(sectionId);
-      }
-      return next;
+    const nextIds = toggleCollapsedConnectionSectionId(localCollapsedSectionIds, sectionId);
+    setLocalCollapsedSectionIds(new Set(nextIds));
+    if (!shouldPersistConnectionSectionId(sectionId)) return;
+    const version = collapseChangeVersionRef.current + 1;
+    collapseChangeVersionRef.current = version;
+    void onCollapsedSectionIdsChange(nextIds).catch(() => {
+      if (collapseChangeVersionRef.current !== version) return;
+      setLocalCollapsedSectionIds(new Set(normalizedCollapsedSectionIds));
     });
   }
 
@@ -131,7 +149,6 @@ export function ConnectionSidebar({
     if (state === "connecting") {
       return;
     }
-    onMarkRecent(session.id);
     if (state === "connected") {
       onActivate(session);
     } else {
@@ -185,7 +202,7 @@ export function ConnectionSidebar({
 
       <div className="connectionSectionList">
         {sections.map((section) => {
-          const collapsed = collapsedSectionIds.has(section.id);
+          const collapsed = localCollapsedSectionIds.has(section.id);
           return (
             <section className="connectionSection" key={section.id}>
               <button
@@ -275,7 +292,6 @@ export function ConnectionSidebar({
                                   size="small"
                                   onClick={(event) => {
                                     event.stopPropagation();
-                                    onMarkRecent(session.id);
                                     onConnect(session);
                                   }}
                                 />
@@ -325,34 +341,4 @@ export function ConnectionSidebar({
 
 function sessionState(session: RemoteSession, connectingSessionIds: ReadonlySet<string>): ConnectionState {
   return connectingSessionIds.has(session.id) ? "connecting" : session.state;
-}
-
-function sortSessionsByPreference(sessions: RemoteSession[]) {
-  return [...sessions].sort((a, b) => {
-    const favoriteRankA = a.favorite ? 0 : 1;
-    const favoriteRankB = b.favorite ? 0 : 1;
-    if (favoriteRankA !== favoriteRankB) return favoriteRankA - favoriteRankB;
-
-    const recentTimeA = parseSessionTime(a.lastConnectedAt);
-    const recentTimeB = parseSessionTime(b.lastConnectedAt);
-    if (recentTimeA !== recentTimeB) return recentTimeB - recentTimeA;
-
-    return a.name.localeCompare(b.name, "zh-Hans-CN");
-  });
-}
-
-function sortSessionsByRecent(sessions: RemoteSession[]) {
-  return [...sessions].sort((a, b) => {
-    const recentTimeA = parseSessionTime(a.lastConnectedAt);
-    const recentTimeB = parseSessionTime(b.lastConnectedAt);
-    if (recentTimeA !== recentTimeB) return recentTimeB - recentTimeA;
-
-    return a.name.localeCompare(b.name, "zh-Hans-CN");
-  });
-}
-
-function parseSessionTime(value?: string | null) {
-  if (!value) return 0;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : 0;
 }

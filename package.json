@@ -1,7 +1,7 @@
 {
   "name": "helm",
   "private": true,
-  "version": "0.0.46",
+  "version": "0.0.47",
   "type": "module",
   "scripts": {
     "predev": "cargo run --quiet --release --manifest-path tools/free-port/Cargo.toml",
@@ -9,6 +9,8 @@
     "build": "tsc && vite build",
     "test:sftp-state": "pwsh -NoProfile -File tools/test-sftp-state.ps1",
     "test:sftp-reuse": "pwsh -NoProfile -File tools/test-sftp-reuse.ps1",
+    "test:sftp-performance": "pwsh -NoProfile -File tools/test-sftp-performance.ps1",
+    "test:terminal": "pwsh -NoProfile -File tools/test-terminal.ps1",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",

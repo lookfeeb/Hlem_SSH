@@ -63,5 +63,31 @@ test("a genuinely changed SFTP id discards the previous channel cache", () => {
 
   assert.equal(restored.entries["/"], undefined);
   assert.deepEqual(restored.entries["/home"], currentFiles);
-  assert.deepEqual(restored.expandedKeys, ["/", "/home"]);
+  assert.deepEqual(restored.expandedKeys, ["/"]);
+});
+
+test("the selected directory itself stays collapsed while its parents remain visible", () => {
+  clearDirectoryViewStateCache();
+  saveDirectoryViewState(
+    "session-a",
+    "sftp-a",
+    { "/": [directory("/root")], "/root": [directory("/root/app")] },
+    ["/"],
+  );
+
+  const root = loadDirectoryViewState({
+    id: "session-a",
+    sftpId: "sftp-a",
+    currentPath: "/root",
+    files: [directory("/root/app")],
+  });
+  assert.deepEqual(root.expandedKeys, ["/"]);
+
+  const app = loadDirectoryViewState({
+    id: "session-a",
+    sftpId: "sftp-a",
+    currentPath: "/root/app",
+    files: [],
+  });
+  assert.deepEqual(app.expandedKeys, ["/", "/root"]);
 });

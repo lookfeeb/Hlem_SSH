@@ -29,7 +29,11 @@ try {
     --outDir $tempDirectory `
     (Join-Path $projectRoot "tests\sftpSessionState.test.ts") `
     (Join-Path $projectRoot "tests\directoryViewState.test.ts") `
-    (Join-Path $projectRoot "tests\sessionConnectionState.test.ts")
+    (Join-Path $projectRoot "tests\sessionConnectionState.test.ts") `
+    (Join-Path $projectRoot "tests\connectionSectionState.test.ts") `
+    (Join-Path $projectRoot "tests\contextMenuPosition.test.ts") `
+    (Join-Path $projectRoot "tests\transferRecords.test.ts") `
+    (Join-Path $projectRoot "tests\remoteDownloadPlan.test.ts")
   if ($LASTEXITCODE -ne 0) {
     throw "SFTP 状态测试编译失败，退出码：$LASTEXITCODE"
   }
@@ -37,7 +41,11 @@ try {
   & node --test `
     (Join-Path $tempDirectory "tests\sftpSessionState.test.js") `
     (Join-Path $tempDirectory "tests\directoryViewState.test.js") `
-    (Join-Path $tempDirectory "tests\sessionConnectionState.test.js")
+    (Join-Path $tempDirectory "tests\sessionConnectionState.test.js") `
+    (Join-Path $tempDirectory "tests\connectionSectionState.test.js") `
+    (Join-Path $tempDirectory "tests\contextMenuPosition.test.js") `
+    (Join-Path $tempDirectory "tests\transferRecords.test.js") `
+    (Join-Path $tempDirectory "tests\remoteDownloadPlan.test.js")
   if ($LASTEXITCODE -ne 0) {
     throw "SFTP 状态测试失败，退出码：$LASTEXITCODE"
   }

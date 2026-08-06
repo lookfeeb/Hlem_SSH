@@ -1,13 +1,17 @@
 import {
+  BorderOutlined,
   CloseOutlined,
+  FullscreenExitOutlined,
   LeftOutlined,
+  MinusOutlined,
   ProfileOutlined,
   RightOutlined,
   SettingOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Badge, Button, Space, Tooltip } from "antd";
+import { App as AntdApp, Badge, Button, Space, Tooltip } from "antd";
+import { isTauriRuntime } from "../api/runtime";
 import type { ConnectionState, RemoteSession, TransferInfo } from "../types";
 
 interface TopBarProps {
@@ -43,10 +47,89 @@ export function TopBar({
   apiConfigured,
   onApiServerStart,
 }: TopBarProps) {
+  const { modal } = AntdApp.useApp();
   const activeTransferTotal = activeTransferCount(transfers);
   const tabsViewportRef = useRef<HTMLDivElement>(null);
+  const disconnectConfirmationRef = useRef<string | null>(null);
   const [tabScrollState, setTabScrollState] = useState({ canLeft: false, canRight: false });
+  const [mainWindowMaximized, setMainWindowMaximized] = useState(false);
   const tabsScrollable = tabScrollState.canLeft || tabScrollState.canRight;
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/window")
+      .then(async ({ getCurrentWindow }) => {
+        const currentWindow = getCurrentWindow();
+        const syncMaximizedState = async () => {
+          try {
+            const maximized = await currentWindow.isMaximized();
+            if (!disposed) setMainWindowMaximized(maximized);
+          } catch (error) {
+            console.warn("[helm] failed to read main window state:", error);
+          }
+        };
+        await syncMaximizedState();
+        const cleanup = await currentWindow.onResized(() => void syncMaximizedState());
+        if (disposed) cleanup();
+        else unlisten = cleanup;
+      })
+      .catch((error) => console.warn("[helm] failed to observe main window state:", error));
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  function shouldDragWindow(target: EventTarget | null) {
+    return !(target instanceof Element && target.closest("button, a, input, textarea, select, [role=\"tab\"], .sessionTabsViewport"));
+  }
+
+  function handleWindowMouseDown(event: React.MouseEvent<HTMLElement>) {
+    if (event.button !== 0 || !shouldDragWindow(event.target) || !isTauriRuntime()) return;
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => getCurrentWindow().startDragging())
+      .catch((error) => console.warn("[helm] failed to drag main window:", error));
+  }
+
+  async function minimizeMainWindow() {
+    try {
+      if (isTauriRuntime()) {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        await getCurrentWindow().minimize();
+      } else {
+        window.blur();
+      }
+    } catch (error) {
+      console.warn("[helm] failed to minimize main window:", error);
+    }
+  }
+
+  async function toggleMainWindowMaximize() {
+    try {
+      if (isTauriRuntime()) {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        await getCurrentWindow().toggleMaximize();
+        setMainWindowMaximized(await getCurrentWindow().isMaximized());
+      }
+    } catch (error) {
+      console.warn("[helm] failed to toggle main window maximize:", error);
+    }
+  }
+
+  async function closeMainWindow() {
+    try {
+      if (isTauriRuntime()) {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        await getCurrentWindow().close();
+      } else {
+        window.close();
+      }
+    } catch (error) {
+      console.warn("[helm] failed to close main window:", error);
+    }
+  }
 
   const updateTabScrollState = useCallback(() => {
     const element = tabsViewportRef.current;
@@ -101,16 +184,35 @@ export function TopBar({
     }
     const state = sessionState(session, connectingSessionIds);
     if (state === "connected") {
-      onDisconnect(session);
+      if (disconnectConfirmationRef.current === session.id) return;
+      disconnectConfirmationRef.current = session.id;
+      const clearConfirmation = () => {
+        if (disconnectConfirmationRef.current === session.id) {
+          disconnectConfirmationRef.current = null;
+        }
+      };
+      modal.confirm({
+        title: "断开 SSH 连接？",
+        content: `确定要断开“${session.name}”吗？`,
+        okText: "断开连接",
+        okButtonProps: { danger: true },
+        cancelText: "取消",
+        onOk: () => {
+          clearConfirmation();
+          onDisconnect(session);
+        },
+        onCancel: clearConfirmation,
+        afterClose: clearConfirmation,
+      });
     } else if (state === "connecting") {
       onCancelConnect(session.id);
     } else if (state === "disconnected" || state === "failed") {
       onConnect(session);
     }
-  }, [activeSessionId, connectingSessionIds, onActivate, onCancelConnect, onConnect, onDisconnect]);
+  }, [activeSessionId, connectingSessionIds, modal, onActivate, onCancelConnect, onConnect, onDisconnect]);
 
   return (
-    <header className="topBar">
+    <header className="topBar" onMouseDown={handleWindowMouseDown}>
       <div className="brand">
         <span className="brandMark">
           <img className="brandIcon" src="./Helm_icon.svg" alt="" aria-hidden="true" />
@@ -196,19 +298,53 @@ export function TopBar({
         />
       </div>
 
-      <Space size={4} className="toolbar">
-        <Tooltip title={activeTransferTotal > 0 ? `传输进行中 · ${activeTransferTotal} 条` : "传输列表"} placement="bottom">
-          <Badge size="small" count={activeTransferTotal} offset={[-2, 2]}>
-            <Button
-              aria-label="传输列表"
-              className={activeTransferTotal > 0 ? "transferToolbarButton transferToolbarButton-active" : "transferToolbarButton"}
-              icon={<ProfileOutlined />}
-              size="small"
-              onClick={onTransferOpen}
-            />
-          </Badge>
-        </Tooltip>
-      </Space>
+      <div className="topBarRight">
+        <Space size={4} className="toolbar">
+          <Tooltip title={activeTransferTotal > 0 ? `传输进行中 · ${activeTransferTotal} 条` : "传输列表"} placement="bottom">
+            <Badge size="small" count={activeTransferTotal} offset={[-2, 2]}>
+              <Button
+                aria-label="传输列表"
+                className={activeTransferTotal > 0 ? "transferToolbarButton transferToolbarButton-active" : "transferToolbarButton"}
+                icon={<ProfileOutlined />}
+                size="small"
+                onClick={onTransferOpen}
+              />
+            </Badge>
+          </Tooltip>
+        </Space>
+        <div className="mainWindowControls" aria-label="窗口控制">
+          <button
+            type="button"
+            className="mainWindowControl"
+            aria-label="最小化"
+            title="最小化"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => void minimizeMainWindow()}
+          >
+            <MinusOutlined />
+          </button>
+          <button
+            type="button"
+            className="mainWindowControl"
+            aria-label={mainWindowMaximized ? "还原窗口" : "最大化"}
+            title={mainWindowMaximized ? "还原窗口" : "最大化"}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => void toggleMainWindowMaximize()}
+          >
+            {mainWindowMaximized ? <FullscreenExitOutlined /> : <BorderOutlined />}
+          </button>
+          <button
+            type="button"
+            className="mainWindowControl close"
+            aria-label="关闭"
+            title="关闭"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => void closeMainWindow()}
+          >
+            <CloseOutlined />
+          </button>
+        </div>
+      </div>
     </header>
   );
 }

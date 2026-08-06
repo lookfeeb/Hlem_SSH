@@ -10,7 +10,7 @@ import {
   UploadOutlined,
 } from "@ant-design/icons";
 import { Button, Drawer, Empty, Progress, Space, Tooltip } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
 import { appApi } from "../api/appApi";
 import { getErrorMessage } from "../lib/configMapping";
 import { formatBeijingDateTime, formatBytes } from "../lib/format";
@@ -146,6 +146,7 @@ export function TransferCenter({
       placement="right"
       size={430}
       closable={false}
+      destroyOnHidden
       className="transferDrawer"
       extra={
         <Space size={4}>
@@ -190,6 +191,7 @@ export function TransferCenter({
             transfers,
             saveRecords,
             backupRecords,
+            detailPreviewEnabled: open,
             sessionLookup,
             localPathExistsByTransferId,
             onPause,
@@ -213,6 +215,7 @@ interface RenderAllRecordsProps {
   transfers: TransferInfo[];
   saveRecords: FileSaveRecord[];
   backupRecords: BackupRecord[];
+  detailPreviewEnabled: boolean;
   sessionLookup: TransferSessionLookup;
   localPathExistsByTransferId: LocalPathExistsMap;
   onPause: (id: string) => void;
@@ -381,12 +384,11 @@ function renderTransferRecord(transfer: TransferInfo, props: RenderAllRecordsPro
   const detailTooltip = transferDetailTooltip(transfer, targetSession, localMissing);
 
   return (
-    <Tooltip
+    <TransferDetailTooltip
       key={`transfer-${transfer.transferId}`}
+      enabled={props.detailPreviewEnabled}
+      status={transfer.status}
       title={detailTooltip}
-      placement="left"
-      color="#ffffff"
-      classNames={{ root: "detailHoverTooltip transferDetailHoverTooltip" }}
     >
       <article className="transferListItem">
         <div className="transferListHeader">
@@ -490,6 +492,40 @@ function renderTransferRecord(transfer: TransferInfo, props: RenderAllRecordsPro
         </div>
         {transfer.error && !isTransferDone(transfer) && <div className="transferListError">{transfer.error}</div>}
       </article>
+    </TransferDetailTooltip>
+  );
+}
+
+interface TransferDetailTooltipProps {
+  enabled: boolean;
+  status: TransferInfo["status"];
+  title: ReactNode;
+  children: ReactElement;
+}
+
+function TransferDetailTooltip({ enabled, status, title, children }: TransferDetailTooltipProps) {
+  const [previewOpen, setPreviewOpen] = useState(false);
+
+  useEffect(() => {
+    if (!enabled) setPreviewOpen(false);
+  }, [enabled]);
+
+  useEffect(() => {
+    setPreviewOpen(false);
+  }, [status]);
+
+  return (
+    <Tooltip
+      open={enabled && previewOpen}
+      onOpenChange={(nextOpen) => setPreviewOpen(enabled && nextOpen)}
+      title={title}
+      placement="left"
+      color="#ffffff"
+      mouseLeaveDelay={0}
+      destroyOnHidden
+      classNames={{ root: "detailHoverTooltip transferDetailHoverTooltip" }}
+    >
+      {children}
     </Tooltip>
   );
 }

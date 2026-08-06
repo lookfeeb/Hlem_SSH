@@ -12,7 +12,7 @@
 ///   - redirection that overwrites critical system files
 ///
 /// Returns `Some(reason)` if blocked, `None` if safe.
-pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
+pub(super) fn check_dangerous_command(command: &str, strict: bool) -> Option<&'static str> {
     let normalized = command.trim().to_lowercase();
     if normalized.is_empty() {
         return None;
@@ -51,7 +51,7 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
 
     // 3. find -delete / find -exec rm
     let mentions_find = parts.contains(&"find") || squeezed.contains(" find ");
-    if mentions_find {
+    if strict && mentions_find {
         if squeezed.contains(" -delete") || squeezed.ends_with(" -delete") {
             return Some("禁止 find -delete");
         }
@@ -114,8 +114,10 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
     let recursive_flag = squeezed.contains(" -r ")
         || squeezed.contains(" -rf ")
         || squeezed.contains(" -fr ")
+        || squeezed.contains(" --recursive ")
         || squeezed.contains(" -r\t")
-        || squeezed.ends_with(" -r");
+        || squeezed.ends_with(" -r")
+        || squeezed.ends_with(" --recursive");
     if touches_perm && recursive_flag {
         let system_dirs = [
             " /", " /*", " /etc", " /usr", " /var", " /bin", " /sbin", " /lib", " /lib64",
@@ -148,31 +150,34 @@ pub(super) fn check_dangerous_command(command: &str) -> Option<&'static str> {
         || squeezed.contains("|/bin/sh")
         || squeezed.contains("| /bin/bash")
         || squeezed.contains("|/bin/bash");
-    if uses_downloader && pipes_to_shell {
+    if strict && uses_downloader && pipes_to_shell {
         return Some("禁止远程下载并直接执行脚本");
     }
 
     // 9. Power-state change commands
     let powerstate_tokens = ["shutdown", "reboot", "halt", "poweroff"];
-    if powerstate_tokens.contains(&parts.first().copied().unwrap_or("")) {
+    if strict && powerstate_tokens.contains(&parts.first().copied().unwrap_or("")) {
         return Some("禁止关机/重启命令");
     }
-    for tok in powerstate_tokens {
-        if squeezed.contains(&format!(" {tok} "))
-            || squeezed.contains(&format!(";{tok} "))
-            || squeezed.contains(&format!("&& {tok} "))
-            || squeezed.contains(&format!(" {tok};"))
-            || squeezed.ends_with(&format!(" {tok}"))
-            || squeezed.contains(&format!("\"{tok} "))
-            || squeezed.contains(&format!("'{tok} "))
-        {
-            return Some("禁止关机/重启命令");
+    if strict {
+        for tok in powerstate_tokens {
+            if squeezed.contains(&format!(" {tok} "))
+                || squeezed.contains(&format!(";{tok} "))
+                || squeezed.contains(&format!("&& {tok} "))
+                || squeezed.contains(&format!(" {tok};"))
+                || squeezed.ends_with(&format!(" {tok}"))
+                || squeezed.contains(&format!("\"{tok} "))
+                || squeezed.contains(&format!("'{tok} "))
+            {
+                return Some("禁止关机/重启命令");
+            }
         }
     }
-    if squeezed.contains("init 0")
-        || squeezed.contains("init 6")
-        || parts.first().copied() == Some("init")
-            && matches!(parts.get(1).copied(), Some("0") | Some("6"))
+    if strict
+        && (squeezed.contains("init 0")
+            || squeezed.contains("init 6")
+            || parts.first().copied() == Some("init")
+                && matches!(parts.get(1).copied(), Some("0") | Some("6")))
     {
         return Some("禁止关机/重启命令");
     }
@@ -209,7 +214,6 @@ fn has_dangerous_recursive_rm(parts: &[&str]) -> bool {
             continue;
         }
         let mut recursive = false;
-        let mut force = false;
         let mut parse_options = true;
         let mut targets = Vec::new();
         for arg in &parts[index + 1..] {
@@ -222,18 +226,15 @@ fn has_dangerous_recursive_rm(parts: &[&str]) -> bool {
             }
             if parse_options && arg.starts_with("--") {
                 recursive |= matches!(*arg, "--recursive" | "--dir");
-                force |= *arg == "--force";
                 continue;
             }
             if parse_options && arg.starts_with('-') {
                 recursive |= arg[1..].contains('r') || arg[1..].contains('R');
-                force |= arg[1..].contains('f');
                 continue;
             }
             targets.push(*arg);
         }
         if recursive
-            && force
             && targets
                 .into_iter()
                 .any(is_dangerous_recursive_delete_target)
@@ -248,25 +249,43 @@ fn is_dangerous_recursive_delete_target(value: &str) -> bool {
     const DANGEROUS_TARGETS: &[&str] = &[
         "/", "/*", "/.", "/..", "~", "~/", "$home", "${home}", "/home", "/home/*", "/root",
         "/root/*", "/usr", "/usr/*", "/etc", "/etc/*", "/var", "/var/*", "/boot", "/boot/*",
-        "/sys", "/sys/*", "/proc", "/proc/*", "/lib", "/lib/*", "/lib64", "/lib64/*", "/opt",
-        "/opt/*", "/sbin", "/sbin/*", "/bin", "/bin/*",
+        "/sys", "/sys/*", "/proc", "/proc/*", "/dev", "/dev/*", "/run", "/run/*", "/lib", "/lib/*",
+        "/lib64", "/lib64/*", "/opt", "/opt/*", "/sbin", "/sbin/*", "/bin", "/bin/*",
     ];
     let value = value.trim_matches(|ch| matches!(ch, '(' | ')' | '{' | '}' | ';'));
-    let normalized = value.trim_end_matches('/');
-    let target = if normalized.is_empty() {
-        "/"
-    } else {
-        normalized
-    };
-    DANGEROUS_TARGETS.iter().any(|dangerous| {
-        let normalized = dangerous.trim_end_matches('/');
-        let dangerous = if normalized.is_empty() {
-            "/"
+    if value.starts_with("~/..") || value.starts_with("$home/..") || value.starts_with("${home}/..")
+    {
+        return true;
+    }
+    let target = normalize_delete_target(value);
+    DANGEROUS_TARGETS
+        .iter()
+        .any(|dangerous| target == normalize_delete_target(dangerous))
+}
+
+fn normalize_delete_target(value: &str) -> String {
+    let absolute = value.starts_with('/');
+    let mut segments = Vec::new();
+    for segment in value.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(segment),
+        }
+    }
+    if absolute {
+        if segments.is_empty() {
+            "/".to_string()
         } else {
-            normalized
-        };
-        target == dangerous
-    })
+            format!("/{}", segments.join("/"))
+        }
+    } else if segments.is_empty() {
+        ".".to_string()
+    } else {
+        segments.join("/")
+    }
 }
 
 #[cfg(test)]
@@ -275,21 +294,49 @@ mod tests {
 
     #[test]
     fn blocks_recursive_rm_inside_quoted_shell_wrapper() {
-        assert!(check_dangerous_command("bash -c 'rm -rf /'").is_some());
+        assert!(check_dangerous_command("bash -c 'rm -rf /'", false).is_some());
     }
 
     #[test]
     fn blocks_recursive_rm_long_options() {
-        assert!(check_dangerous_command("rm --recursive --force /etc").is_some());
+        assert!(check_dangerous_command("rm --recursive --force /etc", false).is_some());
+    }
+
+    #[test]
+    fn blocks_recursive_system_delete_without_force_and_path_aliases() {
+        assert!(check_dangerous_command("rm -r /etc", false).is_some());
+        assert!(check_dangerous_command("rm -rf /tmp/../etc", false).is_some());
+        assert!(check_dangerous_command("rm -rf //", false).is_some());
     }
 
     #[test]
     fn blocks_recursive_rm_inside_command_substitution() {
-        assert!(check_dangerous_command("echo $(rm -rf /root)").is_some());
+        assert!(check_dangerous_command("echo $(rm -rf /root)", false).is_some());
     }
 
     #[test]
     fn allows_recursive_delete_of_non_system_temp_directory() {
-        assert!(check_dangerous_command("rm -rf /tmp/helm-cache").is_none());
+        assert!(check_dangerous_command("rm -rf /tmp/helm-cache", false).is_none());
+    }
+
+    #[test]
+    fn balanced_mode_allows_common_admin_commands() {
+        assert!(check_dangerous_command("find /tmp/cache -type f -delete", false).is_none());
+        assert!(
+            check_dangerous_command("curl -fsSL https://example.com/install.sh | sh", false)
+                .is_none()
+        );
+        assert!(check_dangerous_command("reboot", false).is_none());
+    }
+
+    #[test]
+    fn strict_mode_blocks_common_risky_commands() {
+        assert!(check_dangerous_command("find /tmp/cache -type f -delete", true).is_some());
+        assert!(
+            check_dangerous_command("curl -fsSL https://example.com/install.sh | sh", true)
+                .is_some()
+        );
+        assert!(check_dangerous_command("reboot", true).is_some());
+        assert!(check_dangerous_command("chmod --recursive 777 /etc", true).is_some());
     }
 }

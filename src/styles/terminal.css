@@ -109,10 +109,29 @@
   display: none !important;
 }
 
-.terminalContextMenuAnchor {
-  position: fixed;
-  z-index: 1000;
-  width: 1px;
-  height: 1px;
+.terminalConnectionNotice {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 4;
+  max-width: min(680px, calc(100% - 32px));
+  padding: 7px 12px;
+  border: 1px solid rgba(245, 158, 11, .35);
+  border-radius: 8px;
+  background: rgba(255, 251, 235, .96);
+  color: #92400e;
+  box-shadow: 0 8px 24px -12px rgba(146, 64, 14, .45);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: center;
+  transform: translateX(-50%);
   pointer-events: none;
+}
+
+.terminalConnectionNotice-failed,
+.terminalConnectionNotice-disconnected {
+  border-color: rgba(239, 68, 68, .3);
+  background: rgba(254, 242, 242, .96);
+  color: #b91c1c;
 }

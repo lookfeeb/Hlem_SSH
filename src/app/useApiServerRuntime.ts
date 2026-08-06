@@ -45,5 +45,5 @@ export function useApiServerRuntime(configSnapshotRef: MutableRefObject<ConfigSn
 function apiSessionIdsFromSettings(settings: NonNullable<ConfigSnapshot["data"]["settings"]>) {
   return [...(settings.aiApiSessionIds ?? []), settings.aiApiSessionId ?? ""]
     .filter((id): id is string => Boolean(id))
-    .slice(0, 5);
+    .slice(0, 20);
 }

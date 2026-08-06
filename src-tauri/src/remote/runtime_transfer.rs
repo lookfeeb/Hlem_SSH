@@ -208,7 +208,14 @@ impl RemoteRuntime {
         let task_request = request.clone();
         let task_cancel = cancel.clone();
         let task_paused = paused.clone();
+        let (start_sender, start_receiver) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
+            // The record and its JoinHandle must be visible before any progress or
+            // completion event can be emitted. Tiny files can otherwise finish in
+            // the gap between spawn() and insertion and remain queued forever.
+            if start_receiver.await.is_err() {
+                return;
+            }
             let result = run_transfer(
                 &runtime,
                 &app_handle,
@@ -238,6 +245,7 @@ impl RemoteRuntime {
         events::emit(app, events::TRANSFER_PROGRESS, info.clone());
         self.persist_transfer_history_best_effort("start transfer")
             .await;
+        let _ = start_sender.send(());
         Ok(info)
     }
 

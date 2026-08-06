@@ -1,7 +1,7 @@
 /* ─── Workspace ─────────────────────────────────────────────────────────── */
 .workspace {
   display: grid;
-  grid-template-columns: var(--connection-sidebar-width) minmax(0, 1fr) var(--telemetry-sidebar-width);
+  grid-template-columns: var(--connection-sidebar-width) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   height: 100%;
@@ -568,15 +568,37 @@
   box-shadow: 0 18px 40px -28px rgba(15, 23, 42, .32);
 }
 
-.terminalLayer {
+.sessionWorkspaceLayer {
   height: 100%;
   width: 100%;
   position: relative;
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
 }
 
-.terminalSlot {
-  height: 100%;
-  width: 100%;
+.sessionWorkspaceSlot {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--telemetry-sidebar-width);
+  grid-template-rows: minmax(0, 1fr);
+  gap: var(--workspace-gap);
+  min-width: 0;
+  min-height: 0;
+  contain: layout;
+  isolation: isolate;
+  background: var(--bg-base);
+  transform: translateZ(0);
+  backface-visibility: hidden;
+  will-change: transform;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.sessionWorkspaceSlot-active {
+  pointer-events: auto;
+  z-index: 1;
 }
 
 .splitPane {
@@ -1214,9 +1236,11 @@
 }
 
 .networkLatencyBadge {
+  appearance: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   height: 18px;
   line-height: 16px;
   padding: 0 6px;
@@ -1228,6 +1252,29 @@
   border: 1px solid rgba(99, 102, 241, 0.12);
   border-radius: 4px;
   font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: color .16s ease, border-color .16s ease, background .16s ease, transform .16s ease;
+}
+
+.networkLatencyBadge:hover:not(:disabled) {
+  color: #4f46e5;
+  border-color: rgba(99, 102, 241, .32);
+  background: rgba(99, 102, 241, .1);
+  transform: translateY(-1px);
+}
+
+.networkLatencyBadge:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, .32);
+  outline-offset: 2px;
+}
+
+.networkLatencyBadge:disabled {
+  cursor: default;
+  opacity: .62;
+}
+
+.networkLatencyBadge.is-testing {
+  min-width: 58px;
 }
 
 .network-chart-card:hover {

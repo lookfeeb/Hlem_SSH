@@ -4,11 +4,13 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 
-pub const VAULT_DATA_VERSION: u16 = 1;
+pub const VAULT_DATA_VERSION: u16 = 2;
 pub const DEFAULT_GROUP_NAME: &str = "默认分组";
 const GROUP_NAME_MAX_HAN_CHARS: usize = 8;
 const GROUP_NAME_MAX_CHARS: usize = 10;
 const GROUP_CUSTOM_MAX_COUNT: usize = 10;
+const COLLAPSED_CONNECTION_SECTION_MAX_COUNT: usize = 32;
+const CONNECTION_SECTION_ID_MAX_CHARS: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +50,8 @@ pub struct SessionConfig {
     pub favorite: bool,
     #[serde(default)]
     pub last_connected_at: Option<String>,
+    #[serde(default)]
+    pub connection_count: u64,
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -136,6 +140,8 @@ pub struct AppSettings {
     pub ai_api_port: Option<u16>,
     #[serde(default)]
     pub ai_api_auto_start: bool,
+    #[serde(default)]
+    pub collapsed_connection_section_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -144,8 +150,6 @@ pub struct QuickCommand {
     pub id: String,
     pub name: String,
     pub command: String,
-    #[serde(default)]
-    pub click_count: u32,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
@@ -348,6 +352,15 @@ impl VaultData {
     }
 }
 
+pub fn migrate_vault_data(data: &mut VaultData) -> bool {
+    if data.version >= VAULT_DATA_VERSION {
+        return false;
+    }
+    data.version = VAULT_DATA_VERSION;
+    data.touch();
+    true
+}
+
 impl TunnelConfig {
     pub fn new(input: TunnelInput) -> Self {
         let timestamp = now();
@@ -406,6 +419,7 @@ impl SessionConfig {
             group_id: input.group_id,
             favorite: false,
             last_connected_at: None,
+            connection_count: 0,
             host: input.host.trim().to_string(),
             port: input.port,
             username: input.username.trim().to_string(),
@@ -674,6 +688,33 @@ pub fn validate_settings(settings: &AppSettings) -> AppResult<()> {
     }
     validate_backup_settings(&settings.backup)?;
     validate_quick_commands(&settings.quick_commands)?;
+    validate_collapsed_connection_section_ids(&settings.collapsed_connection_section_ids)?;
+    Ok(())
+}
+
+pub fn validate_collapsed_connection_section_ids(section_ids: &[String]) -> AppResult<()> {
+    if section_ids.len() > COLLAPSED_CONNECTION_SECTION_MAX_COUNT {
+        return Err(AppError::InvalidInput(format!(
+            "连接分组折叠状态最多保留 {COLLAPSED_CONNECTION_SECTION_MAX_COUNT} 项"
+        )));
+    }
+    for (index, section_id) in section_ids.iter().enumerate() {
+        let trimmed = section_id.trim();
+        if trimmed.is_empty() {
+            return Err(AppError::InvalidInput("连接分组标识不能为空".to_string()));
+        }
+        if trimmed.chars().count() > CONNECTION_SECTION_ID_MAX_CHARS {
+            return Err(AppError::InvalidInput("连接分组标识过长".to_string()));
+        }
+        if section_ids[..index]
+            .iter()
+            .any(|previous| previous.trim() == trimmed)
+        {
+            return Err(AppError::InvalidInput(
+                "连接分组折叠状态不能重复".to_string(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -913,6 +954,45 @@ mod tests {
         assert_eq!(data.settings, AppSettings::default());
         assert!(data.tunnels.is_empty());
         assert!(data.backup_records.is_empty());
+    }
+
+    #[test]
+    fn removes_legacy_quick_command_click_count_during_migration() {
+        let mut data: VaultData = serde_json::from_str(
+            r#"{
+                "version": 1,
+                "groups": [],
+                "sessions": [],
+                "knownHosts": [],
+                "settings": {
+                    "quickCommands": [{
+                        "id": "legacy-command",
+                        "name": "旧命令",
+                        "command": "echo legacy",
+                        "clickCount": 18
+                    }]
+                },
+                "updatedAt": "2026-01-01T00:00:00Z"
+            }"#,
+        )
+        .unwrap();
+
+        assert!(migrate_vault_data(&mut data));
+        assert_eq!(data.version, VAULT_DATA_VERSION);
+        let value = serde_json::to_value(data).unwrap();
+        assert!(value["settings"]["quickCommands"][0]
+            .get("clickCount")
+            .is_none());
+    }
+
+    #[test]
+    fn deserializes_legacy_session_without_connection_count() {
+        let session = SessionConfig::new(session_input("旧节点"));
+        let mut value = serde_json::to_value(session).unwrap();
+        value.as_object_mut().unwrap().remove("connectionCount");
+
+        let session: SessionConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(session.connection_count, 0);
     }
 
     #[test]

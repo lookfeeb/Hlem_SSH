@@ -1,7 +1,7 @@
 /* ─── App Shell ─────────────────────────────────────────────────────────── */
 .appShell {
   display: grid;
-  grid-template-rows: 40px minmax(0, 1fr) 28px;
+  grid-template-rows: 54px minmax(0, 1fr) 28px;
   width: 100vw;
   height: 100vh;
   min-width: 1180px;

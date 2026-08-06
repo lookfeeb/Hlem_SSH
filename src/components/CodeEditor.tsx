@@ -39,6 +39,7 @@ import { searchKeymap } from "@codemirror/search";
 import { Button, Input, Space, Tooltip } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { readClipboardText, writeClipboardText } from "../lib/clipboard";
+import { detectFileLanguage, type FileLanguageId } from "../lib/fileLanguage";
 import { useTimeoutRegistry } from "../lib/reactLifecycle";
 
 interface CodeEditorProps {
@@ -93,11 +94,12 @@ export function CodeEditor({
       }),
     [],
   );
+  const detectedLanguage = useMemo(() => detectFileLanguage(path, value), [path, value]);
   const extensions = useMemo(
-    () => [languageExtension(path), EditorView.lineWrapping, keymap.of(searchKeymap), undoTracker].filter(isExtension),
-    [path, undoTracker],
+    () => [languageExtension(detectedLanguage.id), EditorView.lineWrapping, keymap.of(searchKeymap), undoTracker].filter(isExtension),
+    [detectedLanguage.id, undoTracker],
   );
-  const canFormatJson = useMemo(() => path.toLowerCase().endsWith(".json"), [path]);
+  const canFormatJson = detectedLanguage.id === "json";
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -340,7 +342,7 @@ export function CodeEditor({
         </div>
       )}
       <div className="codeEditorToolbar">
-        <Space size={6} wrap>
+        <Space size={5} wrap className="codeEditorToolbarGroup codeEditorToolbarSearchGroup">
           <Input
             size="small"
             className="codeEditorInput"
@@ -381,7 +383,7 @@ export function CodeEditor({
             <Button aria-label="跳转到行号" size="small" icon={<AimOutlined />} onClick={goLine} />
           </Tooltip>
         </Space>
-        <Space size={6}>
+        <Space size={5} className="codeEditorToolbarGroup codeEditorToolbarActionGroup">
           <Tooltip title="撤销上一步 (Ctrl+Z)">
             <Button
               aria-label="撤销上一步"
@@ -447,68 +449,40 @@ function isLargeDocument(value: string) {
   return false;
 }
 
-function languageExtension(path: string): Extension | null {
-  const lower = path.toLowerCase();
-  const fileName = lower.split(/[\\/]/).pop() ?? "";
-  const extension = fileName.includes(".") ? fileName.split(".").pop() ?? "" : "";
-
-  // 按完整文件名匹配 dotfile / 无扩展名的特殊文件
-  if (SHELL_FILE_NAMES.has(fileName)) return StreamLanguage.define(shell);
-  if (fileName === "dockerfile" || fileName.startsWith("dockerfile.") || fileName.endsWith(".dockerfile"))
-    return StreamLanguage.define(dockerFile);
-  if (fileName === "makefile" || fileName === "gnumakefile") return StreamLanguage.define(properties);
-  if (fileName === "nginx.conf" || fileName.endsWith(".nginx")) return StreamLanguage.define(nginx);
-
-  // 按扩展名匹配
-  if (extension === "json") return json();
-  if (["js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(extension))
-    return javascript({ jsx: true, typescript: ["ts", "tsx"].includes(extension) });
-  if (["html", "htm", "xml", "svg", "vue"].includes(extension)) return html();
-  if (["css", "scss", "less", "sass"].includes(extension)) return css();
-  if (extension === "py") return python();
-  if (extension === "sql") return sql();
-  if (["yaml", "yml"].includes(extension)) return yaml();
-  if (["sh", "bash", "zsh", "ksh", "fish"].includes(extension)) return StreamLanguage.define(shell);
-  if (["conf", "cfg", "ini", "properties", "env"].includes(extension)) return StreamLanguage.define(properties);
-  if (extension === "toml") return StreamLanguage.define(toml);
-  if (extension === "rb") return StreamLanguage.define(ruby);
-  if (extension === "go") return StreamLanguage.define(go);
-  if (extension === "rs") return StreamLanguage.define(rust);
-  if (extension === "lua") return StreamLanguage.define(lua);
-  if (["pl", "pm"].includes(extension)) return StreamLanguage.define(perl);
-  if (["c", "h"].includes(extension)) return StreamLanguage.define(c);
-  if (["cc", "cpp", "cxx", "hpp", "hxx", "hh"].includes(extension)) return StreamLanguage.define(cpp);
-  if (extension === "java") return StreamLanguage.define(java);
-  if (["cs"].includes(extension)) return StreamLanguage.define(csharp);
-  if (["kt", "kts"].includes(extension)) return StreamLanguage.define(kotlin);
-  if (extension === "scala") return StreamLanguage.define(scala);
-
-  return null;
+function languageExtension(language: FileLanguageId): Extension | null {
+  switch (language) {
+    case "shell": return StreamLanguage.define(shell);
+    case "dockerfile": return StreamLanguage.define(dockerFile);
+    case "makefile":
+    case "configuration": return StreamLanguage.define(properties);
+    case "nginx": return StreamLanguage.define(nginx);
+    case "json": return json();
+    case "javascript": return javascript({ jsx: true });
+    case "typescript": return javascript({ jsx: true, typescript: true });
+    case "markup": return html();
+    case "css": return css();
+    case "python": return python();
+    case "sql": return sql();
+    case "yaml": return yaml();
+    case "toml": return StreamLanguage.define(toml);
+    case "ruby": return StreamLanguage.define(ruby);
+    case "go": return StreamLanguage.define(go);
+    case "rust": return StreamLanguage.define(rust);
+    case "lua": return StreamLanguage.define(lua);
+    case "perl": return StreamLanguage.define(perl);
+    case "c": return StreamLanguage.define(c);
+    case "cpp": return StreamLanguage.define(cpp);
+    case "java": return StreamLanguage.define(java);
+    case "csharp": return StreamLanguage.define(csharp);
+    case "kotlin": return StreamLanguage.define(kotlin);
+    case "scala": return StreamLanguage.define(scala);
+    case "text": return null;
+  }
 }
 
 function isExtension(extension: Extension | null): extension is Extension {
   return extension !== null;
 }
-
-const SHELL_FILE_NAMES = new Set([
-  ".profile",
-  ".bashrc",
-  ".bash_profile",
-  ".bash_aliases",
-  ".bash_logout",
-  ".bash_login",
-  ".zshrc",
-  ".zprofile",
-  ".zshenv",
-  ".zlogin",
-  ".zlogout",
-  ".kshrc",
-  ".inputrc",
-  ".envrc",
-  ".profile.local",
-  ".aliases",
-  ".functions",
-]);
 
 function clampContextMenuPosition(x: number, y: number) {
   const width = 184;

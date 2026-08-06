@@ -1,5 +1,5 @@
 use super::*;
-use crate::api_server::{FileEntry, SessionItem};
+use crate::api_server::FileEntry;
 use bytes::Bytes;
 use futures_util::Stream;
 use std::collections::VecDeque;
@@ -59,36 +59,60 @@ async fn send_download_worker_error(
 
 impl RemoteRuntime {
     /// 由 AI API `connect-session` 调用：根据 vault 中的 SessionConfig 拉起 SSH
-    /// 主连接，连接成功后顺手开 SFTP 子系统（与 UI 行为对齐）。
+    /// 主连接。自动化连接不触发 UI 的终端/SFTP 初始化，避免 IDE/AI 请求
+    /// 与交互界面争用同一条 SSH 连接；文件端点会在真正需要时按需打开 SFTP。
     ///
     /// **幂等**：底层 `connect_inner` 持 session 级锁并复用已存在的连接；
-    /// SFTP 也只在该连接下还没开过的情况下才打开。重复调用是安全的。
-    ///
-    /// SFTP 打开失败不会让整个调用失败——SSH 已经连上，AI 仍然可以走 exec。
-    /// SFTP 失败会落到 log::warn，让运维侧能看到。
+    /// 重复调用会复用已存在的连接。
     pub async fn api_connect_session(
         &self,
         app: &AppHandle,
         session: SessionConfig,
         known_host: Option<KnownHostEntry>,
     ) -> AppResult<ConnectionInfo> {
-        let info = self.connect(app, session, known_host).await?;
+        self.connect_automation(app, session, known_host).await
+    }
 
-        let already_has_sftp = {
-            let sftp_sessions = self.sftp_sessions.read().await;
-            sftp_sessions
+    pub async fn api_session_status(&self, session_id: &str) -> (bool, bool) {
+        let connection_id = {
+            let connections = self.connections.read().await;
+            connections
                 .values()
-                .any(|record| record.info.connection_id == info.connection_id)
+                .find(|record| {
+                    record.info.session_id == session_id
+                        && record.info.status == RuntimeStatus::Connected
+                })
+                .map(|record| record.info.connection_id.clone())
         };
-        if !already_has_sftp {
-            if let Err(error) = self.open_sftp(&info.connection_id).await {
-                log::warn!(
-                    "api_connect_session: SFTP 打开失败（SSH 仍连接）: {}",
-                    error
-                );
-            }
-        }
-        Ok(info)
+        let Some(connection_id) = connection_id else {
+            return (false, false);
+        };
+        let sftp_available = self
+            .sftp_sessions
+            .read()
+            .await
+            .values()
+            .any(|record| record.info.connection_id == connection_id);
+        (true, sftp_available)
+    }
+
+    pub async fn api_ensure_sftp(&self, session_id: &str) -> Result<(), String> {
+        let connection_id = self.find_connection_for_session(session_id).await?;
+        self.open_sftp(&connection_id)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn api_probe_latency(
+        &self,
+        session_id: &str,
+        samples: Option<u8>,
+    ) -> Result<LatencyProbeResult, String> {
+        let connection_id = self.find_connection_for_session(session_id).await?;
+        self.probe_latency(&connection_id, samples)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// 由 AI API `disconnect-session` 调用：按 session_id 反查 connection_id
@@ -102,32 +126,9 @@ impl RemoteRuntime {
             Some(record) => record.info.connection_id,
             None => return Err(format!("会话 {} 当前未连接", session_id)),
         };
-        self.disconnect(app, &connection_id)
+        self.disconnect_automation(app, &connection_id)
             .await
             .map_err(|e| e.to_string())
-    }
-
-    /// List all currently connected sessions with their SFTP availability.
-    pub async fn list_connected_sessions(&self) -> Vec<SessionItem> {
-        let connections = self.connections.read().await;
-        let sftp_sessions = self.sftp_sessions.read().await;
-
-        connections
-            .values()
-            .filter(|record| record.info.status == RuntimeStatus::Connected)
-            .map(|record| {
-                let has_sftp = sftp_sessions
-                    .values()
-                    .any(|sftp| sftp.info.connection_id == record.info.connection_id);
-                SessionItem {
-                    session_id: record.info.session_id.clone(),
-                    name: record.info.username.clone() + "@" + &record.info.host,
-                    host: format!("{}:{}", record.info.host, record.info.port),
-                    connected: true,
-                    sftp_available: has_sftp,
-                }
-            })
-            .collect()
     }
 
     /// Execute a command on a connected session (by session_id). Used by HTTP REST `/api/exec`.
@@ -267,6 +268,10 @@ impl RemoteRuntime {
         )
         .await
         .map_err(|e| e.to_string())?;
+        remote
+            .shutdown()
+            .await
+            .map_err(|e| format!("关闭远程文件失败: {}", e))?;
 
         Ok(bytes_done.load(std::sync::atomic::Ordering::Relaxed))
     }
@@ -303,6 +308,7 @@ impl RemoteRuntime {
                 .cloned()
                 .ok_or_else(|| format!("会话 {} 没有可用的 SFTP 连接", session_id))?
         };
+        sftp_record.wait_for_transfer_pool().await;
 
         // 占用一个 transfer 配额，避免并行 worker 把通道挤爆。
         // 占用持续整个流式响应期间，由 worker 任务持有 permit；最后一个 worker
@@ -359,6 +365,10 @@ impl RemoteRuntime {
                         return;
                     }
                 }
+                if let Err(e) = file.set_read_limit(chunk_len) {
+                    send_download_worker_error(&tx, format!("设置读取范围失败: {}", e)).await;
+                    return;
+                }
 
                 use tokio::io::AsyncReadExt;
                 let mut remaining = chunk_len;
@@ -397,6 +407,9 @@ impl RemoteRuntime {
                             return;
                         }
                     }
+                }
+                if let Err(e) = file.shutdown().await {
+                    send_download_worker_error(&tx, format!("关闭远程文件失败: {}", e)).await;
                 }
             });
 

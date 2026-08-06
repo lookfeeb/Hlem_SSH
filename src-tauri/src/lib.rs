@@ -1,8 +1,11 @@
+#![cfg_attr(target_env = "msvc", allow(linker_messages))]
+
 mod api_server;
 mod backup;
 mod commands;
 mod config;
 mod crypto;
+mod direct_broker;
 mod errors;
 mod events;
 mod http_client;
@@ -13,26 +16,31 @@ use commands::{
     api_server_logs, api_server_regenerate_key, api_server_start, api_server_status,
     api_server_stop, api_server_update_sessions, app_info, backup_record_delete,
     backup_record_restore, backup_records_clear, backup_run_now, check_update, config_snapshot,
-    download_update, forward_list, forward_start_dynamic, forward_start_local,
-    forward_start_remote, forward_stop, group_create, group_delete, group_update, install_update,
-    local_expand_paths, local_path_exists, open_database_dir, open_external_url, open_path_dir,
-    resolve_vault_path, session_clear_recent, session_create, session_delete,
-    session_favorite_update, session_mark_recent, session_update, settings_update, sftp_close,
-    sftp_copy, sftp_create_file, sftp_delete, sftp_exists, sftp_list, sftp_mkdir, sftp_open,
-    sftp_read_text, sftp_rename, sftp_resolve_target, sftp_search, sftp_write_text,
+    connection_section_state_update, download_update, forward_list, forward_start_dynamic,
+    forward_start_local, forward_start_remote, forward_stop, group_create, group_delete,
+    group_update, install_update, latency_probe, local_create_directories, local_expand_paths,
+    local_path_exists, open_database_dir, open_external_url, open_path_dir, resolve_vault_path,
+    session_clear_recent, session_create, session_delete, session_favorite_update,
+    session_mark_recent, session_update, settings_update, sftp_close, sftp_copy, sftp_create_file,
+    sftp_delete, sftp_exists, sftp_list, sftp_mkdir, sftp_open, sftp_read_text, sftp_rename,
+    sftp_resolve_target, sftp_search, sftp_write_text, spawn_api_server_autostart,
     spawn_auto_backup_scheduler, ssh_connect, ssh_disconnect, ssh_exec, ssh_exec_on_connection,
     ssh_trust_host_key, telemetry_snapshot, telemetry_start, telemetry_stop, terminal_close,
-    terminal_open, terminal_resize, terminal_write, transfer_cancel, transfer_download,
-    transfer_history_clear_finished, transfer_history_snapshot, transfer_pause, transfer_remove,
-    transfer_resume, transfer_retry, transfer_upload, tunnel_create, tunnel_delete, tunnel_update,
-    vault_backup_export, vault_backup_import, vault_migrate, vault_needs_migration,
-    vault_skip_migration, AppState,
+    terminal_open, terminal_resize, terminal_start, terminal_write, transfer_cancel,
+    transfer_download, transfer_history_clear_finished, transfer_history_snapshot, transfer_pause,
+    transfer_remove, transfer_resume, transfer_retry, transfer_upload, tunnel_create,
+    tunnel_delete, tunnel_update, vault_backup_export, vault_backup_import, vault_migrate,
+    vault_needs_migration, vault_skip_migration, AppState,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
+
+pub fn run_direct_broker_from_args() -> bool {
+    direct_broker::run_from_args_if_requested()
+}
 
 #[tauri::command]
 fn frontend_ready(app: tauri::AppHandle) {
@@ -84,6 +92,7 @@ pub fn run() {
                 remote.spawn_dead_connection_reaper(app_handle);
             });
             app.manage(state);
+            spawn_api_server_autostart(app.handle().clone());
             spawn_auto_backup_scheduler(app.handle().clone());
             configure_main_window(app);
             create_tray(app)?;
@@ -92,6 +101,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             check_update,
+            local_create_directories,
             local_expand_paths,
             local_path_exists,
             download_update,
@@ -111,6 +121,7 @@ pub fn run() {
             backup_record_delete,
             backup_records_clear,
             settings_update,
+            connection_section_state_update,
             group_create,
             group_update,
             group_delete,
@@ -127,6 +138,7 @@ pub fn run() {
             ssh_disconnect,
             ssh_trust_host_key,
             terminal_open,
+            terminal_start,
             terminal_write,
             terminal_resize,
             terminal_close,
@@ -157,6 +169,7 @@ pub fn run() {
             telemetry_start,
             telemetry_stop,
             telemetry_snapshot,
+            latency_probe,
             forward_start_local,
             forward_start_remote,
             forward_start_dynamic,
@@ -175,6 +188,11 @@ pub fn run() {
 
 fn configure_main_window(app: &mut tauri::App) {
     if let Some(window) = app.get_webview_window("main") {
+        // Debug builds can persist an attached WebView2 inspector between runs.
+        // Its viewport ruler renders a "width x height" overlay during window
+        // changes, so keep the application window free of that developer UI.
+        #[cfg(debug_assertions)]
+        window.close_devtools();
         log_window_result("center main window", window.center());
         let close_window = window.clone();
         window.on_window_event(move |event| {

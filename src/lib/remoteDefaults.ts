@@ -5,6 +5,7 @@ export function createEmptyTelemetry(ip: string): ServerTelemetry {
     ip,
     ipv6: "",
     uptime: "-",
+    uptimeSeconds: null,
     cpu: 0,
     memory: { used: 0, total: 0 },
     swap: { used: 0, total: 0 },

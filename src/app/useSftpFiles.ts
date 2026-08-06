@@ -13,6 +13,12 @@ import {
   sftpUnavailableMessage,
   uploadConcurrency,
 } from "./appHelpers";
+import {
+  buildRemoteDownloadPlan,
+  joinLocalDownloadPath,
+  type RemoteDownloadSelection,
+} from "./remoteDownloadPlan";
+import { resolveSftpSessionTarget } from "./sftpSessionState";
 import type { RemoteSession, TransferInfo } from "../types";
 
 type OpenSftpResult = {
@@ -161,8 +167,8 @@ export function useSftpFiles({
     return request;
   }
 
-  async function changePath(path: string) {
-    const session = activeSession;
+  async function changePath(sessionId: string, path: string) {
+    const session = resolveSession(sessionId);
     if (!session) return;
     const previousPath = normalizeRemotePath(session.currentPath);
     const nextPath = normalizeRemotePath(path);
@@ -186,8 +192,8 @@ export function useSftpFiles({
     }
   }
 
-  async function refreshActiveFiles() {
-    const session = activeSession;
+  async function refreshSessionFiles(sessionId: string) {
+    const session = resolveSession(sessionId);
     if (!session) return;
     if (!session.sftpId) {
       await ensureSessionSftp(session.id, session.connectionId ?? undefined);
@@ -201,8 +207,8 @@ export function useSftpFiles({
     }
   }
 
-  async function runFileOperation(operation: FileOperation) {
-    const session = activeSession;
+  async function runFileOperation(sessionId: string, operation: FileOperation) {
+    const session = resolveSession(sessionId);
     if (!session?.sftpId) throw new Error("当前连接不可用");
     const sftpId = session.sftpId;
     switch (operation.kind) {
@@ -245,8 +251,8 @@ export function useSftpFiles({
     }
   }
 
-  async function uploadLocalFiles(localPaths: string[], targetDirectory: string) {
-    const session = activeSession;
+  async function uploadLocalFiles(sessionId: string, localPaths: string[], targetDirectory: string) {
+    const session = resolveSession(sessionId);
     if (!session?.sftpId) throw new Error("当前 SFTP 不可用");
     const sftpId = session.sftpId;
     const expanded = await appApi.expandLocalPaths(localPaths);
@@ -284,9 +290,10 @@ export function useSftpFiles({
     if (queuedTransfers.length > 1) openTransferCenter();
   }
 
-  async function downloadRemoteFiles(files: { remotePath: string; fileName: string }[]) {
-    const session = activeSession;
+  async function downloadRemoteFiles(sessionId: string, files: RemoteDownloadSelection[]) {
+    const session = resolveSession(sessionId);
     if (!session?.sftpId) throw new Error("当前 SFTP 不可用");
+    const sftpId = session.sftpId;
     const { open } = await import("@tauri-apps/plugin-dialog");
     const dir = await open({
       title: "选择下载目录",
@@ -295,19 +302,51 @@ export function useSftpFiles({
     });
     if (typeof dir !== "string") return;
     if (!mountedRef.current) return;
-    if (!isSessionSftpCurrent(session.id, session.sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
+    if (!isSessionSftpCurrent(sessionId, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
     lastDownloadDirRef.current = dir;
-    const localTargets = files.map((file) => `${dir}/${file.fileName}`);
-    const existingLocalTargets = (await Promise.all(localTargets.map(async (path) => (await appApi.localPathExists(path)) ? path : null))).filter((path): path is string => Boolean(path));
+
+    const plan = await buildRemoteDownloadPlan(files, async (remotePath) => {
+      if (!isSessionSftpCurrent(sessionId, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
+      return listFiles(sftpId, remotePath);
+    });
+    if (!isSessionSftpCurrent(sessionId, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
+
+    const localTargets = plan.files.map((file) => joinLocalDownloadPath(dir, file.relativePath));
+    const existingLocalTargets = (await runUploadQueue(
+      localTargets,
+      uploadConcurrency(localTargets.length),
+      async (path) => (await appApi.localPathExists(path)) ? path : null,
+    )).filter((path): path is string => Boolean(path));
     if (existingLocalTargets.length > 0 && !(await confirmOverwrite(`将覆盖 ${existingLocalTargets.length} 个本地文件，是否继续？`))) return;
-    for (const file of files) {
-      if (!isSessionSftpCurrent(session.id, session.sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
-      const localPath = `${lastDownloadDirRef.current}/${file.fileName}`;
-      const transfer = await remoteApi.download(session.sftpId, file.remotePath, localPath, true);
-      if (!mountedRef.current) return;
-      upsertTransfer(transfer);
+
+    if (!isSessionSftpCurrent(sessionId, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
+    const localDirectories = plan.directories.map((relativePath) => joinLocalDownloadPath(dir, relativePath));
+    if (localDirectories.length > 0) await appApi.createLocalDirectories(localDirectories);
+
+    const failures: { relativePath: string; error: unknown }[] = [];
+    let queuedCount = 0;
+    await runUploadQueue(
+      plan.files,
+      uploadConcurrency(plan.files.length),
+      async (file) => {
+        try {
+          if (!isSessionSftpCurrent(sessionId, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
+          const localPath = joinLocalDownloadPath(dir, file.relativePath);
+          const transfer = await remoteApi.download(sftpId, file.remotePath, localPath, true);
+          queuedCount += 1;
+          if (mountedRef.current) upsertTransfer(transfer);
+        } catch (error) {
+          failures.push({ relativePath: file.relativePath, error });
+        }
+      },
+    );
+    if (queuedCount > 0) openTransferCenter();
+    if (failures.length > 0) {
+      const first = failures[0];
+      throw new Error(
+        `${failures.length} 个下载任务未能启动；${first.relativePath}：${getErrorMessage(first.error)}`,
+      );
     }
-    openTransferCenter();
   }
 
   function isSessionSftpCurrent(sessionId: string, sftpId: string) {
@@ -322,11 +361,7 @@ export function useSftpFiles({
   }
 
   function resolveSession(sessionId?: string) {
-    if (sessionId) {
-      const session = sessionsRef.current.find((item) => item.id === sessionId);
-      if (session) return session;
-    }
-    return activeSession;
+    return resolveSftpSessionTarget(sessionsRef.current, sessionId, activeSession);
   }
 
   async function readRemoteText(path: string, sessionId?: string) {
@@ -380,10 +415,9 @@ export function useSftpFiles({
     );
   }
 
-  async function searchRemoteFile(query: string) {
-    const session = activeSession;
+  async function searchRemoteFile(sessionId: string, query: string) {
+    const session = resolveSession(sessionId);
     if (!session?.sftpId) return null;
-    const sessionId = session.id;
     const sftpId = session.sftpId;
     const targetPath = await remoteApi.searchFile(sftpId, remoteSessionPath(session), query);
     const currentSession = sessionsRef.current.find((item) => item.id === sessionId);
@@ -408,8 +442,8 @@ export function useSftpFiles({
     return targetPath;
   }
 
-  async function listRemoteDirectory(path: string) {
-    const session = activeSession;
+  async function listRemoteDirectory(sessionId: string, path: string) {
+    const session = resolveSession(sessionId);
     if (!session?.sftpId) throw new Error("当前 SFTP 不可用");
     return listFiles(session.sftpId, path);
   }
@@ -417,7 +451,7 @@ export function useSftpFiles({
   return {
     ensureSessionSftp,
     changePath,
-    refreshActiveFiles,
+    refreshSessionFiles,
     runFileOperation,
     uploadLocalFiles,
     downloadRemoteFiles,

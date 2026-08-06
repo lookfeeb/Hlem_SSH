@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { comparePathName } from "../../lib/fileClassify";
 import { getParentPath, getPathSegments, joinPath, normalizePath } from "../../lib/path";
 import type { RemoteFileEntry } from "../../types";
-import { getDirectoryAncestorPaths, uniqueKeys } from "./directoryViewState";
+import { getDirectoryParentPaths, uniqueKeys } from "./directoryViewState";
 
 export interface DirectoryTreeProps {
   canUseFiles: boolean;
@@ -111,7 +111,7 @@ export function DirectoryTree({
 }
 
 /** Also used by FileDialogs for the copy/move tree */
-export { buildTreeData, getDirectoryAncestorPaths, uniqueKeys };
+export { buildTreeData, getDirectoryParentPaths, uniqueKeys };
 
 function buildTreeData(
   entriesByPath: Record<string, RemoteFileEntry[]>,

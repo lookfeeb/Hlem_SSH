@@ -3,19 +3,26 @@ import {
   ArrowUpOutlined,
   ClockCircleOutlined,
   FileSearchOutlined,
+  LoadingOutlined,
   MonitorOutlined,
 } from "@ant-design/icons";
-import { Popover } from "antd";
-import { useEffect, useState, useRef } from "react";
+import { Popover, message } from "antd";
+import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { remoteApi } from "../api/remoteApi";
 import { writeClipboardText } from "../lib/clipboard";
-import { formatElapsedSince } from "../lib/duration";
+import { getErrorMessage } from "../lib/configMapping";
+import { formatElapsedSince, formatUptimeSeconds } from "../lib/duration";
 import { formatBytes, percent } from "../lib/format";
 import { createEmptyTelemetry } from "../lib/remoteDefaults";
 import { useMountedRef, useTimeoutRegistry } from "../lib/reactLifecycle";
-import type { DiskMetric, NetworkInterfaceMetric, RemoteSession } from "../types";
+import type { DiskMetric, LatencyProbeResult, NetworkInterfaceMetric, RemoteSession } from "../types";
 
 interface TelemetrySidebarProps {
   session: RemoteSession;
+}
+
+export interface TelemetrySidebarHandle {
+  setActive: (active: boolean) => void;
 }
 
 function formatNetworkRate(value: number) {
@@ -58,11 +65,24 @@ function formatCompactUsage(metric: { used: number; total: number }): string {
   return `${usedVal}/${totalVal} ${units[unitIndex]}`;
 }
 
-export function TelemetrySidebar({ session }: TelemetrySidebarProps) {
+const TelemetrySidebarView = forwardRef<TelemetrySidebarHandle, TelemetrySidebarProps>(function TelemetrySidebarView(
+  { session },
+  ref,
+) {
   const [copiedKey, setCopiedKey] = useState("");
-  const [now, setNow] = useState(() => Date.now());
+  const [latencyProbe, setLatencyProbe] = useState<LatencyProbeResult | null>(null);
+  const [latencyTesting, setLatencyTesting] = useState(false);
+  const [networkPopoverOpen, setNetworkPopoverOpen] = useState(false);
   const mountedRef = useMountedRef();
   const setSafeTimeout = useTimeoutRegistry();
+  const activeRef = useRef(false);
+  const networkPopoverOpenRef = useRef(false);
+  const networkChartRef = useRef<NetworkChartHandle>(null);
+  const serverUptimeRef = useRef<HTMLSpanElement | null>(null);
+  const connectedDurationRef = useRef<HTMLSpanElement | null>(null);
+  const durationTimerRef = useRef<number | null>(null);
+  const serverUptimeStateRef = useRef({ connected: false, seconds: null as number | null, sampledAt: Date.now() });
+  const connectionDurationStateRef = useRef({ connected: false, connectedAt: null as string | null | undefined });
   const isConnected = session.state === "connected";
   const telemetry = isConnected ? session.telemetry : createEmptyTelemetry(session.host);
   const networkInterfaces = isConnected
@@ -76,15 +96,84 @@ export function TelemetrySidebar({ session }: TelemetrySidebarProps) {
   const diskText = isConnected && diskUsage.total > 0 ? formatCompactUsage(diskUsage) : "-";
   const uploadText = formatNetworkRate(isConnected ? telemetry.network.uploadKbps : 0);
   const downloadText = formatNetworkRate(isConnected ? telemetry.network.downloadKbps : 0);
-  const latencyText = formatLatency(isConnected ? telemetry.network.latencyMs : 0);
+  const activeLatencyProbe = latencyProbe && latencyProbe.connectionId === session.connectionId
+    ? latencyProbe
+    : null;
+  const measuredLatency = activeLatencyProbe
+    ? activeLatencyProbe.medianMs
+    : telemetry.network.latencyMs;
+  const latencyText = formatLatency(isConnected ? measuredLatency : 0);
   const sshVersionText = isConnected ? session.sshVersion || "-" : "-";
-  const connectedDurationText = isConnected ? formatElapsedSince(session.connectedAt, now) : "-";
   const ipv6Text = isConnected && telemetry.ipv6 && telemetry.ipv6 !== "//" ? telemetry.ipv6 : "//";
+  const uptimeSeconds = isConnected && typeof telemetry.uptimeSeconds === "number" && Number.isFinite(telemetry.uptimeSeconds)
+    ? Math.max(0, telemetry.uptimeSeconds)
+    : null;
+  connectionDurationStateRef.current = { connected: isConnected, connectedAt: session.connectedAt };
 
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
+    updateDurationValues();
+  }, [isConnected, session.connectedAt]);
+
+  useEffect(() => {
+    serverUptimeStateRef.current = {
+      connected: isConnected,
+      seconds: uptimeSeconds,
+      sampledAt: Date.now(),
+    };
+    updateDurationValues();
+  }, [isConnected, session.connectionId, uptimeSeconds]);
+
+  useEffect(() => () => stopDurationTimer(), []);
+
+  useImperativeHandle(ref, () => ({
+    setActive(nextActive) {
+      if (activeRef.current === nextActive) return;
+      activeRef.current = nextActive;
+      networkChartRef.current?.setActive(nextActive);
+      if (nextActive) {
+        updateDurationValues();
+        startDurationTimer();
+        return;
+      }
+      stopDurationTimer();
+      if (networkPopoverOpenRef.current) {
+        networkPopoverOpenRef.current = false;
+        setNetworkPopoverOpen(false);
+      }
+    },
+  }), []);
+
+  useEffect(() => {
+    setLatencyProbe(null);
+    setLatencyTesting(false);
+  }, [session.connectionId]);
+
+  async function testLatency() {
+    if (!session.connectionId || latencyTesting) return;
+    const connectionId = session.connectionId;
+    setLatencyTesting(true);
+    try {
+      const result = await remoteApi.probeLatency(connectionId, 5);
+      if (!mountedRef.current || session.connectionId !== connectionId) return;
+      setLatencyProbe(result);
+      message.success(
+        `SSH 延迟 ${formatLatency(result.medianMs)}（最低 ${formatLatency(result.minMs)}，抖动 ${result.jitterMs.toFixed(1)} ms）`,
+      );
+    } catch (error) {
+      if (mountedRef.current) message.error(`延迟测试失败：${getErrorMessage(error)}`);
+    } finally {
+      if (mountedRef.current) setLatencyTesting(false);
+    }
+  }
+
+  function latencyTitle() {
+    if (!isConnected) return "连接后可测试 SSH 往返延迟";
+    if (latencyTesting) return "正在进行 5 次 SSH 往返测试";
+    if (activeLatencyProbe) {
+      return `点击重新测试；最低 ${formatLatency(activeLatencyProbe.minMs)}，平均 ${formatLatency(activeLatencyProbe.averageMs)}，最高 ${formatLatency(activeLatencyProbe.maxMs)}，抖动 ${activeLatencyProbe.jitterMs.toFixed(1)} ms`;
+    }
+    return "点击测试 HelM 到 SSH 终端的真实往返延迟";
+  }
 
   async function copyValue(key: string, value: string) {
     if (!value || value === "-" || value === "//") return;
@@ -92,6 +181,37 @@ export function TelemetrySidebar({ session }: TelemetrySidebarProps) {
     if (!mountedRef.current) return;
     setCopiedKey(key);
     setSafeTimeout(() => setCopiedKey(""), 900);
+  }
+
+  function updateDurationValues() {
+    const now = Date.now();
+    const connectionElement = connectedDurationRef.current;
+    if (connectionElement) {
+      const state = connectionDurationStateRef.current;
+      const nextText = state.connected ? formatElapsedSince(state.connectedAt, now) : "-";
+      if (connectionElement.textContent !== nextText) connectionElement.textContent = nextText;
+    }
+
+    const uptimeElement = serverUptimeRef.current;
+    if (uptimeElement) {
+      const state = serverUptimeStateRef.current;
+      const elapsedSeconds = Math.max(0, Math.floor((now - state.sampledAt) / 1000));
+      const nextText = state.connected && state.seconds !== null
+        ? formatUptimeSeconds(state.seconds + elapsedSeconds)
+        : "-";
+      if (uptimeElement.textContent !== nextText) uptimeElement.textContent = nextText;
+    }
+  }
+
+  function startDurationTimer() {
+    if (durationTimerRef.current !== null) return;
+    durationTimerRef.current = window.setInterval(updateDurationValues, 1000);
+  }
+
+  function stopDurationTimer() {
+    if (durationTimerRef.current === null) return;
+    window.clearInterval(durationTimerRef.current);
+    durationTimerRef.current = null;
   }
 
   return (
@@ -113,11 +233,22 @@ export function TelemetrySidebar({ session }: TelemetrySidebarProps) {
             <div className="network-chart-header">
               <div className="network-chart-header-left">
                 <span>网络</span>
-                <span className="networkLatencyBadge" title="本地到终端延迟">
-                  {latencyText}
-                </span>
+                <button
+                  type="button"
+                  className={`networkLatencyBadge${latencyTesting ? " is-testing" : ""}`}
+                  title={latencyTitle()}
+                  disabled={!isConnected || !session.connectionId || latencyTesting}
+                  onClick={() => void testLatency()}
+                >
+                  {latencyTesting ? <><LoadingOutlined /> 测试中</> : latencyText}
+                </button>
               </div>
               <Popover
+                open={networkPopoverOpen}
+                onOpenChange={(open) => {
+                  networkPopoverOpenRef.current = open;
+                  setNetworkPopoverOpen(open);
+                }}
                 trigger="click"
                 placement="bottomRight"
                 classNames={{ root: "networkInterfacesPopover" }}
@@ -147,6 +278,7 @@ export function TelemetrySidebar({ session }: TelemetrySidebarProps) {
               </div>
             </div>
             <NetworkChart
+              ref={networkChartRef}
               uploadKbps={isConnected ? telemetry.network.uploadKbps : 0}
               downloadKbps={isConnected ? telemetry.network.downloadKbps : 0}
             />
@@ -197,24 +329,37 @@ export function TelemetrySidebar({ session }: TelemetrySidebarProps) {
           <div className="connectionInfoItem">
             <span className="connection-node-dot" />
             <span className="connectionInfoLabel">运行时间</span>
-            <span className="connectionInfoValue" title={telemetry.uptime || undefined}>
+            <span className="connectionInfoValue" title="服务器累计运行时间（实时）">
               <ClockCircleOutlined />
-              <span>{telemetry.uptime || "-"}</span>
+              <span ref={serverUptimeRef}>{uptimeSeconds === null ? "-" : formatUptimeSeconds(uptimeSeconds)}</span>
             </span>
           </div>
           <div className="connectionInfoItem">
             <span className="connection-node-dot" />
             <span className="connectionInfoLabel">连接时长</span>
-            <span className="connectionInfoValue" title={connectedDurationText}>
+            <span className="connectionInfoValue" title="当前 SSH 连接持续时间">
               <ClockCircleOutlined />
-              {connectedDurationText}
+              <span ref={connectedDurationRef}>
+                {isConnected ? formatElapsedSince(session.connectedAt, Date.now()) : "-"}
+              </span>
             </span>
           </div>
         </div>
       </section>
     </aside>
   );
-}
+});
+
+export const TelemetrySidebar = memo(TelemetrySidebarView, (previous, next) => (
+  previous.session.id === next.session.id
+  && previous.session.state === next.session.state
+  && previous.session.connectionId === next.session.connectionId
+  && previous.session.connectedAt === next.session.connectedAt
+  && previous.session.host === next.session.host
+  && previous.session.username === next.session.username
+  && previous.session.sshVersion === next.session.sshVersion
+  && previous.session.telemetry === next.session.telemetry
+));
 
 function normalizedNetworkInterfaces(
   interfaces: NetworkInterfaceMetric[] | undefined,
@@ -349,16 +494,25 @@ function RingGauge({ percentValue, label, value, tone }: { percentValue: number;
 }
 
 // 实时网络曲线图组件，用于缓存并绘制最近 60 次采样点的上传与下载速率
-function NetworkChart({
-  uploadKbps,
-  downloadKbps,
-}: {
+interface NetworkChartHandle {
+  setActive: (active: boolean) => void;
+}
+
+const NetworkChart = forwardRef<NetworkChartHandle, {
   uploadKbps: number;
   downloadKbps: number;
-}) {
+}>(function NetworkChart({ uploadKbps, downloadKbps }, ref) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const uploadHistory = useRef<number[]>(Array(60).fill(0));
   const downloadHistory = useRef<number[]>(Array(60).fill(0));
+  const activeRef = useRef(false);
+
+  useImperativeHandle(ref, () => ({
+    setActive(nextActive) {
+      activeRef.current = nextActive;
+      if (nextActive) drawNetworkHistory(canvasRef.current, uploadHistory.current, downloadHistory.current);
+    },
+  }), []);
 
   useEffect(() => {
     uploadHistory.current.push(uploadKbps);
@@ -366,20 +520,30 @@ function NetworkChart({
     downloadHistory.current.push(downloadKbps);
     downloadHistory.current.shift();
 
-    const canvas = canvasRef.current;
-    if (canvas) {
-      const ups = uploadHistory.current;
-      const dws = downloadHistory.current;
-      const max = Math.max(...ups, ...dws, 10);
-      drawNetworkCanvas(canvas, ups, dws, max);
-    }
+    if (activeRef.current) drawNetworkHistory(canvasRef.current, uploadHistory.current, downloadHistory.current);
   }, [uploadKbps, downloadKbps]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const container = canvas?.parentElement;
+    if (!canvas || !container) return;
+    const observer = new ResizeObserver(() => {
+      if (activeRef.current) drawNetworkHistory(canvas, uploadHistory.current, downloadHistory.current);
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
 
   return (
     <div className="network-chart-container">
       <canvas ref={canvasRef} className="network-chart-canvas" width={240} height={80} />
     </div>
   );
+});
+
+function drawNetworkHistory(canvas: HTMLCanvasElement | null, uploads: number[], downloads: number[]) {
+  if (!canvas) return;
+  drawNetworkCanvas(canvas, uploads, downloads, Math.max(...uploads, ...downloads, 10));
 }
 
 // 高清晰度贝塞尔曲线网络 Canvas 渲染器

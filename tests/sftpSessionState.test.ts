@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { planSftpInitialization } from "../src/app/sftpSessionState";
+import { planSftpInitialization, resolveSftpSessionTarget } from "../src/app/sftpSessionState";
 
 type Candidate = Parameters<typeof planSftpInitialization>[0][number];
 
@@ -63,4 +63,13 @@ test("closed connections are removed from the live key set", () => {
 
   assert.equal(plan.liveConnectionKeys.size, 0);
   assert.equal(plan.targets.length, 0);
+});
+
+test("an explicit SFTP action never falls through to the active tab", () => {
+  const active = candidate({ id: "session-a", sftpId: "sftp-a" });
+  const target = candidate({ id: "session-b", sftpId: "sftp-b" });
+
+  assert.equal(resolveSftpSessionTarget([active, target], "session-b", active), target);
+  assert.equal(resolveSftpSessionTarget([active, target], "missing-session", active), undefined);
+  assert.equal(resolveSftpSessionTarget([active, target], undefined, active), active);
 });

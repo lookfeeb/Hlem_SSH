@@ -1,6 +1,7 @@
 import {
   ArrowUpOutlined,
   CodeOutlined,
+  InfoCircleOutlined,
   LoadingOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -12,7 +13,18 @@ import {
 import { App as AntdApp, Button, Dropdown, Form, Input, Modal, Table, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type SetStateAction } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type SetStateAction,
+} from "react";
 import { writeClipboardText } from "../lib/clipboard";
 import { formatFileSize } from "../lib/format";
 import { getErrorMessage } from "../lib/configMapping";
@@ -23,27 +35,28 @@ import { isTauriRuntime } from "../api/runtime";
 import { useMountedRef } from "../lib/reactLifecycle";
 import { sortRemoteEntries, compareEntryGroup, compareEntryName, formatBeijingModifiedTime } from "../lib/fileClassify";
 import { fileCategoryMeta } from "./fileManager/fileIcons";
-import { QuickCommandTopArea } from "./fileManager/QuickCommandPanel";
+import { QuickCommandDock, QuickCommandTopArea } from "./fileManager/QuickCommandPanel";
 import { FileDialogs, operationLabel, type FileDialogState } from "./fileManager/FileDialogs";
-import { DirectoryTree, buildTreeData, getDirectoryAncestorPaths, uniqueKeys } from "./fileManager/DirectoryTree";
+import { DirectoryTree, buildTreeData, getDirectoryParentPaths, uniqueKeys } from "./fileManager/DirectoryTree";
+import { contextMenuPositionInContainer } from "./fileManager/contextMenuPosition";
+import type { RemoteDownloadSelection } from "../app/remoteDownloadPlan";
 import {
   filesBelongToDirectory,
   loadDirectoryViewState,
   saveDirectoryViewState,
-  type DirectoryViewState,
 } from "./fileManager/directoryViewState";
 import type { QuickCommand, RemoteFileEntry, RemoteSession } from "../types";
 
-
 interface FileManagerProps {
   session: RemoteSession;
+  active: boolean;
   onPathChange: (path: string) => void;
   onRefresh: () => Promise<void>;
   onRemoteSearch: (query: string) => Promise<string | null>;
   onListDirectory: (path: string) => Promise<RemoteFileEntry[]>;
   onFileOperation: (operation: FileOperation) => Promise<void>;
   onUploadFiles: (localPaths: string[], targetDirectory: string) => Promise<void>;
-  onDownloadFiles: (files: { remotePath: string; fileName: string }[]) => Promise<void>;
+  onDownloadFiles: (files: RemoteDownloadSelection[]) => Promise<void>;
   onReadText: (path: string, sessionId?: string) => Promise<string>;
   onWriteText: (path: string, content: string, sessionId?: string) => Promise<void>;
   onSendCommand: (command: string) => Promise<void>;
@@ -61,7 +74,7 @@ export type FileOperation =
   | { kind: "deleteMany"; sourcePaths: string[] };
 
 type ContextMenuState = { entry: RemoteFileEntry; x: number; y: number };
-type DetachedEditorTabPayload = { path: string; content: string; sessionId: string; sessionName: string };
+type DetachedEditorTabPayload = { path: string; content: string; sessionId: string; sessionName: string; sessionHost: string };
 
 const DETACHED_EDITOR_WINDOW_LABEL = "editor-global";
 
@@ -124,6 +137,19 @@ const TYPE_COLUMN_LABEL_MIN_CHARS = 5;
 const TYPE_COLUMN_CELL_CHROME = 34;
 
 const COLUMN_WIDTHS_KEY = "helm:fileColumnWidths";
+const QUICK_COMMAND_DOCK_WIDTH_KEY = "helm:quickCommandDockWidth";
+const QUICK_COMMAND_DOCK_DEFAULT_WIDTH = 340;
+const QUICK_COMMAND_DOCK_MIN_WIDTH = 286;
+const QUICK_COMMAND_DOCK_MAX_WIDTH = 440;
+
+function normalizeQuickCommandDockWidth(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return QUICK_COMMAND_DOCK_DEFAULT_WIDTH;
+  return Math.min(QUICK_COMMAND_DOCK_MAX_WIDTH, Math.max(QUICK_COMMAND_DOCK_MIN_WIDTH, Math.round(value)));
+}
+
+function loadQuickCommandDockWidth() {
+  return readJsonStorage<number>(QUICK_COMMAND_DOCK_WIDTH_KEY, QUICK_COMMAND_DOCK_DEFAULT_WIDTH, normalizeQuickCommandDockWidth);
+}
 
 function loadColumnWidths(): Record<string, number> {
   return readJsonStorage<Record<string, number>>(COLUMN_WIDTHS_KEY, { ...DEFAULT_COLUMN_WIDTHS }, normalizeColumnWidths);
@@ -207,8 +233,76 @@ function postEditorMessage(channel: BroadcastChannel, message: EditorChannelMess
   }
 }
 
-export function FileManager({
+function editorSessionHost(session: RemoteSession) {
+  return [session.telemetry.ip, session.telemetry.ipv6, session.host]
+    .map((value) => value.trim())
+    .find((value) => value && value !== "-" && value !== "未知") ?? "";
+}
+
+type EditorWriteText = (path: string, content: string, sessionId?: string) => Promise<void>;
+
+let sharedDetachedEditorChannel: BroadcastChannel | null = null;
+let sharedDetachedEditorWindow: Window | null = null;
+let sharedEditorWriteText: EditorWriteText | null = null;
+
+function closeDetachedEditorChannel(channel?: BroadcastChannel) {
+  if (channel && sharedDetachedEditorChannel !== channel) return;
+  const target = channel ?? sharedDetachedEditorChannel;
+  if (!target) return;
+  target.close();
+  if (sharedDetachedEditorChannel === target) sharedDetachedEditorChannel = null;
+  sharedDetachedEditorWindow = null;
+  sharedEditorWriteText = null;
+}
+
+function createDetachedEditorChannel(initialTab: DetachedEditorTabPayload, writeText: EditorWriteText) {
+  const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
+  sharedDetachedEditorChannel = channel;
+  sharedEditorWriteText = writeText;
+  channel.onmessage = (event: MessageEvent<EditorChannelMessage>) => {
+    const payload = event.data;
+    if (payload.type === "ready") {
+      postEditorMessage(channel, { type: "init", ...initialTab });
+    }
+    if (payload.type === "save") {
+      const save = sharedEditorWriteText;
+      if (!save) {
+        postEditorMessage(channel, {
+          type: "error",
+          message: "主窗口暂时无法处理文件保存",
+          path: payload.path,
+          sessionId: payload.sessionId,
+          saveId: payload.saveId,
+        });
+        return;
+      }
+      void save(payload.path, payload.content, payload.sessionId)
+        .then(() => {
+          if (sharedDetachedEditorChannel === channel) {
+            postEditorMessage(channel, { type: "saved", path: payload.path, sessionId: payload.sessionId, saveId: payload.saveId, content: payload.content });
+          }
+        })
+        .catch((error) => {
+          if (sharedDetachedEditorChannel === channel) {
+            postEditorMessage(channel, { type: "error", message: getErrorMessage(error), path: payload.path, sessionId: payload.sessionId, saveId: payload.saveId });
+          }
+        });
+    }
+    if (payload.type === "close") {
+      closeDetachedEditorChannel(channel);
+    }
+  };
+  return channel;
+}
+
+function getOrCreateDetachedEditorChannel(initialTab: DetachedEditorTabPayload, writeText: EditorWriteText) {
+  sharedEditorWriteText = writeText;
+  return sharedDetachedEditorChannel ?? createDetachedEditorChannel(initialTab, writeText);
+}
+
+function FileManagerView({
   session,
+  active,
   onPathChange,
   onRefresh,
   onRemoteSearch,
@@ -224,6 +318,9 @@ export function FileManager({
   filesLoading = false,
 }: FileManagerProps) {
   const { message, modal } = AntdApp.useApp();
+  const quickCommandDockId = `quick-command-dock-${useId().replace(/:/g, "")}`;
+  const sessionEditorName = session.name || session.host;
+  const sessionEditorHost = editorSessionHost(session);
   const [searchText, setSearchText] = useState("");
   const [searching, setSearching] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -245,6 +342,8 @@ export function FileManager({
   const [commandEditingId, setCommandEditingId] = useState<string | null>(null);
   const [commandName, setCommandName] = useState("");
   const [commandValue, setCommandValue] = useState("");
+  const [quickCommandsOpen, setQuickCommandsOpen] = useState(false);
+  const [quickCommandDockWidth, setQuickCommandDockWidth] = useState(loadQuickCommandDockWidth);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => ({ ...inMemoryColumnWidths }));
   const [tableSurfaceWidth, setTableSurfaceWidth] = useState(0);
   const columnWidthsRef = useRef(columnWidths);
@@ -258,16 +357,35 @@ export function FileManager({
   const directoryExpandedKeysRef = useRef(directoryExpandedKeys);
   sessionIdRef.current = session.id;
   useEffect(() => {
+    const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
+    const publishMetadata = () => postEditorMessage(channel, {
+      type: "sessionMetadata",
+      sessionId: session.id,
+      sessionName: sessionEditorName,
+      sessionHost: sessionEditorHost,
+    });
+    channel.onmessage = (event: MessageEvent<EditorChannelMessage>) => {
+      const payload = event.data;
+      if (payload.type === "requestSessionMetadata" && payload.sessionIds.includes(session.id)) {
+        publishMetadata();
+      }
+    };
+    publishMetadata();
+    return () => channel.close();
+  }, [session.id, sessionEditorHost, sessionEditorName]);
+  useEffect(() => {
     columnWidthsRef.current = columnWidths;
     inMemoryColumnWidths = columnWidths;
     writeJsonStorage(COLUMN_WIDTHS_KEY, columnWidths);
   }, [columnWidths]);
+  useEffect(() => {
+    writeJsonStorage(QUICK_COMMAND_DOCK_WIDTH_KEY, quickCommandDockWidth);
+  }, [quickCommandDockWidth]);
   const contentRef = useRef<HTMLDivElement>(null);
   const tableSurfaceRef = useRef<HTMLDivElement>(null);
   const searchSeq = useRef(0);
-  const detachedEditorsRef = useRef<Map<string, BroadcastChannel>>(new Map());
-  const detachedEditorWindowRef = useRef<Window | null>(null);
   const columnResizeCleanupRef = useRef<(() => void) | null>(null);
+  const quickCommandDockResizeCleanupRef = useRef<(() => void) | null>(null);
 
   function persistDirectoryViewState(
     entries = directoryEntriesRef.current,
@@ -362,6 +480,14 @@ export function FileManager({
         .sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? "")),
     [quickCommands],
   );
+  const quickCommandHiddenColumnKeys = useMemo(() => {
+    const hidden = new Set<string>();
+    if (!quickCommandsOpen || tableSurfaceWidth <= 0) return hidden;
+    if (tableSurfaceWidth < 720) hidden.add("owner");
+    if (tableSurfaceWidth < 620) hidden.add("permissions");
+    if (tableSurfaceWidth < 520) hidden.add("type");
+    return hidden;
+  }, [quickCommandsOpen, tableSurfaceWidth]);
 
   const handleColumnResizeStart = useCallback((key: string, startX: number) => {
     columnResizeCleanupRef.current?.();
@@ -382,9 +508,47 @@ export function FileManager({
     columnResizeCleanupRef.current = cleanup;
   }, []);
 
+  const quickCommandDockMaximumWidth = useCallback(() => {
+    const contentWidth = contentRef.current?.getBoundingClientRect().width ?? 0;
+    if (contentWidth <= 0) return QUICK_COMMAND_DOCK_MAX_WIDTH;
+    return Math.max(
+      QUICK_COMMAND_DOCK_MIN_WIDTH,
+      Math.min(QUICK_COMMAND_DOCK_MAX_WIDTH, Math.floor(contentWidth * .38)),
+    );
+  }, []);
+
+  const resizeQuickCommandDock = useCallback((width: number) => {
+    const maximumWidth = quickCommandDockMaximumWidth();
+    setQuickCommandDockWidth(Math.min(maximumWidth, Math.max(QUICK_COMMAND_DOCK_MIN_WIDTH, Math.round(width))));
+  }, [quickCommandDockMaximumWidth]);
+
+  const handleQuickCommandDockResizeStart = useCallback((startX: number) => {
+    quickCommandDockResizeCleanupRef.current?.();
+    const startWidth = quickCommandDockWidth;
+
+    function onMove(event: MouseEvent) {
+      resizeQuickCommandDock(startWidth + startX - event.clientX);
+    }
+
+    const cleanup = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", cleanup);
+      document.body.classList.remove("isResizingQuickCommandDock");
+      if (quickCommandDockResizeCleanupRef.current === cleanup) quickCommandDockResizeCleanupRef.current = null;
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", cleanup);
+    document.body.classList.add("isResizingQuickCommandDock");
+    quickCommandDockResizeCleanupRef.current = cleanup;
+  }, [quickCommandDockWidth, resizeQuickCommandDock]);
+
   const resizableColumns = useMemo<ColumnsType<RemoteFileEntry>>(
     () =>
-      baseColumns.map((column) => {
+      baseColumns.filter((column) => {
+        const key = fileColumnKey(column);
+        return !key || !quickCommandHiddenColumnKeys.has(key);
+      }).map((column) => {
         const key = fileColumnKey(column);
         if (!key) return column;
         const headerCellProps: ResizableHeaderCellProps = {
@@ -407,12 +571,15 @@ export function FileManager({
         }
         return col;
       }),
-    [effectiveColumnWidths, handleColumnResizeStart, path],
+    [effectiveColumnWidths, handleColumnResizeStart, path, quickCommandHiddenColumnKeys],
   );
 
   const tableColumnWidth = useMemo(
-    () => 48 + Object.keys(DEFAULT_COLUMN_WIDTHS).reduce((sum, key) => sum + (effectiveColumnWidths[key] ?? DEFAULT_COLUMN_WIDTHS[key]), 0),
-    [effectiveColumnWidths],
+    () => 48 + Object.keys(DEFAULT_COLUMN_WIDTHS).reduce(
+      (sum, key) => sum + (quickCommandHiddenColumnKeys.has(key) ? 0 : (effectiveColumnWidths[key] ?? DEFAULT_COLUMN_WIDTHS[key])),
+      0,
+    ),
+    [effectiveColumnWidths, quickCommandHiddenColumnKeys],
   );
   const tableScrollX = useMemo(
     () => Math.max(tableColumnWidth, tableSurfaceWidth > 0 ? Math.ceil(tableSurfaceWidth) + 12 : 0),
@@ -420,55 +587,12 @@ export function FileManager({
   );
   const selectedRowKeySet = useMemo(() => new Set(selectedRowKeys), [selectedRowKeys]);
 
-  function closeDetachedEditorChannel(channel?: BroadcastChannel) {
-    const current = detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME);
-    if (channel && current !== channel) return;
-    const target = channel ?? current;
-    if (!target) return;
-    target.close();
-    detachedEditorsRef.current.delete(EDITOR_CHANNEL_NAME);
-    detachedEditorWindowRef.current = null;
-  }
-
-  function createDetachedEditorChannel(initialTab: DetachedEditorTabPayload) {
-    const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
-    detachedEditorsRef.current.set(EDITOR_CHANNEL_NAME, channel);
-    channel.onmessage = (event: MessageEvent<EditorChannelMessage>) => {
-      const payload = event.data;
-      if (payload.type === "ready") {
-        postEditorMessage(channel, { type: "init", ...initialTab });
-      }
-      if (payload.type === "save") {
-        void onWriteText(payload.path, payload.content, payload.sessionId)
-          .then(() => {
-            if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
-              postEditorMessage(channel, { type: "saved", path: payload.path, sessionId: payload.sessionId, saveId: payload.saveId, content: payload.content });
-            }
-          })
-          .catch((error) => {
-            if (detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === channel) {
-              postEditorMessage(channel, { type: "error", message: getErrorMessage(error), path: payload.path, sessionId: payload.sessionId, saveId: payload.saveId });
-            }
-          });
-      }
-      if (payload.type === "close") {
-        closeDetachedEditorChannel(channel);
-      }
-    };
-    return channel;
-  }
-
-  function getOrCreateDetachedEditorChannel(initialTab: DetachedEditorTabPayload) {
-    return detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) ?? createDetachedEditorChannel(initialTab);
-  }
-
   useEffect(() => {
     return () => {
       columnResizeCleanupRef.current?.();
       columnResizeCleanupRef.current = null;
-      detachedEditorsRef.current.forEach((channel) => channel.close());
-      detachedEditorsRef.current.clear();
-      detachedEditorWindowRef.current = null;
+      quickCommandDockResizeCleanupRef.current?.();
+      quickCommandDockResizeCleanupRef.current = null;
     };
   }, []);
 
@@ -511,7 +635,7 @@ export function FileManager({
       );
     }
     updateDirectoryExpandedKeys((current) => {
-      const next = uniqueKeys([...current, ...getDirectoryAncestorPaths(path)]);
+      const next = uniqueKeys([...current, ...getDirectoryParentPaths(path)]);
       return sameStringArray(current, next) ? current : next;
     });
     if (path !== "/" && !directoryEntries["/"]) void loadDirectory("/");
@@ -573,9 +697,9 @@ export function FileManager({
   }
 
   useEffect(() => {
-    if (!canUseFiles) {
+    if (!active || !canUseFiles) {
       setSearching(false);
-      setFocusedPath(null);
+      if (active) setFocusedPath(null);
       return;
     }
     const query = searchText.trim();
@@ -603,10 +727,10 @@ export function FileManager({
         });
     }, 450);
     return () => window.clearTimeout(timer);
-  }, [canUseFiles, searchText, session.id]);
+  }, [active, canUseFiles, searchText, session.id]);
 
   useEffect(() => {
-    if (!canUseFiles) return;
+    if (!active || !canUseFiles) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void import("@tauri-apps/api/webview")
@@ -637,7 +761,19 @@ export function FileManager({
       disposed = true;
       unlisten?.();
     };
-  }, [canUseFiles, path]);
+  }, [active, canUseFiles, path]);
+
+  useEffect(() => {
+    if (active) return;
+    searchSeq.current += 1;
+    setSearching(false);
+    setContextMenu(null);
+    setDialog(null);
+    setDragging(false);
+    setOpeningEditorPath(null);
+    setCommandDialogOpen(false);
+    setCommandEditingId(null);
+  }, [active]);
 
   function openDirectory(entry: RemoteFileEntry) {
     if (!canUseFiles) return;
@@ -657,7 +793,8 @@ export function FileManager({
     if (openingEditorPath) return;
 
     const sessionId = session.id;
-    const sessionName = session.name || session.host;
+    const sessionName = sessionEditorName;
+    const sessionHost = sessionEditorHost;
 
     setOpeningEditorPath(targetPath);
     const messageKey = `editor-open-${targetPath}`;
@@ -667,7 +804,7 @@ export function FileManager({
       const content = await onReadText(targetPath, sessionId);
       if (!mountedRef.current) return;
 
-      const initialTab = { path: targetPath, content, sessionId, sessionName };
+      const initialTab = { path: targetPath, content, sessionId, sessionName, sessionHost };
 
       if (isTauriRuntime()) {
         const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
@@ -675,8 +812,8 @@ export function FileManager({
         const existingWindow = await WebviewWindow.getByLabel(DETACHED_EDITOR_WINDOW_LABEL);
         if (!mountedRef.current) return;
         if (existingWindow) {
-          const channel = getOrCreateDetachedEditorChannel(initialTab);
-          postEditorMessage(channel, { type: "addTab", path: targetPath, content, sessionId, sessionName });
+          const channel = getOrCreateDetachedEditorChannel(initialTab, onWriteText);
+          postEditorMessage(channel, { type: "addTab", ...initialTab });
           try {
             await existingWindow.setFocus();
           } catch (error) {
@@ -687,16 +824,24 @@ export function FileManager({
         }
 
         closeDetachedEditorChannel();
-        const channel = createDetachedEditorChannel(initialTab);
+        const channel = createDetachedEditorChannel(initialTab, onWriteText);
         createdChannel = channel;
         const webview = new WebviewWindow(DETACHED_EDITOR_WINDOW_LABEL, {
           url: `index.html?editorWindow=${encodeURIComponent(EDITOR_CHANNEL_NAME)}`,
-          title: `文件编辑器`,
-          width: 1100,
-          height: 760,
-          minWidth: 760,
-          minHeight: 520,
+          title: "HelM Editor",
+          width: 1280,
+          height: 820,
+          minWidth: 900,
+          minHeight: 600,
+          center: true,
           resizable: true,
+          decorations: false,
+          devtools: import.meta.env.DEV,
+          maximizable: false,
+          minimizable: true,
+          closable: true,
+          shadow: true,
+          backgroundColor: "#f7f9fc",
         });
         await Promise.all([
           webview.once("tauri://error", (event) => {
@@ -708,12 +853,12 @@ export function FileManager({
           }),
         ]);
       } else {
-        const existingWindow = detachedEditorWindowRef.current;
+        const existingWindow = sharedDetachedEditorWindow;
         if (existingWindow?.closed) {
           closeDetachedEditorChannel();
         } else if (existingWindow) {
-          const channel = getOrCreateDetachedEditorChannel(initialTab);
-          postEditorMessage(channel, { type: "addTab", path: targetPath, content, sessionId, sessionName });
+          const channel = getOrCreateDetachedEditorChannel(initialTab, onWriteText);
+          postEditorMessage(channel, { type: "addTab", ...initialTab });
           try {
             existingWindow.focus();
           } catch (error) {
@@ -724,17 +869,17 @@ export function FileManager({
         }
 
         closeDetachedEditorChannel();
-        const channel = createDetachedEditorChannel(initialTab);
+        const channel = createDetachedEditorChannel(initialTab, onWriteText);
         createdChannel = channel;
         const editorWindow = window.open(`${window.location.origin}${window.location.pathname}?editorWindow=${encodeURIComponent(EDITOR_CHANNEL_NAME)}`, DETACHED_EDITOR_WINDOW_LABEL, "width=1100,height=760");
         if (!editorWindow) {
           throw new Error("无法打开编辑器窗口，请检查弹窗拦截设置");
         }
-        detachedEditorWindowRef.current = editorWindow;
+        sharedDetachedEditorWindow = editorWindow;
       }
       if (mountedRef.current) message.destroy(messageKey);
     } catch (error) {
-      if (createdChannel && detachedEditorsRef.current.get(EDITOR_CHANNEL_NAME) === createdChannel) {
+      if (createdChannel && sharedDetachedEditorChannel === createdChannel) {
         closeDetachedEditorChannel(createdChannel);
       }
       if (mountedRef.current) {
@@ -766,15 +911,26 @@ export function FileManager({
   useEffect(() => {
     if (!contextMenu) return;
     const close = () => setContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
     window.addEventListener("click", close);
     window.addEventListener("blur", close);
+    window.addEventListener("resize", close);
     window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", closeOnEscape);
     return () => {
       window.removeEventListener("click", close);
       window.removeEventListener("blur", close);
+      window.removeEventListener("resize", close);
       window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", closeOnEscape);
     };
   }, [contextMenu]);
+
+  useEffect(() => {
+    setContextMenu(null);
+  }, [session.id, path]);
 
   async function refresh() {
     if (!canRefreshFiles) return;
@@ -814,11 +970,6 @@ export function FileManager({
     }
     try {
       await onSendCommand(command.command);
-      void onQuickCommandsChange(
-        quickCommands.map((item) =>
-          item.id === command.id ? { ...item, clickCount: (item.clickCount ?? 0) + 1, updatedAt: new Date().toISOString() } : item,
-        ),
-      );
       message.open({ key: `quick-command-${command.id}`, type: "success", content: `已发送：${command.name}`, duration: 1.8 });
     } catch (error) {
       message.error(getErrorMessage(error));
@@ -830,6 +981,11 @@ export function FileManager({
     setCommandName(command?.name ?? "");
     setCommandValue(command?.command ?? "");
     setCommandDialogOpen(true);
+  }
+
+  function closeCommandDialog() {
+    setCommandDialogOpen(false);
+    setCommandEditingId(null);
   }
 
   function addQuickCommand() {
@@ -845,7 +1001,7 @@ export function FileManager({
     } else {
       const now = new Date().toISOString();
       const id = crypto.randomUUID();
-      void onQuickCommandsChange([...quickCommands, { id, name, command, clickCount: 0, createdAt: now, updatedAt: now }].slice(-100));
+      void onQuickCommandsChange([...quickCommands, { id, name, command, createdAt: now, updatedAt: now }].slice(-100));
     }
     setCommandName("");
     setCommandValue("");
@@ -904,7 +1060,14 @@ export function FileManager({
   const contextMenuItems: MenuProps["items"] = [
     ...(!isMulti ? [{ key: "rename", label: "重命名" }] : []),
     { key: "copyPath", label: isMulti ? `复制 ${contextEntries.length} 个路径` : "复制完整路径" },
-    ...(!hasDirectory ? [{ key: "download", label: isMulti ? `下载 ${contextEntries.length} 个文件` : "下载" }] : []),
+    {
+      key: "download",
+      label: isMulti
+        ? `下载 ${contextEntries.length} 项`
+        : hasDirectory
+          ? "下载整个目录"
+          : "下载",
+    },
     ...(!isMulti ? [
       { key: "copy", label: "复制到" },
       { key: "move", label: "移动到" },
@@ -929,13 +1092,27 @@ export function FileManager({
       });
     }
     if (key === "download") {
-      const downloadEntries = entries.filter((e) => e.fileType !== "directory");
-      if (downloadEntries.length > 0) {
-        onDownloadFiles(downloadEntries.map((e) => ({
-          remotePath: e.path || joinPath(path, e.name),
-          fileName: e.name,
-        })));
-      }
+      const messageKey = `prepare-download-${Date.now()}`;
+      message.open({
+        key: messageKey,
+        type: "loading",
+        content: hasDirectory ? "正在扫描远端目录…" : "正在准备下载…",
+        duration: 0,
+      });
+      void onDownloadFiles(entries.map((entry) => ({
+        remotePath: entry.path || joinPath(path, entry.name),
+        fileName: entry.name,
+        fileType: entry.fileType,
+      }))).then(() => {
+        message.destroy(messageKey);
+      }).catch((error) => {
+        message.open({
+          key: messageKey,
+          type: "error",
+          content: `下载准备失败：${getErrorMessage(error)}`,
+          duration: 6,
+        });
+      });
     }
     if (key === "copy" && entries.length === 1) {
       const fp = entries[0].path || joinPath(path, entries[0].name);
@@ -973,14 +1150,19 @@ export function FileManager({
     }
   }
 
+  const commandReady = Boolean(commandName.trim() && commandValue.trim());
+  const commandLineCount = commandValue ? commandValue.split(/\r\n|\r|\n/).length : 0;
+
   return (
     <section className="filePanel">
       <div className="fileWorkspace">
         <QuickCommandTopArea
-          commandItems={commandItems}
-          onSendCommand={sendQuickCommand}
-          onEditCommand={openCommandDialog}
-          onDeleteCommand={deleteQuickCommand}
+          dockId={quickCommandDockId}
+          open={quickCommandsOpen}
+          onOpenChange={(open) => {
+            setContextMenu(null);
+            setQuickCommandsOpen(open);
+          }}
         >
             <Input
               size="small"
@@ -1023,7 +1205,11 @@ export function FileManager({
             </Tooltip>
         </QuickCommandTopArea>
 
-        <div className="fileContent" ref={contentRef}>
+        <div
+          className={`fileContent${quickCommandsOpen ? " fileContent-quickCommandsOpen" : ""}`}
+          ref={contentRef}
+          style={{ "--quick-command-dock-width": `${quickCommandDockWidth}px` } as CSSProperties}
+        >
           <DirectoryTree
             canUseFiles={canUseFiles}
             path={path}
@@ -1072,7 +1258,10 @@ export function FileManager({
               showSorterTooltip={false}
               rowSelection={{
                 selectedRowKeys,
-                onChange: (keys) => setSelectedRowKeys(keys.filter(isStringKey)),
+                onChange: (keys) => {
+                  setContextMenu(null);
+                  setSelectedRowKeys(keys.filter(isStringKey));
+                },
                 columnWidth: 48,
               }}
               rowClassName={(entry) => (focusedPath && entry.path === focusedPath ? "fileTableRow-focused" : "")}
@@ -1087,8 +1276,10 @@ export function FileManager({
                   if (!selectedRowKeySet.has(entryKey)) {
                     setSelectedRowKeys([entryKey]);
                   }
-                  setContextMenu(null);
-                  setContextMenu({ entry, x: event.clientX, y: event.clientY });
+                  const surfaceBounds = tableSurfaceRef.current?.getBoundingClientRect();
+                  if (!surfaceBounds) return;
+                  const position = contextMenuPositionInContainer(event.clientX, event.clientY, surfaceBounds);
+                  setContextMenu({ entry, ...position });
                 },
                 style: { cursor: entry.fileType === "directory" ? "pointer" : "default" },
               })}
@@ -1096,6 +1287,7 @@ export function FileManager({
               locale={{ emptyText: canUseFiles ? (searchText ? "无匹配文件" : "目录为空") : "SFTP 可用后显示文件" }}
             />
             <Dropdown
+              key={contextMenu ? `${contextMenu.entry.path}:${contextMenu.x}:${contextMenu.y}` : "file-context-menu-closed"}
               open={Boolean(contextMenu)}
               disabled={!canUseFiles}
               trigger={[]}
@@ -1114,6 +1306,51 @@ export function FileManager({
             </Dropdown>
             {dragging && <div className="fileDropOverlay">拖放到当前目录上传</div>}
           </div>
+          {quickCommandsOpen ? (
+            <>
+              <button
+                type="button"
+                className="quickCommandDockResizer"
+                role="separator"
+                aria-label="调整常用命令栏宽度"
+                aria-orientation="vertical"
+                aria-valuemin={QUICK_COMMAND_DOCK_MIN_WIDTH}
+                aria-valuemax={QUICK_COMMAND_DOCK_MAX_WIDTH}
+                aria-valuenow={quickCommandDockWidth}
+                title="拖动调整命令栏宽度，双击恢复默认宽度"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  handleQuickCommandDockResizeStart(event.clientX);
+                }}
+                onDoubleClick={() => resizeQuickCommandDock(QUICK_COMMAND_DOCK_DEFAULT_WIDTH)}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowLeft") {
+                    event.preventDefault();
+                    resizeQuickCommandDock(quickCommandDockWidth + 12);
+                  }
+                  if (event.key === "ArrowRight") {
+                    event.preventDefault();
+                    resizeQuickCommandDock(quickCommandDockWidth - 12);
+                  }
+                  if (event.key === "Home") {
+                    event.preventDefault();
+                    resizeQuickCommandDock(QUICK_COMMAND_DOCK_MIN_WIDTH);
+                  }
+                  if (event.key === "End") {
+                    event.preventDefault();
+                    resizeQuickCommandDock(QUICK_COMMAND_DOCK_MAX_WIDTH);
+                  }
+                }}
+              />
+              <QuickCommandDock
+                id={quickCommandDockId}
+                commandItems={commandItems}
+                onSendCommand={sendQuickCommand}
+                onEditCommand={openCommandDialog}
+                onDeleteCommand={deleteQuickCommand}
+              />
+            </>
+          ) : null}
         </div>
       </div>
       <Modal
@@ -1122,11 +1359,9 @@ export function FileManager({
         title={null}
         footer={null}
         closable
-        width={460}
-        onCancel={() => {
-          setCommandDialogOpen(false);
-          setCommandEditingId(null);
-        }}
+        centered
+        width={560}
+        onCancel={closeCommandDialog}
         destroyOnHidden
       >
         <div className="commandDialogHeader">
@@ -1142,13 +1377,27 @@ export function FileManager({
               {commandEditingId ? "更新名称或命令内容后立即生效" : "保存后可在命令面板中一键运行"}
             </span>
           </div>
+          <span className="commandDialogModeBadge">{commandEditingId ? "编辑模式" : "新建模式"}</span>
         </div>
-        <Form layout="vertical" className="commandDialogForm" onFinish={addQuickCommand}>
-          <Form.Item label={<span className="commandDialogFieldLabel"><TagOutlined /> 名称</span>}>
-            <div className="commandNameField">
-              <input
+        <div className="commandDialogContent">
+          <Form layout="vertical" className="commandDialogForm" onFinish={addQuickCommand}>
+            <Form.Item
+              className="commandDialogNameItem"
+              label={(
+                <span className="commandDialogFieldHeading">
+                  <span className="commandDialogFieldIcon"><TagOutlined /></span>
+                  <span className="commandDialogFieldCopy">
+                    <strong>命令名称</strong>
+                    <small>用于在快捷命令面板中快速识别</small>
+                  </span>
+                  <span className="commandNameCounter">{commandName.length} / 40</span>
+                </span>
+              )}
+            >
+              <Input
                 className="commandNameInput"
                 autoFocus
+                size="large"
                 placeholder="例如：查看系统负载"
                 maxLength={40}
                 value={commandName}
@@ -1159,39 +1408,66 @@ export function FileManager({
                   addQuickCommand();
                 }}
               />
-              <span className="commandNameCounter">{commandName.length} / 40</span>
-            </div>
-          </Form.Item>
-          <Form.Item label={<span className="commandDialogFieldLabel"><CodeOutlined /> 运行脚本</span>}>
-            <Input.TextArea
-              className="commandDialogTextarea"
-              autoSize={{ minRows: 6, maxRows: 14 }}
-              placeholder={"# 例如：\ntop -bn1 | head -n 20"}
-              value={commandValue}
-              onChange={(event) => setCommandValue(event.target.value)}
-            />
-          </Form.Item>
-        </Form>
+            </Form.Item>
+            <Form.Item
+              className="commandDialogScriptItem"
+              label={(
+                <span className="commandDialogFieldHeading">
+                  <span className="commandDialogFieldIcon code"><CodeOutlined /></span>
+                  <span className="commandDialogFieldCopy">
+                    <strong>运行脚本</strong>
+                    <small>支持单行命令或多行 Shell 脚本</small>
+                  </span>
+                </span>
+              )}
+            >
+              <div className="commandScriptEditor">
+                <div className="commandScriptToolbar">
+                  <span className="commandScriptDots" aria-hidden="true"><i /><i /><i /></span>
+                  <span className="commandScriptLanguage">SHELL</span>
+                  <span className="commandScriptStats">{commandLineCount} 行 · {commandValue.length} 字符</span>
+                </div>
+                <Input.TextArea
+                  className="commandDialogTextarea"
+                  autoSize={{ minRows: 7, maxRows: 14 }}
+                  placeholder={"# 例如：\ntop -bn1 | head -n 20"}
+                  value={commandValue}
+                  onChange={(event) => setCommandValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (!(event.ctrlKey || event.metaKey) || event.key !== "Enter") return;
+                    event.preventDefault();
+                    addQuickCommand();
+                  }}
+                />
+              </div>
+            </Form.Item>
+          </Form>
+          <div className="commandDialogTip">
+            <InfoCircleOutlined />
+            <span>命令会发送到当前已连接的终端执行，请确认脚本内容安全可靠。</span>
+            <kbd>Ctrl + Enter</kbd>
+          </div>
+        </div>
         <div className="commandDialogFooter">
-          <Button
-            onClick={() => {
-              setCommandDialogOpen(false);
-              setCommandEditingId(null);
-            }}
-          >
-            取消
-          </Button>
-          <Button
-            type="primary"
-            icon={commandEditingId ? <SaveOutlined /> : <PlusOutlined />}
-            onClick={addQuickCommand}
-          >
-            {commandEditingId ? "保存" : "添加"}
-          </Button>
+          <span className={`commandDialogReadyState ${commandReady ? "ready" : ""}`}>
+            <i />{commandReady ? "信息完整，可以保存" : "请填写命令名称和脚本"}
+          </span>
+          <span className="commandDialogFooterActions">
+            <Button onClick={closeCommandDialog}>取消</Button>
+            <Button
+              type="primary"
+              icon={commandEditingId ? <SaveOutlined /> : <PlusOutlined />}
+              disabled={!commandReady}
+              onClick={addQuickCommand}
+            >
+              {commandEditingId ? "保存修改" : "添加命令"}
+            </Button>
+          </span>
         </div>
       </Modal>
       <FileDialogs
         dialog={dialog}
+        currentPath={path}
         treeData={treeData}
         directoryExpandedKeys={directoryExpandedKeys}
         onDialogChange={setDialog}
@@ -1207,6 +1483,21 @@ export function FileManager({
     </section>
   );
 }
+
+export const FileManager = memo(FileManagerView, (previous, next) => (
+  previous.active === next.active
+  && previous.filesLoading === next.filesLoading
+  && previous.quickCommands === next.quickCommands
+  && previous.session.id === next.session.id
+  && previous.session.name === next.session.name
+  && previous.session.host === next.session.host
+  && previous.session.state === next.session.state
+  && previous.session.connectionId === next.session.connectionId
+  && previous.session.terminalId === next.session.terminalId
+  && previous.session.sftpId === next.session.sftpId
+  && previous.session.currentPath === next.session.currentPath
+  && previous.session.files === next.session.files
+));
 
 function resolveStateAction<T>(action: SetStateAction<T>, current: T): T {
   return typeof action === "function" ? (action as (value: T) => T)(current) : action;

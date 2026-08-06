@@ -1,6 +1,6 @@
 [package]
 name = "helm"
-version = "0.0.46"
+version = "0.0.47"
 description = "A Tauri SSH and SFTP desktop workbench prototype"
 authors = ["HelM"]
 edition = "2021"
@@ -53,7 +53,14 @@ codegen-units = 1
 strip = "symbols"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinSock",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 # 使用本地 vendor 副本固定 SFTP 读管线能力，确保大文件传输性能稳定。
 [patch.crates-io]

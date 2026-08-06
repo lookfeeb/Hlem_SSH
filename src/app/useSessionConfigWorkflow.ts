@@ -48,14 +48,14 @@ export function useSessionConfigWorkflow({
       const snapshot = await vaultApi.sessionCreate(namedInput);
       if (!mountedRef.current) return;
       const createdId = snapshot.data.sessions[snapshot.data.sessions.length - 1]?.id;
-      applySnapshot(snapshot, createdId);
+      applySnapshot(snapshot);
       closeSessionConfigModal();
       if (createdId) onCreated?.(createdId);
       return;
     } else {
       const snapshot = await vaultApi.sessionUpdate(sessionModal.sessionId, namedInput);
       if (!mountedRef.current) return;
-      applySnapshot(snapshot, sessionModal.sessionId);
+      applySnapshot(snapshot);
     }
     closeSessionConfigModal();
   }

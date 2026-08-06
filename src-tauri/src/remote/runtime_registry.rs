@@ -83,16 +83,20 @@ impl RemoteRuntime {
         connection: &ConnectionRecord,
         reclaim_telemetry: bool,
     ) -> AppResult<Channel<client::Msg>> {
+        clear_channel_open_failure(connection);
         match open_session_channel(&connection.handle).await {
             Ok(channel) => Ok(channel),
             Err(first_error) => {
+                let mut final_error = first_error;
                 if self
                     .compact_sftp_transfer_pool_for_connection(&connection.info.connection_id)
                     .await
                     > 0
                 {
-                    if let Ok(channel) = open_session_channel(&connection.handle).await {
-                        return Ok(channel);
+                    clear_channel_open_failure(connection);
+                    match open_session_channel(&connection.handle).await {
+                        Ok(channel) => return Ok(channel),
+                        Err(error) => final_error = error,
                     }
                 }
 
@@ -103,12 +107,17 @@ impl RemoteRuntime {
                         > 0
                 {
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    if let Ok(channel) = open_session_channel(&connection.handle).await {
-                        return Ok(channel);
+                    clear_channel_open_failure(connection);
+                    match open_session_channel(&connection.handle).await {
+                        Ok(channel) => return Ok(channel),
+                        Err(error) => final_error = error,
                     }
                 }
 
-                Err(first_error)
+                match take_channel_open_failure(connection) {
+                    Some(detail) => Err(AppError::Remote(format!("打开 SSH 通道失败：{detail}"))),
+                    None => Err(final_error),
+                }
             }
         }
     }
@@ -139,6 +148,7 @@ impl RemoteRuntime {
         &self,
         app: &AppHandle,
         connection: &ConnectionRecord,
+        disconnect_reason: Option<&str>,
     ) {
         let connection_id = connection.info.connection_id.as_str();
         let session_id = connection.info.session_id.as_str();
@@ -162,9 +172,12 @@ impl RemoteRuntime {
         let sftp_ids = self
             .remove_sftp_sessions_for_connection(connection_id)
             .await;
-        self.cancel_transfers_for_sftp_ids(app, &sftp_ids, "连接已断开")
+        let cleanup_reason = disconnect_reason
+            .map(|reason| format!("连接已断开：{reason}"))
+            .unwrap_or_else(|| "连接已断开".to_string());
+        self.cancel_transfers_for_sftp_ids(app, &sftp_ids, &cleanup_reason)
             .await;
-        self.cancel_telemetry_for_session(app, session_id, "连接已断开")
+        self.cancel_telemetry_for_session(app, session_id, &cleanup_reason)
             .await;
         self.cancel_forwards_for_session(app, session_id, Some(connection))
             .await;
@@ -265,6 +278,7 @@ impl RemoteRuntime {
             }
             let mut info = record.info;
             info.status = RuntimeStatus::Disconnected;
+            info.disconnect_reason = None;
             events::emit(app, events::SSH_STATUS, info);
             crate::errors::forget_resource_label(&connection_id);
         }

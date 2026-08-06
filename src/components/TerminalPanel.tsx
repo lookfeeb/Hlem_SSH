@@ -4,16 +4,18 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal as XtermTerminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { appApi } from "../api/appApi";
 import { readClipboardText, writeClipboardText } from "../lib/clipboard";
 import { useAnimationFrameRegistry } from "../lib/reactLifecycle";
 import { registerTerminalSink } from "../lib/terminalRegistry";
+import { TerminalViewportFollower } from "../lib/terminalViewportFollow";
 import type { RemoteSession, TerminalEntry } from "../types";
 
 interface TerminalPanelProps {
   session: RemoteSession;
+  active: boolean;
   scrollback: number;
   webglEnabled: boolean;
   onSendData: (data: string) => void;
@@ -26,25 +28,32 @@ type AppliedTerminalState = {
   offsets: Map<string, number>;
 };
 
-export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, onResize, onClear }: TerminalPanelProps) {
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; selectedText: string } | null>(null);
+function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendData, onResize, onClear }: TerminalPanelProps) {
+  const [contextMenu, setContextMenu] = useState<{ selectedText: string } | null>(null);
   const [commandInputValue, setCommandInputValue] = useState("");
   const requestSafeAnimationFrame = useAnimationFrameRegistry();
   const commandInputRef = useRef<HTMLInputElement>(null);
   const terminalHostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XtermTerminal | null>(null);
+  const viewportFollowerRef = useRef<TerminalViewportFollower | null>(null);
   const webglAddonRef = useRef<{ dispose: () => void } | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const appliedRef = useRef<AppliedTerminalState | null>(null);
+  const layoutScheduledRef = useRef(false);
+  const refreshAfterLayoutRef = useRef(false);
+  const focusAfterLayoutRef = useRef(false);
   const lastSizeRef = useRef<{ terminalId: string | null; cols: number; rows: number }>({ terminalId: null, cols: 0, rows: 0 });
   const terminalIdRef = useRef<string | null>(session.terminalId ?? null);
+  const activeRef = useRef(active);
   const sendDataRef = useRef(onSendData);
   const resizeRef = useRef(onResize);
   const clearRef = useRef(onClear);
-  const connected = session.state === "connected";
-  const connectedRef = useRef(connected);
+  const terminalAvailable = session.state === "connected" && Boolean(session.terminalId);
+  const terminalAvailableRef = useRef(terminalAvailable);
 
   terminalIdRef.current = session.terminalId ?? null;
+  activeRef.current = active;
+  terminalAvailableRef.current = terminalAvailable;
 
   useEffect(() => {
     sendDataRef.current = onSendData;
@@ -58,14 +67,12 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
     clearRef.current = onClear;
   }, [onClear]);
 
-  useEffect(() => {
-    connectedRef.current = connected;
-  }, [connected]);
-
   function fitAndResizeTerminal() {
     const terminal = terminalRef.current;
     const fitAddon = fitAddonRef.current;
-    if (!terminal || !fitAddon) return;
+    const host = terminalHostRef.current;
+    if (!terminal || !fitAddon || !host || !activeRef.current) return;
+    if (host.clientWidth <= 1 || host.clientHeight <= 1) return;
     try {
       fitAddon.fit();
     } catch (error) {
@@ -82,6 +89,44 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
     }
   }
 
+  function scheduleTerminalLayout(options: { refresh?: boolean; focus?: boolean } = {}) {
+    refreshAfterLayoutRef.current ||= options.refresh ?? false;
+    focusAfterLayoutRef.current ||= options.focus ?? false;
+    if (layoutScheduledRef.current) return;
+    layoutScheduledRef.current = true;
+    requestSafeAnimationFrame(() => {
+      layoutScheduledRef.current = false;
+      const shouldRefresh = refreshAfterLayoutRef.current;
+      const shouldFocus = focusAfterLayoutRef.current;
+      refreshAfterLayoutRef.current = false;
+      focusAfterLayoutRef.current = false;
+      if (!activeRef.current) return;
+      fitAndResizeTerminal();
+      const terminal = terminalRef.current;
+      if (!terminal) return;
+      if (shouldRefresh && terminal.rows > 0) terminal.refresh(0, terminal.rows - 1);
+      viewportFollowerRef.current?.handleLayoutComplete(terminalIdRef.current);
+      if (shouldFocus && terminalAvailableRef.current) terminal.focus();
+    });
+  }
+
+  function prepareTerminalForInput() {
+    viewportFollowerRef.current?.detach(terminalIdRef.current);
+    terminalRef.current?.scrollToBottom();
+  }
+
+  function writeOutputToTerminal(terminal: XtermTerminal, content: TerminalWriteData) {
+    const terminalId = terminalIdRef.current;
+    writeTerminalData(terminal, content, {
+      shouldForceFollow: () => viewportFollowerRef.current?.shouldFollow(terminalId) ?? false,
+      onWriteComplete: () => viewportFollowerRef.current?.handleWriteComplete(terminalId),
+    });
+  }
+
+  function detachViewportFollow() {
+    viewportFollowerRef.current?.detach(terminalIdRef.current);
+  }
+
   useEffect(() => {
     const host = terminalHostRef.current;
     if (!host) return;
@@ -91,7 +136,7 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
       convertEol: false,
       cursorBlink: true,
       cursorStyle: "block",
-      disableStdin: !connectedRef.current,
+      disableStdin: !activeRef.current || !terminalAvailableRef.current,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace",
       fontSize: 13,
       lineHeight: 1.35,
@@ -126,9 +171,27 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
       void appApi.openExternalUrl(url);
     }));
     terminal.open(host);
+    const viewportFollower = new TerminalViewportFollower(
+      () => terminalRef.current?.scrollToBottom(),
+      {
+        setTimeout: (callback, delayMs) => window.setTimeout(callback, delayMs),
+        clearTimeout: (handle) => window.clearTimeout(handle),
+        requestAnimationFrame: (callback) => window.requestAnimationFrame(callback),
+        cancelAnimationFrame: (handle) => window.cancelAnimationFrame(handle),
+      },
+    );
+    viewportFollowerRef.current = viewportFollower;
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       const key = event.key.toLowerCase();
+      if (key === "pageup" || key === "pagedown" || key === "home" || key === "end") {
+        detachViewportFollow();
+      }
+      if (event.ctrlKey && event.shiftKey && key === "c") {
+        event.preventDefault();
+        void copySelection();
+        return false;
+      }
       if (event.ctrlKey && event.shiftKey && key === "v") {
         event.preventDefault();
         void pasteToTerminal();
@@ -142,29 +205,42 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
       return true;
     });
     const dataDisposable = terminal.onData((data) => {
-      if (!connectedRef.current) return;
+      if (!activeRef.current || !terminalAvailableRef.current) return;
+      prepareTerminalForInput();
       sendDataRef.current(data);
     });
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
 
-    const resizeObserver = new ResizeObserver(() => {
-      requestSafeAnimationFrame(fitAndResizeTerminal);
-    });
+    const handleViewportWheel = () => detachViewportFollow();
+    const handleViewportPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".xterm-scrollable-element > .scrollbar")) {
+        detachViewportFollow();
+      }
+    };
+    host.addEventListener("wheel", handleViewportWheel, { passive: true });
+    host.addEventListener("pointerdown", handleViewportPointerDown);
+
+    const resizeObserver = new ResizeObserver(() => scheduleTerminalLayout({ refresh: true }));
     resizeObserver.observe(host);
-    requestSafeAnimationFrame(() => {
-      fitAndResizeTerminal();
-      terminal.focus();
-    });
+    scheduleTerminalLayout({ refresh: true, focus: activeRef.current });
 
     return () => {
       resizeObserver.disconnect();
       dataDisposable.dispose();
+      host.removeEventListener("wheel", handleViewportWheel);
+      host.removeEventListener("pointerdown", handleViewportPointerDown);
+      viewportFollower.dispose();
       terminal.dispose();
       terminalRef.current = null;
+      viewportFollowerRef.current = null;
       fitAddonRef.current = null;
       appliedRef.current = null;
+      layoutScheduledRef.current = false;
+      refreshAfterLayoutRef.current = false;
+      focusAfterLayoutRef.current = false;
     };
   }, []);
 
@@ -208,8 +284,15 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
   }, [webglEnabled]);
 
   useEffect(() => {
-    if (!session.terminalId) return;
-    requestSafeAnimationFrame(fitAndResizeTerminal);
+    if (!active) {
+      setContextMenu(null);
+      return;
+    }
+    scheduleTerminalLayout({ refresh: true, focus: terminalAvailable });
+  }, [active, session.terminalId, terminalAvailable]);
+
+  useEffect(() => {
+    viewportFollowerRef.current?.attach(session.terminalId ?? null);
   }, [session.terminalId]);
 
   useEffect(() => {
@@ -237,7 +320,7 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
       const previousLength = applied.offsets.get(entry.id) ?? 0;
       if (previousLength < contentLength) {
         const nextContent = sliceTerminalEntryData(content, previousLength);
-        writeTerminalData(terminal, nextContent);
+        writeOutputToTerminal(terminal, nextContent);
         applied.offsets.set(entry.id, contentLength);
       }
     }
@@ -247,7 +330,7 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
     const terminal = terminalRef.current;
     if (!terminal || !session.terminalId) return;
     return registerTerminalSink(session.terminalId, {
-      writeEntry: (entry) => writeTerminalEntry(terminal, entry),
+      writeEntry: (entry) => writeOutputToTerminal(terminal, terminalEntryData(entry)),
       clear: () => terminal.clear(),
       reset: () => terminal.reset(),
     });
@@ -256,9 +339,8 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
   useEffect(() => {
     const terminal = terminalRef.current;
     if (!terminal) return;
-    terminal.options.disableStdin = session.state !== "connected";
-    if (session.state === "connected") terminal.focus();
-  }, [session.state, session.terminalId]);
+    terminal.options.disableStdin = !active || !terminalAvailable;
+  }, [active, terminalAvailable]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -286,16 +368,17 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
   const menuItems: MenuProps["items"] = [
     { key: "copy", label: "复制选中", disabled: !contextMenu?.selectedText },
     { key: "copyAll", label: "复制全部" },
-    { key: "paste", label: "粘贴", disabled: !connected },
+    { key: "paste", label: "粘贴", disabled: !terminalAvailable },
     { type: "divider" },
     { key: "selectAll", label: "全选输出" },
     { key: "clear", label: "清空输出" },
   ];
 
   async function pasteToTerminal() {
-    if (!connectedRef.current) return;
+    if (!activeRef.current || !terminalAvailableRef.current) return;
     const text = await readClipboardText();
     if (text) {
+      prepareTerminalForInput();
       sendDataRef.current(text);
     }
     terminalRef.current?.focus();
@@ -338,14 +421,18 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
   }
 
   function submitCommandInput() {
-    if (!connectedRef.current) return;
+    if (!activeRef.current || !terminalAvailableRef.current) return;
     const command = commandInputValue.trim();
-    if (command) sendDataRef.current(`${command}\r`);
+    if (command) {
+      prepareTerminalForInput();
+      sendDataRef.current(`${command}\r`);
+    }
     setCommandInputValue("");
     requestSafeAnimationFrame(leaveCommandInput);
   }
 
   function handleCommandInputKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.nativeEvent.isComposing) return;
     if (event.key === "Enter") {
       event.preventDefault();
       submitCommandInput();
@@ -359,7 +446,8 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
     }
     if ((event.key === "ArrowUp" || event.key === "ArrowDown") && commandInputValue.length === 0) {
       event.preventDefault();
-      if (connectedRef.current) {
+      if (activeRef.current && terminalAvailableRef.current) {
+        prepareTerminalForInput();
         sendDataRef.current(event.key === "ArrowUp" ? "\x1b[A" : "\x1b[B");
       }
       leaveCommandInput();
@@ -368,33 +456,35 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
 
   return (
     <section className="terminalPanel">
-      <div
-        className="terminalOutput"
-        onClick={() => {
-          setContextMenu(null);
-          terminalRef.current?.focus();
-        }}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          setContextMenu({
-            x: event.clientX,
-            y: event.clientY,
-            selectedText: terminalRef.current?.getSelection() ?? "",
-          });
+      <Dropdown
+        open={Boolean(contextMenu)}
+        trigger={["contextMenu"]}
+        menu={{ items: menuItems, onClick: ({ key }) => void handleMenuClick(String(key)) }}
+        onOpenChange={(open) => {
+          if (!open) setContextMenu(null);
         }}
       >
-        <div ref={terminalHostRef} className="terminalHost" />
-        <Dropdown
-          open={Boolean(contextMenu)}
-          trigger={[]}
-          menu={{ items: menuItems, onClick: ({ key }) => void handleMenuClick(String(key)) }}
-          onOpenChange={(open) => {
-            if (!open) setContextMenu(null);
+        <div
+          className="terminalOutput"
+          onClick={() => {
+            setContextMenu(null);
+            if (activeRef.current) terminalRef.current?.focus();
+          }}
+          onContextMenu={() => {
+            setContextMenu({ selectedText: terminalRef.current?.getSelection() ?? "" });
           }}
         >
-          <span className="terminalContextMenuAnchor" style={{ left: contextMenu?.x ?? 0, top: contextMenu?.y ?? 0 }} />
-        </Dropdown>
-      </div>
+          <div ref={terminalHostRef} className="terminalHost" />
+          {session.connectionNotice && (
+            <div
+              className={`terminalConnectionNotice terminalConnectionNotice-${session.state}`}
+              role="status"
+            >
+              {session.connectionNotice}
+            </div>
+          )}
+        </div>
+      </Dropdown>
       <div className="terminalToolbar">
         <input
           ref={commandInputRef}
@@ -404,8 +494,8 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
           autoComplete="off"
           autoCorrect="off"
           autoCapitalize="off"
-          placeholder={connected ? "输入命令，回车发送" : "未连接"}
-          disabled={!connected}
+          placeholder={terminalAvailable ? "输入命令，回车发送" : session.state === "connected" ? "终端已关闭" : "未连接"}
+          disabled={!active || !terminalAvailable}
           value={commandInputValue}
           onChange={(event) => setCommandInputValue(event.currentTarget.value)}
           onKeyDown={handleCommandInputKeyDown}
@@ -415,15 +505,28 @@ export function TerminalPanel({ session, scrollback, webglEnabled, onSendData, o
   );
 }
 
-function writeTerminalEntry(terminal: XtermTerminal, entry: TerminalEntry) {
-  writeTerminalData(terminal, terminalEntryData(entry));
-}
+export const TerminalPanel = memo(TerminalPanelView, (previous, next) => (
+  previous.active === next.active &&
+  previous.scrollback === next.scrollback &&
+  previous.webglEnabled === next.webglEnabled &&
+  previous.session.id === next.session.id &&
+  previous.session.state === next.session.state &&
+  previous.session.terminalId === next.session.terminalId &&
+  previous.session.connectionNotice === next.session.connectionNotice &&
+  previous.session.terminal === next.session.terminal
+));
 
-function writeTerminalData(terminal: XtermTerminal, content: TerminalWriteData) {
+type TerminalWriteOptions = {
+  shouldForceFollow?: () => boolean;
+  onWriteComplete?: () => void;
+};
+
+function writeTerminalData(terminal: XtermTerminal, content: TerminalWriteData, options: TerminalWriteOptions = {}) {
   const shouldStickToBottom = isTerminalAtBottom(terminal) || shouldFollowTerminalOutput(content);
   terminal.write(content, () => {
     terminal.refresh(0, terminal.rows - 1);
-    if (shouldStickToBottom) terminal.scrollToBottom();
+    if (shouldStickToBottom || options.shouldForceFollow?.()) terminal.scrollToBottom();
+    options.onWriteComplete?.();
   });
 }
 

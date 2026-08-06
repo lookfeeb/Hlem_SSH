@@ -4,6 +4,7 @@ export interface EditorInitMessage {
   content: string;
   sessionId: string;
   sessionName: string;
+  sessionHost: string;
 }
 
 export interface EditorAddTabMessage {
@@ -12,6 +13,7 @@ export interface EditorAddTabMessage {
   content: string;
   sessionId: string;
   sessionName: string;
+  sessionHost: string;
 }
 
 export interface EditorSaveMessage {
@@ -56,6 +58,18 @@ export interface EditorSessionReconnectedMessage {
   sessionId: string;
 }
 
+export interface EditorRequestSessionMetadataMessage {
+  type: "requestSessionMetadata";
+  sessionIds: string[];
+}
+
+export interface EditorSessionMetadataMessage {
+  type: "sessionMetadata";
+  sessionId: string;
+  sessionName: string;
+  sessionHost: string;
+}
+
 export type EditorChannelMessage =
   | EditorInitMessage
   | EditorAddTabMessage
@@ -65,6 +79,8 @@ export type EditorChannelMessage =
   | EditorReadyMessage
   | EditorCloseMessage
   | EditorSessionDisconnectedMessage
-  | EditorSessionReconnectedMessage;
+  | EditorSessionReconnectedMessage
+  | EditorRequestSessionMetadataMessage
+  | EditorSessionMetadataMessage;
 
 export const EDITOR_CHANNEL_NAME = "helm-editor-global";

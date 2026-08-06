@@ -20,8 +20,14 @@
         "minHeight": 720,
         "center": true,
         "resizable": true,
+        "decorations": false,
+        "devtools": true,
+        "maximizable": true,
+        "minimizable": true,
+        "closable": true,
+        "shadow": true,
         "visible": false,
-        "backgroundColor": "#f4f7fa"
+        "backgroundColor": "#f7f9fc"
       },
       {
         "label": "splash",
@@ -32,6 +38,7 @@
         "center": true,
         "resizable": false,
         "decorations": false,
+        "devtools": false,
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "backgroundColor": "#f4f7fa"

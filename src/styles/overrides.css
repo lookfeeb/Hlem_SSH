@@ -30,7 +30,7 @@
 }
 
 .codeEditorToolbar {
-  background: linear-gradient(180deg, #f8fafc 0%, #eef3fb 100%);
+  background: #f7f9fc;
 }
 
 .fileContent .ant-empty-normal,
@@ -450,6 +450,386 @@
   box-shadow: 0 10px 22px -6px rgba(99, 102, 241, .6) !important;
 }
 
+/* 常用命令弹窗 V2 */
+.commandDialogModal .ant-modal-container {
+  padding: 0 !important;
+  overflow: hidden;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcff 100%);
+  border: 1px solid rgba(222, 228, 239, .92);
+  border-radius: 18px;
+  box-shadow:
+    0 30px 64px -18px rgba(15, 23, 42, .32),
+    0 14px 30px -16px rgba(99, 102, 241, .3);
+}
+
+.commandDialogModal .ant-modal-content {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.commandDialogModal .ant-modal-content::after {
+  display: none;
+}
+
+.commandDialogModal .ant-modal-close {
+  top: 20px !important;
+  inset-inline-end: 20px !important;
+  width: 32px !important;
+  height: 32px !important;
+  border-radius: 9px !important;
+}
+
+.commandDialogHeader {
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  gap: 13px;
+  padding: 20px 24px 18px;
+  background:
+    radial-gradient(430px 130px at 9% 0%, rgba(99, 102, 241, .14), transparent 72%),
+    linear-gradient(135deg, #fbfdff 0%, #f8f8ff 100%);
+  border-bottom: 1px solid rgba(222, 228, 239, .88);
+}
+
+.commandDialogHeaderIcon {
+  width: 46px;
+  height: 46px;
+  border-radius: 13px;
+  animation: none;
+}
+
+.commandDialogHeaderMeta {
+  gap: 3px;
+}
+
+.commandDialogLabel {
+  font-size: 9px;
+  letter-spacing: 1.15px;
+}
+
+.commandDialogTitle {
+  font-size: 17px;
+  letter-spacing: -.1px;
+}
+
+.commandDialogSubtitle {
+  font-size: 10px;
+}
+
+.commandDialogModeBadge {
+  align-self: center;
+  margin-right: 34px;
+  padding: 5px 9px;
+  color: #5f63c8;
+  font-size: 9px;
+  font-weight: 800;
+  background: rgba(99, 102, 241, .08);
+  border: 1px solid rgba(99, 102, 241, .16);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.commandDialogContent {
+  padding: 20px 24px 16px;
+}
+
+.commandDialogForm {
+  gap: 20px;
+  padding: 0;
+}
+
+.commandDialogForm .ant-form-item-label {
+  width: 100%;
+  padding-bottom: 8px !important;
+}
+
+.commandDialogForm .ant-form-item-label > label {
+  width: 100%;
+  height: auto;
+}
+
+.commandDialogFieldHeading {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+}
+
+.commandDialogFieldIcon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: #5b63d7;
+  font-size: 14px;
+  background: #eef0ff;
+  border: 1px solid #dfe3ff;
+  border-radius: 9px;
+}
+
+.commandDialogFieldIcon.code {
+  color: #23806e;
+  background: #eaf8f5;
+  border-color: #d4eee8;
+}
+
+.commandDialogFieldCopy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.commandDialogFieldCopy strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.commandDialogFieldCopy small {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.commandDialogNameItem .commandNameCounter {
+  position: static;
+  top: auto;
+  right: auto;
+  margin-left: auto;
+  padding: 3px 7px;
+  transform: none;
+  color: #7b869b;
+  background: #f2f5fa;
+  border: 1px solid #e4e9f1;
+  border-radius: 6px;
+  line-height: 14px;
+}
+
+.commandDialogModal .commandNameInput {
+  height: 44px;
+  padding: 0 13px;
+  color: #172238 !important;
+  font-size: 13px;
+  font-weight: 650;
+  background: #f8faff !important;
+  border-color: #dce3ee !important;
+  border-radius: 10px !important;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, .025);
+}
+
+.commandDialogModal .commandNameInput:hover {
+  background: #ffffff !important;
+  border-color: rgba(99, 102, 241, .45) !important;
+}
+
+.commandDialogModal .commandNameInput:focus {
+  background: #ffffff !important;
+  border-color: var(--accent-2) !important;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, .11) !important;
+}
+
+.commandScriptEditor {
+  overflow: hidden;
+  background: #f8fafc;
+  border: 1px solid #dce3ed;
+  border-radius: 11px;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, .025);
+  transition: border-color .2s ease, box-shadow .2s ease, background .2s ease;
+}
+
+.commandScriptEditor:hover {
+  background: #ffffff;
+  border-color: rgba(99, 102, 241, .42);
+}
+
+.commandScriptEditor:focus-within {
+  background: #ffffff;
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, .1);
+}
+
+.commandScriptToolbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  min-height: 34px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 11px;
+  background: linear-gradient(180deg, #f7f9fc, #f1f4f9);
+  border-bottom: 1px solid #e1e6ef;
+}
+
+.commandScriptDots {
+  display: flex;
+  gap: 4px;
+}
+
+.commandScriptDots i {
+  width: 7px;
+  height: 7px;
+  background: #c8cfdb;
+  border-radius: 50%;
+}
+
+.commandScriptDots i:first-child {
+  background: #ed8796;
+}
+
+.commandScriptDots i:nth-child(2) {
+  background: #e9b95e;
+}
+
+.commandScriptDots i:last-child {
+  background: #67ba9a;
+}
+
+.commandScriptLanguage {
+  color: #68748a;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .8px;
+}
+
+.commandScriptStats {
+  color: #8b96a9;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.commandDialogModal .commandScriptEditor .commandDialogTextarea {
+  min-height: 170px !important;
+  padding: 13px 14px !important;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  font-size: 12px !important;
+  line-height: 1.65 !important;
+}
+
+.commandDialogModal .commandScriptEditor .commandDialogTextarea:hover,
+.commandDialogModal .commandScriptEditor .commandDialogTextarea:focus {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+.commandDialogTip {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 9px 11px;
+  color: #647087;
+  font-size: 9px;
+  background: rgba(99, 102, 241, .045);
+  border: 1px solid rgba(99, 102, 241, .12);
+  border-radius: 9px;
+}
+
+.commandDialogTip > .anticon {
+  color: var(--accent-2);
+}
+
+.commandDialogTip kbd {
+  padding: 2px 6px;
+  color: #5e66c3;
+  font-family: inherit;
+  font-size: 8px;
+  font-weight: 800;
+  background: #ffffff;
+  border: 1px solid #dfe3f4;
+  border-radius: 5px;
+  box-shadow: 0 1px 1px rgba(15, 23, 42, .04);
+  white-space: nowrap;
+}
+
+.commandDialogFooter {
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 24px 16px;
+  background: #f8faff;
+  border-top-color: #e2e7f0;
+}
+
+.commandDialogReadyState {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #8a95a8;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.commandDialogReadyState i {
+  width: 7px;
+  height: 7px;
+  background: #c3cad6;
+  border-radius: 50%;
+}
+
+.commandDialogReadyState.ready {
+  color: #26826e;
+}
+
+.commandDialogReadyState.ready i {
+  background: #35aa8c;
+  box-shadow: 0 0 0 3px rgba(53, 170, 140, .11);
+}
+
+.commandDialogFooterActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.commandDialogFooter .ant-btn {
+  height: 36px !important;
+  min-width: 96px;
+  padding-inline: 16px !important;
+  border-radius: 9px !important;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.commandDialogFooter .ant-btn-primary:not(:disabled) {
+  background: var(--accent-grad) !important;
+  box-shadow: 0 8px 18px -9px rgba(99, 102, 241, .72) !important;
+}
+
+.commandDialogFooter .ant-btn-primary:disabled {
+  color: #a4adbd !important;
+  background: #e9edf4 !important;
+  border: 1px solid #dde3ec !important;
+  box-shadow: none !important;
+}
+
+@media (max-width: 600px) {
+  .commandDialogModeBadge,
+  .commandDialogReadyState {
+    display: none;
+  }
+
+  .commandDialogHeader {
+    grid-template-columns: 46px minmax(0, 1fr);
+  }
+
+  .commandDialogTip {
+    grid-template-columns: 16px minmax(0, 1fr);
+  }
+
+  .commandDialogTip kbd {
+    display: none;
+  }
+
+  .commandDialogFooter {
+    justify-content: flex-end;
+  }
+}
+
 .ant-tooltip-inner {
   border: 1px solid rgba(203, 213, 225, .82) !important;
   border-radius: 8px !important;
@@ -739,6 +1119,10 @@
   width: 420px;
   min-width: 420px;
   max-width: 420px;
+}
+
+.transferDetailHoverTooltip {
+  pointer-events: none;
 }
 
 .detailHoverTitle {

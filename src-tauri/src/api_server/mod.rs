@@ -30,7 +30,7 @@ use crate::vault::VaultStore;
 
 use tauri::{AppHandle, Emitter};
 
-pub use handlers_remote::{FileEntry, SessionItem};
+pub use handlers_remote::FileEntry;
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -235,7 +235,7 @@ fn map_remote_error(e: String, state: &ApiServerState) -> (StatusCode, Json<ApiE
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ApiError {
                 error: format!(
-                    "「{}」未连接。请在 HelM 主窗口中手动连接该会话后重试。",
+                    "「{}」当前不可用，自动连接未成功；请检查主机密钥、认证信息或网络后重试。",
                     display_name
                 ),
             }),
@@ -286,6 +286,77 @@ fn truncate_for_log(value: &str, max_chars: usize) -> String {
 
 fn take_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
+}
+
+fn command_log_detail(command: &str, max_chars: usize) -> String {
+    if contains_sensitive_log_marker(command) {
+        let executable = command.split_whitespace().next().unwrap_or("命令");
+        return format!(
+            "{} [敏感参数已隐藏]",
+            truncate_for_log(executable, max_chars.saturating_sub(12).max(1))
+        );
+    }
+    truncate_for_log(command, max_chars)
+}
+
+fn response_log_preview(command: &str, response: &str, max_chars: usize) -> Option<String> {
+    if response.is_empty() {
+        return None;
+    }
+    if contains_sensitive_log_marker(command) {
+        return Some("[响应已隐藏：命令可能包含敏感信息]".to_string());
+    }
+
+    let candidate = take_chars(response, max_chars.saturating_mul(2).max(max_chars));
+    let mut redacted_lines = Vec::new();
+    let mut private_key_block = false;
+    for line in candidate.lines() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("-----begin ") && lower.contains("private key-----") {
+            private_key_block = true;
+            redacted_lines.push("[私钥内容已隐藏]");
+            continue;
+        }
+        if private_key_block {
+            if lower.contains("-----end ") && lower.contains("private key-----") {
+                private_key_block = false;
+            }
+            continue;
+        }
+        if contains_sensitive_log_marker(line) {
+            redacted_lines.push("[敏感内容已隐藏]");
+        } else {
+            redacted_lines.push(line);
+        }
+    }
+    let preview = take_chars(&redacted_lines.join("\n"), max_chars);
+    (!preview.is_empty()).then_some(preview)
+}
+
+fn contains_sensitive_log_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "password",
+        "passwd",
+        "passphrase",
+        "secret",
+        "token",
+        "authorization",
+        "bearer ",
+        "api_key",
+        "apikey",
+        "access_key",
+        "private_key",
+        "private key",
+        "id_rsa",
+        "id_ed25519",
+        "/etc/shadow",
+        ".env",
+        "credential",
+        "cookie",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 // ─── Server startup ────────────────────────────────────────────────────────────
@@ -340,6 +411,8 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         .route("/api/connect", post(handlers_remote::rest_connect))
         .route("/api/disconnect", post(handlers_remote::rest_disconnect))
         .route("/api/exec", post(handlers_remote::rest_exec))
+        .route("/api/exec/batch", post(handlers_remote::rest_exec_batch))
+        .route("/api/latency", post(handlers_remote::rest_latency))
         .route("/api/files", get(handlers_remote::rest_files))
         // ─── REST：隧道管理（CRUD + start/stop） ───────────────────────────────
         .route(
@@ -463,4 +536,33 @@ fn is_allowed_local_origin(origin: &HeaderValue) -> bool {
             .unwrap_or(authority)
     };
     matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{command_log_detail, response_log_preview};
+
+    #[test]
+    fn api_logs_hide_sensitive_command_arguments_and_output() {
+        let detail = command_log_detail("curl -H 'Authorization: Bearer top-secret'", 77);
+        assert!(detail.contains("敏感参数已隐藏"));
+        assert!(!detail.contains("top-secret"));
+
+        let preview = response_log_preview(
+            "cat ~/.ssh/id_rsa",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END OPENSSH PRIVATE KEY-----",
+            2_000,
+        )
+        .unwrap();
+        assert!(preview.contains("响应已隐藏"));
+        assert!(!preview.contains("OPENSSH PRIVATE KEY"));
+    }
+
+    #[test]
+    fn api_logs_keep_normal_output_preview() {
+        assert_eq!(
+            response_log_preview("uname -a", "Linux helm", 2_000).as_deref(),
+            Some("Linux helm")
+        );
+    }
 }

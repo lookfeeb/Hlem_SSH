@@ -30,9 +30,9 @@ export function loadDirectoryViewState(session: DirectorySessionState): Director
     entries[path] = sortRemoteEntries(session.files);
   }
   const expandedKeys = cached?.sftpId === sftpId
-    ? uniqueKeys([...cached.expandedKeys, ...getDirectoryAncestorPaths(path)])
+    ? uniqueKeys([...cached.expandedKeys, ...getDirectoryParentPaths(path)])
     : sftpId
-      ? getDirectoryAncestorPaths(path)
+      ? getDirectoryParentPaths(path)
       : ["/"];
   return { sftpId, entries, expandedKeys };
 }
@@ -49,11 +49,11 @@ export function filesBelongToDirectory(files: RemoteFileEntry[], directoryPath: 
   });
 }
 
-export function getDirectoryAncestorPaths(path: string) {
+export function getDirectoryParentPaths(path: string) {
   const segments = getPathSegments(path);
   const paths = ["/"];
   let current = "/";
-  for (const segment of segments) {
+  for (const segment of segments.slice(0, -1)) {
     current = joinPath(current, segment);
     paths.push(current);
   }

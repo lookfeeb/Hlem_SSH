@@ -42,12 +42,14 @@
   grid-template-rows: auto minmax(0, 1fr);
   height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 
 .fileTopArea {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
 }
 
 .fileContent {
@@ -56,6 +58,14 @@
   min-height: 0;
   height: 100%;
   overflow: hidden;
+}
+
+.fileContent-quickCommandsOpen {
+  grid-template-columns:
+    clamp(160px, 20%, 220px)
+    minmax(0, 1fr)
+    7px
+    min(var(--quick-command-dock-width, 340px), 38%);
 }
 
 .fileTableSurface {
@@ -81,7 +91,7 @@
 }
 
 .fileContextMenuAnchor {
-  position: fixed;
+  position: absolute;
   z-index: 1000;
   width: 1px;
   height: 1px;
@@ -118,12 +128,350 @@
   padding-bottom: 4px;
 }
 
-.fileOperationModal .fileCreateForm .ant-form-item:first-child .ant-form-item-label {
-  display: none;
-}
-
 .fileOperationModal .ant-form-item:last-child {
   margin-bottom: 0;
+}
+
+/* 新建文件 / 目录 */
+.fileCreateModal .ant-modal-container {
+  padding: 0 !important;
+  overflow: hidden;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+}
+
+.fileCreateModal .ant-modal-header {
+  margin: 0 !important;
+  padding: 20px 24px 18px !important;
+  background:
+    radial-gradient(420px 110px at 12% 0%, rgba(99, 102, 241, .12), transparent 72%),
+    linear-gradient(135deg, #fbfdff 0%, #f7f8ff 100%) !important;
+  border-bottom: 1px solid rgba(221, 230, 241, .85) !important;
+}
+
+.fileCreateModal .ant-modal-body {
+  padding: 22px 24px 20px !important;
+}
+
+.fileCreateModal .ant-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin: 0 !important;
+  padding: 14px 24px 16px !important;
+  background: #f8faff;
+  border-top: 1px solid rgba(221, 230, 241, .8) !important;
+}
+
+.fileCreateModal .ant-modal-footer .ant-btn {
+  min-width: 104px;
+  height: 36px;
+  margin-inline-start: 0 !important;
+  border-radius: 9px;
+  font-weight: 700;
+}
+
+.fileCreateModal .ant-modal-footer .ant-btn-primary:not(:disabled) {
+  border-color: transparent;
+  background: var(--accent-grad);
+  box-shadow: 0 8px 18px -8px rgba(79, 70, 229, .65);
+}
+
+.fileCreateModal .ant-modal-close {
+  top: 20px !important;
+  inset-inline-end: 20px !important;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+}
+
+.fileDialogTitleDetailed {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding-right: 40px;
+}
+
+.fileDialogTitleIcon {
+  display: grid;
+  flex: 0 0 42px;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  color: #ffffff;
+  font-size: 19px;
+  background: var(--accent-grad);
+  border-radius: 12px;
+  box-shadow: 0 10px 22px -10px rgba(79, 70, 229, .7);
+}
+
+.fileDialogTitleCopy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fileDialogTitleCopy strong {
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 850;
+  letter-spacing: -.15px;
+}
+
+.fileDialogTitleCopy small {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.fileCreateForm .ant-form-item-label {
+  width: 100%;
+  padding-bottom: 8px !important;
+}
+
+.fileCreateForm .ant-form-item-label > label {
+  width: 100%;
+  height: auto;
+}
+
+.fileCreateFieldHeading {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fileCreateFieldHeading strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.fileCreateFieldHeading small {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.fileCreateForm .fileCreateTypeItem {
+  margin-bottom: 20px !important;
+}
+
+.fileCreateForm .fileCreateNameItem {
+  margin-bottom: 14px !important;
+}
+
+.fileCreateTypePicker {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+
+.fileCreateTypePicker .ant-radio-wrapper {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 78px;
+  align-items: center;
+  margin: 0;
+  padding: 13px 14px;
+  overflow: hidden;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: border-color .2s ease, box-shadow .2s ease, transform .2s ease, background .2s ease;
+}
+
+.fileCreateTypePicker .ant-radio-wrapper:hover {
+  border-color: rgba(99, 102, 241, .45);
+  box-shadow: 0 8px 20px -14px rgba(79, 70, 229, .55);
+  transform: translateY(-1px);
+}
+
+.fileCreateTypePicker .ant-radio-wrapper:focus-within {
+  outline: 3px solid rgba(99, 102, 241, .14);
+  outline-offset: 1px;
+}
+
+.fileCreateTypePicker .ant-radio-wrapper-checked {
+  border-color: var(--accent-2);
+  background: linear-gradient(135deg, rgba(99, 102, 241, .08), rgba(59, 130, 246, .04));
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, .1);
+}
+
+.fileCreateTypePicker .ant-radio {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.fileCreateTypePicker .ant-radio-label {
+  display: flex;
+  min-width: 0;
+  width: 100%;
+  align-items: center;
+  gap: 11px;
+  padding-inline-start: 0 !important;
+}
+
+.fileCreateTypeIcon {
+  display: grid;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  color: #4f65d9;
+  font-size: 18px;
+  background: #eef2ff;
+  border: 1px solid #dfe5ff;
+  border-radius: 11px;
+  transition: transform .2s ease, color .2s ease, background .2s ease;
+}
+
+.fileCreateTypePicker .ant-radio-wrapper:nth-child(2) .fileCreateTypeIcon {
+  color: #b7791f;
+  background: #fff7e8;
+  border-color: #f8e2b9;
+}
+
+.fileCreateTypePicker .ant-radio-wrapper-checked .fileCreateTypeIcon {
+  color: #ffffff;
+  background: var(--accent-grad);
+  border-color: transparent;
+  transform: scale(1.04);
+}
+
+.fileCreateTypeCopy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fileCreateTypeCopy strong {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.fileCreateTypeCopy small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileCreateTypeSelected {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: var(--accent-2);
+  font-size: 13px;
+  opacity: 0;
+  transform: scale(.75);
+  transition: opacity .18s ease, transform .18s ease;
+}
+
+.fileCreateTypePicker .ant-radio-wrapper-checked .fileCreateTypeSelected {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.fileCreateNameInput.ant-input-affix-wrapper {
+  height: 44px;
+  padding-inline: 13px;
+  background: var(--bg-raised);
+  border-color: var(--border);
+  border-radius: 11px;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, .025);
+}
+
+.fileCreateNameInput.ant-input-affix-wrapper:hover {
+  border-color: rgba(99, 102, 241, .45);
+  background: #ffffff;
+}
+
+.fileCreateNameInput.ant-input-affix-wrapper-focused {
+  border-color: var(--accent-2);
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, .11);
+}
+
+.fileCreateNameInput .ant-input-prefix {
+  margin-inline-end: 9px;
+  color: var(--accent-2);
+  font-size: 15px;
+}
+
+.fileCreateNameInput .ant-input {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.fileCreateLocation {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 12px;
+  background: linear-gradient(135deg, #f7f9fd, #fbfcff);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+}
+
+.fileCreateLocationIcon {
+  display: grid;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  color: #6b7280;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.fileCreateLocationCopy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fileCreateLocationCopy small {
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .3px;
+}
+
+.fileCreateLocationCopy code {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 580px) {
+  .fileCreateTypePicker {
+    grid-template-columns: 1fr;
+  }
+
+  .fileCreateFieldHeading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
 }
 
 /* 路径流向图 */

@@ -11,6 +11,8 @@ export interface RemoteSession {
   accent: string;
   favorite: boolean;
   lastConnectedAt?: string | null;
+  connectionCount?: number;
+  createdAt?: string | null;
   currentPath: string;
   loginPath?: string | null;
   connectionId?: string | null;
@@ -19,6 +21,7 @@ export interface RemoteSession {
   terminalId?: string | null;
   sftpId?: string | null;
   telemetryJobId?: string | null;
+  connectionNotice?: string | null;
   terminal: TerminalEntry[];
   telemetry: ServerTelemetry;
   files: RemoteFileEntry[];
@@ -36,6 +39,7 @@ export interface ServerTelemetry {
   ip: string;
   ipv6: string;
   uptime: string;
+  uptimeSeconds: number | null;
   cpu: number;
   memory: UsageMetric;
   swap: UsageMetric;
@@ -62,6 +66,18 @@ export interface NetworkMetric {
   downloadKbps: number;
   latencyMs: number;
   interfaces: NetworkInterfaceMetric[];
+}
+
+export interface LatencyProbeResult {
+  connectionId: string;
+  samplesMs: number[];
+  minMs: number;
+  averageMs: number;
+  medianMs: number;
+  maxMs: number;
+  jitterMs: number;
+  failedSamples: number;
+  measuredAt: string;
 }
 
 export interface NetworkInterfaceMetric {
@@ -117,13 +133,13 @@ export interface AppSettings {
   aiApiSessionIds?: string[];
   aiApiPort?: number | null;
   aiApiAutoStart?: boolean;
+  collapsedConnectionSectionIds?: string[];
 }
 
 export interface QuickCommand {
   id: string;
   name: string;
   command: string;
-  clickCount: number;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -203,6 +219,7 @@ export interface SessionConfig {
   groupId?: string | null;
   favorite?: boolean;
   lastConnectedAt?: string | null;
+  connectionCount?: number;
   host: string;
   port: number;
   username: string;
@@ -251,7 +268,10 @@ export interface SftpOptions {
 
 export type GroupInput = Pick<SessionGroup, "name" | "parentId">;
 
-export type SessionInput = Omit<SessionConfig, "id" | "createdAt" | "updatedAt" | "favorite" | "lastConnectedAt">;
+export type SessionInput = Omit<
+  SessionConfig,
+  "id" | "createdAt" | "updatedAt" | "favorite" | "lastConnectedAt" | "connectionCount"
+>;
 
 export interface TunnelConfig {
   id: string;
@@ -276,6 +296,7 @@ export interface ConnectionInfo {
   username: string;
   status: ConnectionState;
   connectedAt: string;
+  disconnectReason?: string | null;
 }
 
 export interface TerminalInfo {

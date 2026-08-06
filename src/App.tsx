@@ -33,12 +33,9 @@ import { AppLoadingFallback } from "./components/shared/AppLoadingFallback";
 import { AppProviders } from "./components/shared/AppProviders";
 import { AppStatusBar } from "./components/AppStatusBar";
 import { ConnectionSidebar } from "./components/ConnectionSidebar";
-import { FileManager } from "./components/FileManager";
 import { MigrationGate } from "./components/MigrationGate";
 import { SessionConfigModal } from "./components/SessionConfigModal";
-import { SplitPane } from "./components/SplitPane";
-import { TelemetrySidebar } from "./components/TelemetrySidebar";
-import { TerminalPanel } from "./components/TerminalPanel";
+import { SessionWorkspace, type SessionWorkspaceActions } from "./components/SessionWorkspace";
 import { TopBar } from "./components/TopBar";
 import { EmptyWorkspace } from "./components/shared/EmptyWorkspace";
 import { configToRemoteSession, getErrorMessage } from "./lib/configMapping";
@@ -47,12 +44,14 @@ import { isRuntimeSession, remoteSessionConfigId } from "./lib/session";
 import { TERMINAL_SCROLLBACK, TERMINAL_WEBGL_ENABLED } from "./lib/performanceDefaults";
 import type {
   ConfigSnapshot,
+  QuickCommand,
   RemoteFileEntry,
   RemoteSession,
   SftpChangedEvent,
 } from "./types";
 
 const SFTP_REFRESH_DEBOUNCE_MS = 120;
+const EMPTY_QUICK_COMMANDS: QuickCommand[] = [];
 
 function App() {
   const [configSnapshot, setConfigSnapshot] = useState<ConfigSnapshot>();
@@ -80,6 +79,9 @@ function App() {
   const sftpListRequestsRef = useRef<Map<string, Promise<RemoteFileEntry[]>>>(new Map());
   const sftpRefreshTimersRef = useRef<Map<string, number>>(new Map());
   const sftpChangedDirectoriesRef = useRef<Map<string, Set<string>>>(new Map());
+  const connectionSectionSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const connectionSectionSaveVersionRef = useRef(0);
+  const sessionWorkspaceActionsRef = useRef<SessionWorkspaceActions | null>(null);
   const listSftpFiles = useCallback((sftpId: string, path: string) => {
     const normalizedPath = normalizeRemotePath(path);
     const requestKey = `${sftpId}:${normalizedPath}`;
@@ -197,7 +199,7 @@ function App() {
   });
   const {
     changePath,
-    refreshActiveFiles,
+    refreshSessionFiles,
     runFileOperation,
     uploadLocalFiles,
     downloadRemoteFiles,
@@ -434,6 +436,8 @@ function App() {
       if (!current || current.state === "disconnected") return next;
       return {
         ...next,
+        host: current.host,
+        username: current.username,
         state: current.state,
         currentPath: current.currentPath,
         loginPath: current.loginPath,
@@ -443,6 +447,7 @@ function App() {
         terminalId: current.terminalId,
         sftpId: current.sftpId,
         telemetryJobId: current.telemetryJobId,
+        connectionNotice: current.connectionNotice,
         terminal: current.terminal,
         telemetry: current.telemetry,
         files: current.files,
@@ -456,11 +461,11 @@ function App() {
         ...current,
         name: nextBase.name,
         groupId: nextBase.groupId,
-        host: nextBase.host,
-        username: nextBase.username,
         accent: nextBase.accent,
         favorite: nextBase.favorite,
         lastConnectedAt: nextBase.lastConnectedAt,
+        connectionCount: nextBase.connectionCount,
+        createdAt: nextBase.createdAt,
       }];
     });
     return [...mergedBaseSessions, ...runtimeSessions];
@@ -496,14 +501,6 @@ function App() {
     }
   }
 
-  async function markSessionRecent(sessionId: string) {
-    try {
-      applySnapshot(await vaultApi.sessionMarkRecent(sessionId));
-    } catch (error) {
-      console.warn("[helm] failed to mark recent session:", getErrorMessage(error));
-    }
-  }
-
   async function clearSessionRecent(sessionId: string) {
     try {
       applySnapshot(await vaultApi.sessionClearRecent(sessionId));
@@ -512,9 +509,20 @@ function App() {
     }
   }
 
-  async function connectSessionWithRecent(session: RemoteSession) {
-    void markSessionRecent(remoteSessionConfigId(session));
-    await connectSession(session);
+  function persistConnectionSectionState(collapsedSectionIds: string[]) {
+    const version = connectionSectionSaveVersionRef.current + 1;
+    connectionSectionSaveVersionRef.current = version;
+    const task = connectionSectionSaveQueueRef.current.then(async () => {
+      const snapshot = await vaultApi.connectionSectionStateUpdate(collapsedSectionIds);
+      if (version === connectionSectionSaveVersionRef.current) applyConfigSnapshot(snapshot);
+    });
+    connectionSectionSaveQueueRef.current = task.catch(() => undefined);
+    return task.catch((error) => {
+      if (version === connectionSectionSaveVersionRef.current) {
+        Modal.error({ title: "保存分组状态失败", content: getErrorMessage(error) });
+      }
+      throw error;
+    });
   }
 
   function activateConfigSession(session: RemoteSession) {
@@ -587,7 +595,25 @@ function App() {
     sftpChangedDirectoriesRef.current.clear();
   }
 
+  sessionWorkspaceActionsRef.current = {
+    sendTerminalData,
+    sendTerminalCommand,
+    resizeTerminal,
+    clearTerminal,
+    changePath,
+    refreshSessionFiles,
+    searchRemoteFile,
+    listRemoteDirectory,
+    runFileOperation,
+    uploadLocalFiles,
+    downloadRemoteFiles,
+    readRemoteText,
+    writeRemoteText,
+    saveQuickCommands,
+  };
+
   const currentSettings = configSnapshot?.data.settings ?? { proxy: null, backup: defaultBackupSettings(), quickCommands: [] };
+  const quickCommands = currentSettings.quickCommands ?? EMPTY_QUICK_COMMANDS;
 
   return (
     <AppProviders>
@@ -601,7 +627,7 @@ function App() {
                   activeSessionId={activeSession?.id ?? ""}
                   onActivate={activateSession}
                   onClose={closeSession}
-                  onConnect={(session) => void connectSessionWithRecent(session)}
+                  onConnect={(session) => void connectSession(session)}
                   onDisconnect={(session) => void disconnectSession(session)}
                   onCancelConnect={(id) => void cancelConnectingSession(id)}
                   onTransferOpen={() => setTransferCenterOpen(true)}
@@ -625,58 +651,28 @@ function App() {
                       onAdd={() => void addSession()}
                       onEdit={(id) => editSession(id)}
                       onDelete={(id) => void deleteSession(id)}
-                      onConnect={(session) => void connectSessionWithRecent(session)}
+                      onConnect={(session) => void connectSession(session)}
                       onDisconnect={(session) => void disconnectSession(session)}
                       onCancelConnect={(id) => void cancelConnectingSession(id)}
                       onFavoriteChange={(id, favorite) => void updateSessionFavorite(id, favorite)}
-                      onMarkRecent={(id) => void markSessionRecent(id)}
                       onClearRecent={(id) => void clearSessionRecent(id)}
+                      collapsedSectionIds={configSnapshot?.data.settings.collapsedConnectionSectionIds ?? []}
+                      onCollapsedSectionIdsChange={persistConnectionSectionState}
                     />
-                    <section className="mainSurface">
-                      <SplitPane
-                        minTop={240}
-                        minBottom={220}
-                        top={
-                          <div className="terminalLayer">
-                            {openSessions.map((sess) => (
-                              <div
-                                key={sess.id}
-                                className="terminalSlot"
-                                style={{ display: sess.id === activeSession.id ? "block" : "none" }}
-                              >
-                                <TerminalPanel
-                                  session={sess}
-                                  scrollback={TERMINAL_SCROLLBACK}
-                                  webglEnabled={TERMINAL_WEBGL_ENABLED}
-                                  onSendData={(data) => void sendTerminalData(sess.id, sess.terminalId, data)}
-                                  onResize={(cols, rows) => void resizeTerminal(sess.terminalId, cols, rows)}
-                                  onClear={() => clearTerminal(sess.id)}
-                                />
-                              </div>
-                            ))}
-                          </div>
-                        }
-                        bottom={
-                          <FileManager
-                            session={activeSession}
-                            onPathChange={(path) => void changePath(path)}
-                            onRefresh={refreshActiveFiles}
-                            onRemoteSearch={searchRemoteFile}
-                            onListDirectory={listRemoteDirectory}
-                            onFileOperation={runFileOperation}
-                            onUploadFiles={uploadLocalFiles}
-                            onDownloadFiles={downloadRemoteFiles}
-                            onReadText={readRemoteText}
-                            onWriteText={writeRemoteText}
-                            onSendCommand={(command) => sendTerminalCommand(activeSession.id, activeSession.terminalId, command)}
-                            quickCommands={currentSettings.quickCommands ?? []}
-                            onQuickCommandsChange={saveQuickCommands}
-                            filesLoading={fileLoadingSessionIds.has(activeSession.id)}
-                          />
-                        }
-                      />
+                    <section className="sessionWorkspaceLayer">
+                      {openSessions.map((session) => (
+                        <SessionWorkspace
+                          key={session.id}
+                          session={session}
+                          active={session.id === activeSession.id}
+                          filesLoading={fileLoadingSessionIds.has(session.id)}
+                          quickCommands={quickCommands}
+                          scrollback={TERMINAL_SCROLLBACK}
+                          webglEnabled={TERMINAL_WEBGL_ENABLED}
+                          actionsRef={sessionWorkspaceActionsRef}
+                        />
+                      ))}
                     </section>
-                    <TelemetrySidebar session={activeSession} />
                   </main>
                 ) : (
                   <main className="workspace workspace-empty">
@@ -689,12 +685,13 @@ function App() {
                       onAdd={() => void addSession()}
                       onEdit={(id) => editSession(id)}
                       onDelete={(id) => void deleteSession(id)}
-                      onConnect={(session) => void connectSessionWithRecent(session)}
+                      onConnect={(session) => void connectSession(session)}
                       onDisconnect={(session) => void disconnectSession(session)}
                       onCancelConnect={(id) => void cancelConnectingSession(id)}
                       onFavoriteChange={(id, favorite) => void updateSessionFavorite(id, favorite)}
-                      onMarkRecent={(id) => void markSessionRecent(id)}
                       onClearRecent={(id) => void clearSessionRecent(id)}
+                      collapsedSectionIds={configSnapshot?.data.settings.collapsedConnectionSectionIds ?? []}
+                      onCollapsedSectionIdsChange={persistConnectionSectionState}
                     />
                     <EmptyWorkspace
                       sessionCount={configSessions.length}
@@ -752,7 +749,9 @@ function App() {
                 clearFileSaveRecords();
                 void vaultApi.backupRecordsClear().then(applyConfigSnapshot);
               }}
-              onUploadFiles={(paths) => void uploadLocalFiles(paths, activeSession?.currentPath ?? "/")}
+              onUploadFiles={(paths) => {
+                if (activeSession) void uploadLocalFiles(activeSession.id, paths, activeSession.currentPath);
+              }}
               onOpenDir={(dir) => void openPathDir(dir)}
             />
           </Suspense>

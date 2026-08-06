@@ -131,7 +131,7 @@ export function SettingsModal({
         centered
         closable={!saving}
         keyboard={!saving}
-        maskClosable={!saving}
+        mask={{ closable: !saving }}
       >
         <div className="settingsModalLayout">
           <aside className="settingsModalSidebar">

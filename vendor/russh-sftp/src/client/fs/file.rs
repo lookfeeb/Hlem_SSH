@@ -55,6 +55,9 @@ struct FileState {
     /// Set once the server returns SSH_FX_EOF. Stops further pipelining and
     /// makes [`AsyncRead::poll_read`] report EOF.
     read_eof: bool,
+    /// Optional exclusive end offset for pipelined READ requests. This keeps
+    /// ranged/parallel downloads from prefetching beyond their assigned span.
+    read_limit_end: Option<u64>,
     /// Adaptive in-flight depth: starts low and grows by 1 per completed READ
     /// response, capped at [`Features::max_concurrent_reads`]. Avoids blasting
     /// the SSH window with the full cap before TCP cwnd has expanded.
@@ -92,6 +95,7 @@ impl File {
                 read_buffered: None,
                 read_offset_next: 0,
                 read_eof: false,
+                read_limit_end: None,
                 read_concurrent_target: INITIAL_READ_CONCURRENCY
                     .min(features.max_concurrent_reads.max(1)),
             },
@@ -126,6 +130,23 @@ impl File {
         self.session.fsync(self.handle.as_str()).await.map(|_| ())
     }
 
+    /// Limits future reads to at most `len` bytes from the current position.
+    ///
+    /// Call this before the first read (and after any seek). The read pipeline
+    /// will not issue requests beyond the exclusive end offset.
+    pub fn set_read_limit(&mut self, len: u64) -> io::Result<()> {
+        if !self.state.read_inflight.is_empty() || self.state.read_buffered.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "read limit must be set before reading",
+            ));
+        }
+        self.state.read_limit_end = Some(self.pos.saturating_add(len));
+        self.state.read_offset_next = self.pos;
+        self.state.read_eof = len == 0;
+        Ok(())
+    }
+
     // ─── read pipelining helpers ──────────────────────────────────────────────
 
     /// Maximum payload size for a single READ request, derived from the
@@ -145,10 +166,7 @@ impl File {
     /// repair short reads (the missing tail must be served before any newer
     /// pipelined chunks).
     fn issue_read(&mut self, offset: u64, len: u32, push_front: bool) -> bool {
-        match self
-            .session
-            .read_nowait(self.handle.clone(), offset, len)
-        {
+        match self.session.read_nowait(self.handle.clone(), offset, len) {
             Ok(rx) => {
                 let entry = ReadInflight { rx, offset, len };
                 if push_front {
@@ -177,7 +195,17 @@ impl File {
         let limit = self.state.read_concurrent_target.clamp(1, cap);
         while self.state.read_inflight.len() < limit {
             let offset = self.state.read_offset_next;
-            if !self.issue_read(offset, max_len, false) {
+            let request_len = match self.state.read_limit_end {
+                Some(end) => {
+                    let remaining = end.saturating_sub(offset);
+                    if remaining == 0 {
+                        break;
+                    }
+                    max_len.min(remaining.min(u32::MAX as u64) as u32)
+                }
+                None => max_len,
+            };
+            if !self.issue_read(offset, request_len, false) {
                 if self.state.read_inflight.is_empty() {
                     return Err(io::Error::other(
                         "failed to issue read request (session closed?)",
@@ -185,7 +213,7 @@ impl File {
                 }
                 return Ok(());
             }
-            self.state.read_offset_next += max_len as u64;
+            self.state.read_offset_next += request_len as u64;
         }
         Ok(())
     }
@@ -316,8 +344,7 @@ impl AsyncRead for File {
                     )));
                 }
                 Poll::Ready(Ok(Err(e))) => {
-                    let is_eof =
-                        matches!(&e, Error::Status(s) if s.status_code == StatusCode::Eof);
+                    let is_eof = matches!(&e, Error::Status(s) if s.status_code == StatusCode::Eof);
                     self.state.read_inflight.clear();
                     if is_eof {
                         self.state.read_eof = true;
@@ -453,8 +480,9 @@ impl AsyncSeek for File {
                 self.state.read_buffered = None;
                 self.state.read_offset_next = self.pos;
                 self.state.read_eof = false;
-                self.state.read_concurrent_target = INITIAL_READ_CONCURRENCY
-                    .min(self.features.max_concurrent_reads.max(1));
+                self.state.read_limit_end = None;
+                self.state.read_concurrent_target =
+                    INITIAL_READ_CONCURRENCY.min(self.features.max_concurrent_reads.max(1));
                 Poll::Ready(Ok(self.pos))
             }
         }

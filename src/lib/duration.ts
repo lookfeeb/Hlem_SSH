@@ -15,6 +15,14 @@ export function formatDurationMs(durationMs: number) {
   return days > 0 ? `${days} 天 ${time}` : time;
 }
 
+export function formatUptimeSeconds(value: number) {
+  const totalSeconds = Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${hours} 小时 ${pad2(minutes)} 分钟 ${pad2(seconds)} 秒`;
+}
+
 function pad2(value: number) {
   return value.toString().padStart(2, "0");
 }

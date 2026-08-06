@@ -1,6 +1,6 @@
 use super::*;
 use socket2::{SockRef, TcpKeepalive};
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
 const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -41,9 +41,7 @@ pub(super) async fn connect_tcp_for_ssh(
         None => connect_tcp_with_timeout(host, port, "SSH 直连").await?,
         Some(p) => match p.kind.as_str() {
             "direct" => connect_tcp_with_timeout(host, port, "SSH 直连").await?,
-            "socks5" => connect_via_socks5(p, host, port).await?,
-            "httpConnect" => connect_via_http_connect(p, host, port).await?,
-            _ => return Err(AppError::InvalidInput("代理类型无效".to_string())),
+            _ => connect_via_configured_proxy(p, host, port).await?,
         },
     };
     enable_tcp_keepalive(&stream);
@@ -55,10 +53,61 @@ pub(super) async fn connect_tcp_with_timeout(
     port: u16,
     label: &str,
 ) -> AppResult<TcpStream> {
+    #[cfg(windows)]
+    if is_non_loopback_target(host) {
+        match crate::direct_broker::connect(host, port, label).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => log::warn!(
+                "SSH direct broker failed; falling back to process-local socket: target={}:{} error={}",
+                host,
+                port,
+                error
+            ),
+        }
+    }
     match tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect((host, port))).await {
-        Ok(Ok(stream)) => Ok(stream),
-        Ok(Err(error)) => Err(remote_error(error)),
+        Ok(Ok(stream)) => {
+            if is_non_loopback_target(host)
+                && stream
+                    .local_addr()
+                    .map(|address| address.ip().is_loopback())
+                    .unwrap_or(false)
+            {
+                log::warn!(
+                    "SSH OS route is transparently redirected to loopback: target={}:{} local={:?}",
+                    host,
+                    port,
+                    stream.local_addr().ok()
+                );
+            }
+            Ok(stream)
+        }
+        Ok(Err(error)) => Err(AppError::Remote(format!(
+            "{label}失败: {host}:{port}: {error}"
+        ))),
         Err(_) => Err(AppError::Remote(format!("{label}超时: {host}:{port}"))),
+    }
+}
+
+fn is_non_loopback_target(host: &str) -> bool {
+    let host = host.trim().trim_matches(['[', ']']);
+    if host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    host.parse::<IpAddr>()
+        .map(|address| !address.is_loopback())
+        .unwrap_or(true)
+}
+
+async fn connect_via_configured_proxy(
+    proxy: &SshProxyOptions,
+    target_host: &str,
+    target_port: u16,
+) -> AppResult<TcpStream> {
+    match proxy.kind.as_str() {
+        "socks5" => connect_via_socks5(proxy, target_host, target_port).await,
+        "httpConnect" => connect_via_http_connect(proxy, target_host, target_port).await,
+        _ => Err(AppError::InvalidInput("代理类型无效".to_string())),
     }
 }
 
@@ -243,4 +292,19 @@ pub(super) async fn handle_socks5(mut stream: TcpStream, handle: SshHandle) -> A
         .await
         .map_err(remote_error)?;
     pipe_local_to_ssh(stream, handle, host, port).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_target_detection_handles_ip_and_host_names() {
+        assert!(is_non_loopback_target("192.0.2.10"));
+        assert!(is_non_loopback_target("198.51.100.20"));
+        assert!(is_non_loopback_target("ssh.example.com"));
+        assert!(!is_non_loopback_target("127.0.0.1"));
+        assert!(!is_non_loopback_target("[::1]"));
+        assert!(!is_non_loopback_target("localhost"));
+    }
 }

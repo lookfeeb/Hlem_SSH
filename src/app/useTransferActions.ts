@@ -1,6 +1,7 @@
 import { remoteApi } from "../api/remoteApi";
 import { getErrorCode, getErrorMessage } from "../lib/configMapping";
 import { useMountedRef } from "../lib/reactLifecycle";
+import { mergeTransferInfo } from "../lib/transferRecords";
 import type { MutableRefObject } from "react";
 import type { RemoteSession, TransferHistorySnapshot, TransferInfo } from "../types";
 
@@ -32,7 +33,9 @@ export function useTransferActions({
       const existing = current.findIndex((transfer) => transfer.transferId === payload.transferId);
       if (existing === -1) return [payload, ...current];
       const next = [...current];
-      next[existing] = payload;
+      const merged = mergeTransferInfo(next[existing], payload);
+      if (merged === next[existing]) return current;
+      next[existing] = merged;
       return next;
     });
   }

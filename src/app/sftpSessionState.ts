@@ -11,6 +11,17 @@ export type SftpInitializationTarget = {
   connectionKey: string;
 };
 
+export function resolveSftpSessionTarget<T extends { id: string }>(
+  sessions: readonly T[],
+  requestedSessionId: string | undefined,
+  activeSession: T | undefined,
+): T | undefined {
+  if (requestedSessionId) {
+    return sessions.find((session) => session.id === requestedSessionId);
+  }
+  return activeSession;
+}
+
 export function planSftpInitialization(
   sessions: readonly SftpSessionCandidate[],
   attemptedConnectionKeys: ReadonlySet<string>,
