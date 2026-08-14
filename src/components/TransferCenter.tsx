@@ -9,14 +9,15 @@ import {
   StopOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
-import { Button, Drawer, Empty, Progress, Space, Tooltip } from "antd";
-import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from "react";
+import { App as AntdApp, Button, Drawer, Empty, Progress, Space, Tooltip } from "antd";
+import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { appApi } from "../api/appApi";
 import { getErrorMessage } from "../lib/configMapping";
 import { formatBeijingDateTime, formatBytes } from "../lib/format";
 import {
   backupKindText,
   backupStatusText,
+  canRemoveTransfer,
   formatTransferSpeed,
   isActiveTransfer,
   isTransferDone,
@@ -52,9 +53,9 @@ interface TransferCenterProps {
   onRemove: (transferId: string) => void;
   onRetrySave: (recordId: string) => void;
   onRemoveSave: (recordId: string) => void;
-  onRestoreBackup: (recordId: string) => void;
-  onRemoveBackup: (recordId: string) => void;
-  onClear: () => void;
+  onRestoreBackup: (recordId: string) => Promise<void>;
+  onRemoveBackup: (recordId: string) => Promise<void>;
+  onClear: () => Promise<void> | void;
   onUploadFiles: (localPaths: string[]) => void;
 }
 
@@ -79,8 +80,23 @@ export function TransferCenter({
   onUploadFiles,
   onOpenDir,
 }: TransferCenterProps) {
+  const { message, modal } = AntdApp.useApp();
   const total = transfers.length + saveRecords.length + backupRecords.length;
   const [localPathExistsByTransferId, setLocalPathExistsByTransferId] = useState<LocalPathExistsMap>({});
+  const [clearing, setClearing] = useState(false);
+  const mountedRef = useRef(true);
+  const openRef = useRef(open);
+  const openCycleRef = useRef(0);
+  if (openRef.current !== open) {
+    openRef.current = open;
+    openCycleRef.current += 1;
+  }
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
+  useEffect(() => {
+    if (!open) setClearing(false);
+  }, [open]);
   const sessionLookup = useMemo<TransferSessionLookup>(() => {
     const bySessionId = new Map<string, RemoteSession>();
     const bySftpId = new Map<string, RemoteSession>();
@@ -132,11 +148,71 @@ export function TransferCenter({
   }, [localPathCheckKey, open]);
 
   async function handleFileSelect() {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const selected = await open({ title: "选择上传文件", multiple: true });
-    if (!selected) return;
-    const paths = Array.isArray(selected) ? selected : [selected];
-    if (paths.length > 0) onUploadFiles(paths);
+    const openCycle = openCycleRef.current;
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const selected = await openDialog({ title: "选择上传文件", multiple: true });
+      if (!mountedRef.current || !openRef.current || openCycleRef.current !== openCycle || !selected) return;
+      const paths = Array.isArray(selected) ? selected : [selected];
+      if (paths.length > 0) onUploadFiles(paths);
+    } catch (error) {
+      if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
+        message.error(`选择上传文件失败：${getErrorMessage(error)}`);
+      }
+    }
+  }
+
+  async function handleClear() {
+    if (clearing) return;
+    const openCycle = openCycleRef.current;
+    setClearing(true);
+    try {
+      await onClear();
+    } catch (error) {
+      if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
+        message.error(`清空任务记录失败：${getErrorMessage(error)}`);
+      }
+    } finally {
+      if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
+        setClearing(false);
+      }
+    }
+  }
+
+  function restoreBackup(record: BackupRecord) {
+    const openCycle = openCycleRef.current;
+    modal.confirm({
+      title: "恢复此备份",
+      content: `将恢复 ${record.fileName}，并断开当前所有连接。`,
+      okText: "恢复",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        if (!openRef.current || openCycleRef.current !== openCycle) return;
+        await onRestoreBackup(record.id);
+        if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
+          message.success("备份已恢复");
+        }
+      },
+    });
+  }
+
+  function removeBackup(record: BackupRecord) {
+    const openCycle = openCycleRef.current;
+    modal.confirm({
+      title: "删除备份记录",
+      content: "仅删除记录，不会删除备份文件。",
+      okText: "删除",
+      cancelText: "取消",
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        if (!openRef.current || openCycleRef.current !== openCycle) return;
+        await onRemoveBackup(record.id);
+        if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
+          message.success("备份记录已删除");
+        }
+      },
+    });
   }
 
   return (
@@ -157,7 +233,7 @@ export function TransferCenter({
               size="small"
               type="text"
               disabled={!canUpload}
-              onClick={handleFileSelect}
+              onClick={() => void handleFileSelect()}
             />
           </Tooltip>
           <Tooltip title="清空记录">
@@ -166,8 +242,9 @@ export function TransferCenter({
               icon={<ClearOutlined />}
               size="small"
               type="text"
-              disabled={total === 0}
-              onClick={onClear}
+              disabled={total === 0 || clearing}
+              loading={clearing}
+              onClick={() => void handleClear()}
             />
           </Tooltip>
           <Tooltip title="关闭">
@@ -201,8 +278,8 @@ export function TransferCenter({
             onRemove,
             onRetrySave,
             onRemoveSave,
-            onRestoreBackup,
-            onRemoveBackup,
+            onRestoreBackup: restoreBackup,
+            onRemoveBackup: removeBackup,
             onOpenDir,
           })}
         </div>
@@ -226,8 +303,8 @@ interface RenderAllRecordsProps {
   onOpenDir: (path: string) => void;
   onRetrySave: (id: string) => void;
   onRemoveSave: (id: string) => void;
-  onRestoreBackup: (id: string) => void;
-  onRemoveBackup: (id: string) => void;
+  onRestoreBackup: (record: BackupRecord) => void;
+  onRemoveBackup: (record: BackupRecord) => void;
 }
 
 type UnifiedRecord =
@@ -299,7 +376,7 @@ function renderBackupRecord(record: BackupRecord, props: RenderAllRecordsProps) 
                 aria-label="恢复备份"
                 icon={<ReloadOutlined />}
                 size="small"
-                onClick={() => props.onRestoreBackup(record.id)}
+                onClick={() => props.onRestoreBackup(record)}
               />
             </Tooltip>
           )}
@@ -308,7 +385,7 @@ function renderBackupRecord(record: BackupRecord, props: RenderAllRecordsProps) 
               aria-label="删除备份记录"
               icon={<DeleteOutlined />}
               size="small"
-              onClick={() => props.onRemoveBackup(record.id)}
+              onClick={() => props.onRemoveBackup(record)}
             />
           </Tooltip>
         </Space>
@@ -325,6 +402,7 @@ function renderBackupRecord(record: BackupRecord, props: RenderAllRecordsProps) 
 
 function renderSaveRecord(record: FileSaveRecord, props: RenderAllRecordsProps) {
   const retryable = record.status === "failed";
+  const removable = record.status !== "saving";
   return (
     <article className="transferListItem saveRecordItem" key={`save-${record.id}`}>
       <div className="transferListHeader">
@@ -345,14 +423,16 @@ function renderSaveRecord(record: FileSaveRecord, props: RenderAllRecordsProps) 
               />
             </Tooltip>
           )}
-          <Tooltip title="删除记录">
-            <Button
-              aria-label="删除保存记录"
-              icon={<DeleteOutlined />}
-              size="small"
-              onClick={() => props.onRemoveSave(record.id)}
-            />
-          </Tooltip>
+          {removable && (
+            <Tooltip title="删除记录">
+              <Button
+                aria-label="删除保存记录"
+                icon={<DeleteOutlined />}
+                size="small"
+                onClick={() => props.onRemoveSave(record.id)}
+              />
+            </Tooltip>
+          )}
         </Space>
       </div>
       <div className="transferListPaths">
@@ -462,14 +542,16 @@ function renderTransferRecord(transfer: TransferInfo, props: RenderAllRecordsPro
                 />
               </Tooltip>
             )}
-            <Tooltip title="删除">
-              <Button
-                aria-label="删除传输"
-                icon={<DeleteOutlined />}
-                size="small"
-                onClick={() => props.onRemove(transfer.transferId)}
-              />
-            </Tooltip>
+            {canRemoveTransfer(transfer) && (
+              <Tooltip title="删除记录">
+                <Button
+                  aria-label="删除传输记录"
+                  icon={<DeleteOutlined />}
+                  size="small"
+                  onClick={() => props.onRemove(transfer.transferId)}
+                />
+              </Tooltip>
+            )}
           </Space>
         </div>
         <div className="transferListPaths">

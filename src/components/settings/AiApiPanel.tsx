@@ -13,13 +13,15 @@ import {
 } from "@ant-design/icons";
 import { Button, Input, InputNumber, Modal, Select, Switch, Tooltip, message } from "antd";
 import type { MouseEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
-import type { AppSettings, ConfigSnapshot } from "../../types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { AiApiSettings, AppSettings, ConfigSnapshot } from "../../types";
 import { appApi, type ApiServerInfo, type ApiLogEntry } from "../../api/appApi";
 import { appEvents } from "../../api/appEvents";
 import { vaultApi } from "../../api/vaultApi";
 import { writeClipboardText } from "../../lib/clipboard";
 import { getErrorMessage } from "../../lib/configMapping";
+import { createAsyncQueue, isAsyncQueueInvalidatedError } from "../../lib/asyncQueue";
+import { mergeApiLogEntries } from "../../lib/apiLogEntries";
 import { useMountedRef, useTimeoutRegistry } from "../../lib/reactLifecycle";
 
 interface AiApiPanelProps {
@@ -60,21 +62,25 @@ function normalizeAiApiSessionRows(rows: Array<string | null>) {
   });
 }
 
-function sameSessionIds(left: string[], right: string[]) {
-  return left.length === right.length && left.every((id, index) => id === right[index]);
-}
-
 export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSession, onApiServerChange, onSettingsChange }: AiApiPanelProps) {
   const [aiApiInfo, setAiApiInfo] = useState<ApiServerInfo | null>(null);
   const [aiApiLoading, setAiApiLoading] = useState(false);
   const [aiApiPort, setAiApiPort] = useState(() => initialValue.aiApiPort ?? 19880);
   const [aiApiAutoStart, setAiApiAutoStart] = useState(() => initialValue.aiApiAutoStart ?? false);
   const mountedRef = useMountedRef();
+  const settingsMutationVersionRef = useRef(0);
+  const statusQueryVersionRef = useRef(0);
+  const serviceOperationVersionRef = useRef(0);
+  const settingsSaveQueue = useMemo(() => createAsyncQueue(), []);
   const setSafeTimeout = useTimeoutRegistry();
   const [aiApiSessionRows, setAiApiSessionRows] = useState<Array<string | null>>(() => initialAiApiSessionRows(initialValue, sessions));
   const [aiApiLogs, setAiApiLogs] = useState<ApiLogEntry[]>([]);
   const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null);
   const availableAiApiSessionIdsKey = sessions.map((session) => session.id).join("|");
+  const initialAiApiSessionIdsKey = [
+    ...(initialValue.aiApiSessionIds ?? []),
+    initialValue.aiApiSessionId ?? "",
+  ].join("|");
   const sessionsById = useMemo(() => new Map(sessions.map((session) => [session.id, session])), [sessions]);
   const sessionOptions = useMemo(
     () => sessions.map((session) => ({ label: session.name, value: session.id })),
@@ -84,79 +90,122 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
 
   useEffect(() => {
     if (!open) return;
+    settingsMutationVersionRef.current += 1;
     setAiApiSessionRows(initialAiApiSessionRows(initialValue, sessions));
     setAiApiPort(initialValue.aiApiPort ?? 19880);
     setAiApiAutoStart(initialValue.aiApiAutoStart ?? false);
-  }, [availableAiApiSessionIdsKey, open]);
+  }, [
+    availableAiApiSessionIdsKey,
+    initialAiApiSessionIdsKey,
+    initialValue.aiApiAutoStart,
+    initialValue.aiApiPort,
+    open,
+  ]);
+
+  useEffect(() => {
+    if (open) return;
+    settingsMutationVersionRef.current += 1;
+    serviceOperationVersionRef.current += 1;
+    settingsSaveQueue.invalidate();
+    setAiApiLoading(false);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     let mounted = true;
     let unlisten: (() => void) | null = null;
-    void appApi.apiServerLogs().then((items) => {
-      if (mounted) setAiApiLogs(items);
-    }).catch((error) => {
-      console.warn("[helm] failed to load api logs:", getErrorMessage(error));
-    });
-    void refreshAiApiStatus();
+    let unlistenStatus: (() => void) | null = null;
     void appEvents.onApiLog((entry) => {
       if (!mounted) return;
-      setAiApiLogs((prev) => {
-        const next = [...prev, entry];
-        return next.length > 100 ? next.slice(next.length - 100) : next;
-      });
+      setAiApiLogs((current) => mergeApiLogEntries(current, [entry]));
     }).then((u) => {
       if (!mounted) { u(); return; }
       unlisten = u;
+      void appApi.apiServerLogs().then((items) => {
+        if (mounted) setAiApiLogs((current) => mergeApiLogEntries(current, items));
+      }).catch((error) => {
+        console.warn("[helm] failed to load api logs:", getErrorMessage(error));
+      });
     }).catch((error) => {
       console.warn("[helm] failed to subscribe api logs:", getErrorMessage(error));
     });
-    return () => { mounted = false; if (unlisten) unlisten(); };
+    void appEvents.onApiStatus((info) => {
+      if (!mounted) return;
+      statusQueryVersionRef.current += 1;
+      setAiApiInfo(info);
+      onApiServerChange(info.running);
+      if (info.running && info.port) setAiApiPort(info.port);
+    }).then((u) => {
+      if (!mounted) { u(); return; }
+      unlistenStatus = u;
+      void refreshAiApiStatus();
+    }).catch((error) => {
+      console.warn("[helm] failed to subscribe api status:", getErrorMessage(error));
+    });
+    return () => {
+      mounted = false;
+      if (unlisten) unlisten();
+      if (unlistenStatus) unlistenStatus();
+    };
   }, [open]);
 
   async function refreshAiApiStatus() {
+    const queryVersion = ++statusQueryVersionRef.current;
     try {
       const info = await appApi.apiServerStatus();
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || queryVersion !== statusQueryVersionRef.current) return;
       setAiApiInfo(info);
       onApiServerChange(info.running);
       if (info.running && info.port) setAiApiPort(info.port);
     } catch (error) {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || queryVersion !== statusQueryVersionRef.current) return;
       console.warn("[helm] failed to refresh ai api status:", getErrorMessage(error));
       setAiApiInfo(null);
     }
   }
 
   async function startAiApi() {
+    const mutationVersion = ++settingsMutationVersionRef.current;
+    const operationVersion = ++serviceOperationVersionRef.current;
+    statusQueryVersionRef.current += 1;
     setAiApiLoading(true);
     try {
-      const info = await appApi.apiServerStart(aiApiPort, selectedAiApiSessionIds);
-      if (!mountedRef.current) return;
-      setAiApiInfo(info);
+      const result = await appApi.apiServerConfigureAndStart(
+        aiApiPort,
+        selectedAiApiSessionIds,
+        aiApiAutoStart,
+      );
+      if (!mountedRef.current || operationVersion !== serviceOperationVersionRef.current) return;
+      setAiApiInfo(result.info);
       onApiServerChange(true);
-      try {
-        await persistAiApiSettings({
-          aiApiKey: info.apiKey,
-          aiApiPort: info.port || aiApiPort,
-          aiApiSessionId: selectedAiApiSessionIds[0] ?? null,
-          aiApiSessionIds: selectedAiApiSessionIds,
-          aiApiAutoStart,
-        });
-      } catch (error) {
-        if (mountedRef.current) message.warning(`API 已启动，但保存设置失败：${getErrorMessage(error)}`);
-      }
+      onSettingsChange(result.snapshot);
     } catch (error) {
-      if (mountedRef.current) Modal.error({ title: "启动 API 服务失败", content: getErrorMessage(error) });
+      const status = await appApi.apiServerStatus().catch(() => null);
+      if (
+        !mountedRef.current
+        || operationVersion !== serviceOperationVersionRef.current
+        || mutationVersion !== settingsMutationVersionRef.current
+      ) return;
+      if (status) {
+        setAiApiInfo(status);
+        onApiServerChange(status.running);
+      }
+      Modal.error({ title: "启动 API 服务失败", content: getErrorMessage(error) });
     }
-    finally { if (mountedRef.current) setAiApiLoading(false); }
+    finally {
+      if (mountedRef.current && operationVersion === serviceOperationVersionRef.current) {
+        setAiApiLoading(false);
+      }
+    }
   }
 
   async function stopAiApi() {
+    const operationVersion = ++serviceOperationVersionRef.current;
+    statusQueryVersionRef.current += 1;
     setAiApiLoading(true);
     try {
       await appApi.apiServerStop();
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || operationVersion !== serviceOperationVersionRef.current) return;
       setAiApiInfo((prev) => ({
         running: false,
         port: prev?.port ?? aiApiPort,
@@ -165,9 +214,15 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
       onApiServerChange(false);
       message.success("AI API 已关闭");
     } catch (error) {
-      if (mountedRef.current) Modal.error({ title: "关闭 API 服务失败", content: getErrorMessage(error) });
+      if (mountedRef.current && operationVersion === serviceOperationVersionRef.current) {
+        Modal.error({ title: "关闭 API 服务失败", content: getErrorMessage(error) });
+      }
     }
-    finally { if (mountedRef.current) setAiApiLoading(false); }
+    finally {
+      if (mountedRef.current && operationVersion === serviceOperationVersionRef.current) {
+        setAiApiLoading(false);
+      }
+    }
   }
 
   async function toggleAiApiStatus() {
@@ -185,13 +240,26 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
   }
 
   async function regenerateKey() {
+    if (aiApiLoading) return;
+    const operationVersion = ++serviceOperationVersionRef.current;
+    statusQueryVersionRef.current += 1;
+    setAiApiLoading(true);
     try {
       const info = await appApi.apiServerRegenerateKey();
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || operationVersion !== serviceOperationVersionRef.current) return;
       setAiApiInfo(info);
+      const snapshot = await vaultApi.snapshot();
+      if (!mountedRef.current || operationVersion !== serviceOperationVersionRef.current) return;
+      onSettingsChange(snapshot);
       message.success("API Key 已重新生成");
     } catch (error) {
-      if (mountedRef.current) Modal.error({ title: "重新生成密钥失败", content: getErrorMessage(error) });
+      if (mountedRef.current && operationVersion === serviceOperationVersionRef.current) {
+        Modal.error({ title: "重新生成密钥失败", content: getErrorMessage(error) });
+      }
+    } finally {
+      if (mountedRef.current && operationVersion === serviceOperationVersionRef.current) {
+        setAiApiLoading(false);
+      }
     }
   }
 
@@ -201,6 +269,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
     const hasUnusedSession = sessions.some((session) => !selectedIds.includes(session.id));
 
     if (!hasUnusedSession) {
+      settingsMutationVersionRef.current += 1;
       const previousRows = aiApiSessionRows;
       onCreateSession((sessionId) => {
         if (selectedIds.includes(sessionId) || selectedIds.length >= MAX_AI_API_SESSIONS) return;
@@ -210,6 +279,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
     }
 
     if (!aiApiSessionRows[aiApiSessionRows.length - 1]) return;
+    settingsMutationVersionRef.current += 1;
     setAiApiSessionRows((prev) => [...prev, null]);
   }
 
@@ -240,8 +310,8 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
   }
 
   async function saveAiApiSessionRows(nextRowsInput: Array<string | null>, previousRows: Array<string | null>) {
+    const mutationVersion = ++settingsMutationVersionRef.current;
     const nextRows = normalizeAiApiSessionRows(nextRowsInput);
-    const previousSessionIds = compactAiApiSessionRows(previousRows);
     const nextSessionIds = compactAiApiSessionRows(nextRows);
     const previousAutoStart = aiApiAutoStart;
     const nextAutoStart = nextSessionIds.length > 0 ? aiApiAutoStart : false;
@@ -250,70 +320,55 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
     if (!nextAutoStart) setAiApiAutoStart(false);
     try {
       await persistAiApiSettings({
-        aiApiSessionId: nextSessionIds[0] ?? null,
-        aiApiSessionIds: nextSessionIds,
-        aiApiPort,
-        aiApiAutoStart: nextAutoStart,
+        sessionIds: nextSessionIds,
+        port: aiApiPort,
+        autoStart: nextAutoStart,
       });
       if (!mountedRef.current) return;
     } catch (error) {
-      if (mountedRef.current) {
+      if (isAsyncQueueInvalidatedError(error)) return;
+      if (mountedRef.current && mutationVersion === settingsMutationVersionRef.current) {
         message.error(`保存失败：${getErrorMessage(error)}`);
         setAiApiSessionRows(previousRows);
         setAiApiAutoStart(previousAutoStart);
       }
       return;
     }
-    if (sameSessionIds(previousSessionIds, nextSessionIds)) return;
-    if (aiApiInfo?.running) {
-      try {
-        const info = await appApi.apiServerUpdateSessions(nextSessionIds);
-        if (!mountedRef.current) return;
-        setAiApiInfo(info);
-        onApiServerChange(info.running);
-        if (info.running) {
-          message.success("指定会话已更新");
-        } else {
-          message.warning(nextSessionIds.length > 0 ? "API 服务已停止，仅保存会话配置" : "授权会话已清空，API 已停止");
-        }
-      } catch (error) {
-        if (mountedRef.current) message.error(`热更新 API 会话失败：${getErrorMessage(error)}`);
-      }
-    } else {
-      message.success(nextSessionIds.length > 0 ? "指定会话已更新" : "授权会话已清空");
+    if (mountedRef.current && mutationVersion === settingsMutationVersionRef.current) {
+      message.success(nextSessionIds.length > 0 ? "指定会话已更新" : "授权会话已清空，API 已停止");
     }
   }
 
   async function changeAiApiAutoStart(checked: boolean) {
+    const mutationVersion = ++settingsMutationVersionRef.current;
     setAiApiAutoStart(checked);
     try {
       await persistAiApiSettings({
-        aiApiAutoStart: checked,
-        aiApiSessionId: selectedAiApiSessionIds[0] ?? null,
-        aiApiSessionIds: selectedAiApiSessionIds,
-        aiApiPort,
+        autoStart: checked,
+        sessionIds: selectedAiApiSessionIds,
+        port: aiApiPort,
       });
       if (!mountedRef.current) return;
-      message.success(checked ? "已开启随应用自动启动" : "已关闭自动启动");
+      if (mutationVersion === settingsMutationVersionRef.current) {
+        message.success(checked ? "已开启随应用自动启动" : "已关闭自动启动");
+      }
     } catch (error) {
-      if (mountedRef.current) {
+      if (isAsyncQueueInvalidatedError(error)) return;
+      if (mountedRef.current && mutationVersion === settingsMutationVersionRef.current) {
         message.error(`保存失败：${getErrorMessage(error)}`);
         setAiApiAutoStart(!checked);
       }
     }
   }
 
-  async function persistAiApiSettings(overrides: Partial<AppSettings>) {
-    const nextSettings: AppSettings = {
-      ...initialValue,
-      aiApiKey: (aiApiInfo?.apiKey || initialValue.aiApiKey) ?? null,
-      aiApiSessionId: selectedAiApiSessionIds[0] ?? null,
-      aiApiSessionIds: selectedAiApiSessionIds,
-      aiApiPort,
-      aiApiAutoStart,
+  async function persistAiApiSettings(overrides: Partial<AiApiSettings>) {
+    const nextSettings: AiApiSettings = {
+      sessionIds: selectedAiApiSessionIds,
+      port: aiApiPort,
+      autoStart: aiApiAutoStart,
       ...overrides,
     };
-    const snapshot = await vaultApi.settingsUpdate(nextSettings);
+    const snapshot = await settingsSaveQueue.enqueue(() => vaultApi.settingsAiApiUpdate(nextSettings));
     if (!mountedRef.current) return;
     onSettingsChange(snapshot);
   }
@@ -559,6 +614,8 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
                       icon={<ReloadOutlined />}
                       size="small"
                       type="text"
+                      disabled={aiApiLoading}
+                      loading={aiApiLoading}
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={(event) => {
                         event.stopPropagation();

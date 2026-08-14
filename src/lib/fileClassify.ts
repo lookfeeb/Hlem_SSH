@@ -57,15 +57,6 @@ export function sortRemoteEntries(entries: RemoteFileEntry[]): RemoteFileEntry[]
   return [...entries].sort((a, b) => compareEntryGroup(a, b) || compareEntryName(a, b));
 }
 
-export function filesBelongToDirectory(files: RemoteFileEntry[], dirPath: string): boolean {
-  if (files.length === 0) return true;
-  const normalized = dirPath === "/" ? "/" : dirPath.replace(/\/+$/, "");
-  return files.every((f) => {
-    const parent = f.path?.replace(/\/[^/]+$/, "") || "";
-    return parent === normalized || (normalized === "/" && parent === "");
-  });
-}
-
 export function formatBeijingModifiedTime(value: string): string {
   if (!value) return "-";
   return formatBeijingDateTimeHyphen(value);

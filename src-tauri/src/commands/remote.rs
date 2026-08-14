@@ -7,6 +7,14 @@ use crate::remote::{
 };
 
 #[tauri::command]
+pub async fn connection_list(
+    state: State<'_, AppState>,
+) -> AppResult<Vec<crate::remote::ConnectionInfo>> {
+    ensure_vault_unlocked(&state)?;
+    Ok(state.remote.connection_list().await)
+}
+
+#[tauri::command]
 pub async fn latency_probe(
     state: State<'_, AppState>,
     connection_id: String,
@@ -47,6 +55,8 @@ pub async fn telemetry_snapshot(
 }
 
 #[tauri::command]
+// Tauri maps these flat named parameters directly from the existing IPC API.
+#[allow(clippy::too_many_arguments)]
 pub async fn forward_start_local(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -55,13 +65,25 @@ pub async fn forward_start_local(
     bind_port: u16,
     remote_host: String,
     remote_port: u16,
+    tunnel_id: Option<String>,
 ) -> AppResult<ForwardInfo> {
+    let _operation_guard = state.tunnel_operation.lock().await;
+    if let Some(tunnel_id) = tunnel_id.as_deref() {
+        if let Some(existing) = state
+            .remote
+            .forward_for_tunnel(tunnel_id, crate::remote::ConnectionOrigin::Desktop)
+            .await
+        {
+            return Ok(existing);
+        }
+    }
     let connection = connect_session(&app, &state, &session_id).await?;
     state
         .remote
         .forward_start_local(
             &app,
             ForwardLocalOptions {
+                tunnel_id,
                 session_id,
                 connection_id: connection.connection_id,
                 bind_host,
@@ -74,6 +96,8 @@ pub async fn forward_start_local(
 }
 
 #[tauri::command]
+// Tauri maps these flat named parameters directly from the existing IPC API.
+#[allow(clippy::too_many_arguments)]
 pub async fn forward_start_remote(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -82,13 +106,25 @@ pub async fn forward_start_remote(
     remote_bind_port: u16,
     local_host: String,
     local_port: u16,
+    tunnel_id: Option<String>,
 ) -> AppResult<ForwardInfo> {
+    let _operation_guard = state.tunnel_operation.lock().await;
+    if let Some(tunnel_id) = tunnel_id.as_deref() {
+        if let Some(existing) = state
+            .remote
+            .forward_for_tunnel(tunnel_id, crate::remote::ConnectionOrigin::Desktop)
+            .await
+        {
+            return Ok(existing);
+        }
+    }
     let connection = connect_session(&app, &state, &session_id).await?;
     state
         .remote
         .forward_start_remote(
             &app,
             ForwardRemoteOptions {
+                tunnel_id,
                 session_id,
                 connection_id: connection.connection_id,
                 remote_bind_host,
@@ -107,7 +143,18 @@ pub async fn forward_start_dynamic(
     session_id: String,
     bind_host: String,
     bind_port: u16,
+    tunnel_id: Option<String>,
 ) -> AppResult<ForwardInfo> {
+    let _operation_guard = state.tunnel_operation.lock().await;
+    if let Some(tunnel_id) = tunnel_id.as_deref() {
+        if let Some(existing) = state
+            .remote
+            .forward_for_tunnel(tunnel_id, crate::remote::ConnectionOrigin::Desktop)
+            .await
+        {
+            return Ok(existing);
+        }
+    }
     let connection = connect_session(&app, &state, &session_id).await?;
     state
         .remote
@@ -117,6 +164,7 @@ pub async fn forward_start_dynamic(
             connection.connection_id,
             bind_host,
             bind_port,
+            tunnel_id,
         )
         .await
 }
@@ -127,8 +175,12 @@ pub async fn forward_stop(
     state: State<'_, AppState>,
     forward_id: String,
 ) -> AppResult<()> {
+    let _operation_guard = state.tunnel_operation.lock().await;
     ensure_vault_unlocked(&state)?;
-    state.remote.forward_stop(&app, &forward_id).await
+    state
+        .remote
+        .forward_stop_for_origin(&app, &forward_id, crate::remote::ConnectionOrigin::Desktop)
+        .await
 }
 
 #[tauri::command]

@@ -18,7 +18,7 @@ import {
   LinkOutlined,
 } from "@ant-design/icons";
 import { Button, Form, Input, InputNumber, Modal, Radio, Select, Tooltip } from "antd";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getErrorMessage } from "../lib/configMapping";
 import { getGroupNameLengthError, GROUP_COUNT_ERROR, GROUP_CUSTOM_MAX_COUNT, GROUP_NAME_MAX_CHARS } from "../lib/groupName";
 import { useMountedRef } from "../lib/reactLifecycle";
@@ -35,6 +35,7 @@ function formatGroupActionError(error: unknown, fallback: string) {
 
 interface SessionConfigModalProps {
   open: boolean;
+  requestId: string;
   mode: "create" | "edit";
   initialValue: SessionInput;
   groups: SessionGroup[];
@@ -73,6 +74,7 @@ interface GroupSelectOption {
 
 export function SessionConfigModal({
   open,
+  requestId,
   mode,
   initialValue,
   groups,
@@ -88,8 +90,11 @@ export function SessionConfigModal({
   const [form] = Form.useForm<SessionFormValues>();
   const mountedRef = useMountedRef();
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
   const [fieldErrorCount, setFieldErrorCount] = useState(0);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const requestIdRef = useRef(requestId);
+  requestIdRef.current = requestId;
   const watchedName = Form.useWatch("name", form);
   const watchedGroupId = Form.useWatch("groupId", form);
   const watchedHost = Form.useWatch("host", form);
@@ -176,9 +181,10 @@ export function SessionConfigModal({
     if (!open) return;
     form.resetFields();
     form.setFieldsValue(toFormValues(initialValue, mode));
+    setSubmitting(submittingRef.current);
     setFieldErrorCount(0);
     setSubmitError(null);
-  }, [form, initialValue, mode, open]);
+  }, [editingSessionId, form, mode, open, requestId]);
 
   useEffect(() => {
     if (!open) return;
@@ -191,19 +197,27 @@ export function SessionConfigModal({
   }, [authMethod, form, open, proxyMode]);
 
   async function submit() {
+    if (submittingRef.current) return;
+    const submitRequestId = requestId;
+    submittingRef.current = true;
+    setSubmitting(true);
     setSubmitError(null);
     try {
       const values = await form.validateFields();
-      setSubmitting(true);
+      if (!mountedRef.current || requestIdRef.current !== submitRequestId) return;
       await onSubmit(toSessionInput(values, initialValue, mode));
     } catch (error) {
+      if (!mountedRef.current || requestIdRef.current !== submitRequestId) return;
       if (error && typeof error === "object" && "errorFields" in error) {
         const errorFields = (error as { errorFields?: unknown[] }).errorFields;
         setFieldErrorCount(errorFields?.length ?? 0);
         return;
       }
-      if (mountedRef.current) setSubmitError(getErrorMessage(error));
+      if (mountedRef.current && requestIdRef.current === submitRequestId) {
+        setSubmitError(getErrorMessage(error));
+      }
     } finally {
+      submittingRef.current = false;
       if (mountedRef.current) setSubmitting(false);
     }
   }
@@ -383,6 +397,7 @@ export function SessionConfigModal({
             }}
           >
             <BaseFields
+              requestId={requestId}
               mode={mode}
               initialAuthMethod={initialValue.auth.method}
               hasImportedPrivateKey={Boolean(initialValue.auth.importedPrivateKey)}
@@ -403,6 +418,7 @@ export function SessionConfigModal({
 }
 
 function BaseFields({
+  requestId,
   mode,
   initialAuthMethod,
   hasImportedPrivateKey,
@@ -415,6 +431,7 @@ function BaseFields({
   existingSessions,
   editingSessionId,
 }: {
+  requestId: string;
   mode: "create" | "edit";
   initialAuthMethod: "password" | "privateKey";
   hasImportedPrivateKey: boolean;
@@ -457,6 +474,7 @@ function BaseFields({
             <Input placeholder="生产服务器" autoComplete="off" prefix={<EditOutlined style={{ color: "var(--text-muted)" }} />} />
           </Form.Item>
           <GroupSelectField
+            requestId={requestId}
             groups={groups}
             onCreateGroup={onCreateGroup}
             onUpdateGroup={onUpdateGroup}
@@ -545,7 +563,7 @@ function BaseFields({
             {authMethod === "privateKey" && (
               <>
                 <div className="sessionKeyGrid">
-                  <PrivateKeyPathField hasImportedPrivateKey={hasImportedPrivateKey} />
+                  <PrivateKeyPathField requestId={requestId} hasImportedPrivateKey={hasImportedPrivateKey} />
                   <Form.Item label="私钥口令" name="privateKeyPassphrase" extra="无口令请留空">
                     <Input.Password
                       placeholder={mode === "create" ? "可选" : "留空则保持不变"}
@@ -643,11 +661,13 @@ function BaseFields({
 }
 
 function GroupSelectField({
+  requestId,
   groups,
   onCreateGroup,
   onUpdateGroup,
   onDeleteGroup,
 }: {
+  requestId: string;
   groups: SessionGroup[];
   onCreateGroup: (name: string) => Promise<string | null>;
   onUpdateGroup: (groupId: string, name: string) => Promise<void>;
@@ -664,6 +684,8 @@ function GroupSelectField({
   const [busyGroupId, setBusyGroupId] = useState<string | null>(null);
   const [groupActionError, setGroupActionError] = useState<string | null>(null);
   const [groupNameOverrides, setGroupNameOverrides] = useState<Record<string, string>>({});
+  const requestIdRef = useRef(requestId);
+  requestIdRef.current = requestId;
   const trimmedName = newGroupName.trim();
   const newGroupNameLengthError = getGroupNameLengthError(trimmedName);
   const editingGroupNameLengthError = editingGroupId ? getGroupNameLengthError(editingGroupName) : null;
@@ -678,6 +700,18 @@ function GroupSelectField({
     group,
   }));
   const groupSelectKey = groupOptions.map((option) => `${option.value}:${option.label}`).join("|");
+
+  useEffect(() => {
+    setNewGroupName("");
+    setCreating(false);
+    setCreateError(null);
+    setEditingGroupId(null);
+    setEditingGroupName("");
+    setConfirmDeleteGroupId(null);
+    setBusyGroupId(null);
+    setGroupActionError(null);
+    setGroupNameOverrides({});
+  }, [requestId]);
 
   useEffect(() => {
     setGroupNameOverrides((current) => {
@@ -719,18 +753,21 @@ function GroupSelectField({
       return;
     }
 
+    const actionRequestId = requestId;
     setCreating(true);
     setCreateError(null);
     try {
       const groupId = await onCreateGroup(trimmedName);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || requestIdRef.current !== actionRequestId) return;
       if (groupId) form.setFieldValue("groupId", groupId);
       setNewGroupName("");
       setGroupActionError(null);
     } catch (error) {
-      if (mountedRef.current) setCreateError(formatGroupActionError(error, "创建分组失败"));
+      if (mountedRef.current && requestIdRef.current === actionRequestId) {
+        setCreateError(formatGroupActionError(error, "创建分组失败"));
+      }
     } finally {
-      if (mountedRef.current) setCreating(false);
+      if (mountedRef.current && requestIdRef.current === actionRequestId) setCreating(false);
     }
   }
 
@@ -756,11 +793,12 @@ function GroupSelectField({
       return;
     }
 
+    const actionRequestId = requestId;
     setBusyGroupId(group.id);
     setGroupActionError(null);
     try {
       await onUpdateGroup(group.id, nextName);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || requestIdRef.current !== actionRequestId) return;
       setGroupNameOverrides((current) => ({ ...current, [group.id]: nextName }));
       if (form.getFieldValue("groupId") === group.id) {
         form.setFieldValue("groupId", group.id);
@@ -768,19 +806,22 @@ function GroupSelectField({
       setEditingGroupId(null);
       setEditingGroupName("");
     } catch (error) {
-      if (mountedRef.current) setGroupActionError(formatGroupActionError(error, "重命名分组失败"));
+      if (mountedRef.current && requestIdRef.current === actionRequestId) {
+        setGroupActionError(formatGroupActionError(error, "重命名分组失败"));
+      }
     } finally {
-      if (mountedRef.current) setBusyGroupId(null);
+      if (mountedRef.current && requestIdRef.current === actionRequestId) setBusyGroupId(null);
     }
   }
 
   async function deleteGroup(group: SessionGroup) {
     if (busyGroupId) return;
+    const actionRequestId = requestId;
     setBusyGroupId(group.id);
     setGroupActionError(null);
     try {
       const fallbackGroupId = await onDeleteGroup(group.id);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || requestIdRef.current !== actionRequestId) return;
       if (form.getFieldValue("groupId") === group.id) {
         form.setFieldValue("groupId", fallbackGroupId);
       }
@@ -788,9 +829,11 @@ function GroupSelectField({
       setEditingGroupId(null);
       setEditingGroupName("");
     } catch (error) {
-      if (mountedRef.current) setGroupActionError(formatGroupActionError(error, "删除分组失败"));
+      if (mountedRef.current && requestIdRef.current === actionRequestId) {
+        setGroupActionError(formatGroupActionError(error, "删除分组失败"));
+      }
     } finally {
-      if (mountedRef.current) setBusyGroupId(null);
+      if (mountedRef.current && requestIdRef.current === actionRequestId) setBusyGroupId(null);
     }
   }
 
@@ -1041,11 +1084,20 @@ function GroupSelectField({
 }
 
 /** 私钥路径字段：含系统文件选择器按钮（Tauri dialog） */
-function PrivateKeyPathField({ hasImportedPrivateKey }: { hasImportedPrivateKey: boolean }) {
+function PrivateKeyPathField({
+  requestId,
+  hasImportedPrivateKey,
+}: {
+  requestId: string;
+  hasImportedPrivateKey: boolean;
+}) {
   const form = Form.useFormInstance<SessionFormValues>();
   const mountedRef = useMountedRef();
+  const requestIdRef = useRef(requestId);
+  requestIdRef.current = requestId;
 
   async function browse() {
+    const pickerRequestId = requestId;
     try {
       // 动态导入，避免在非 Tauri 环境中报错
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -1057,7 +1109,12 @@ function PrivateKeyPathField({ hasImportedPrivateKey }: { hasImportedPrivateKey:
           { name: "所有文件", extensions: ["*"] },
         ],
       });
-      if (mountedRef.current && typeof selected === "string" && selected) {
+      if (
+        mountedRef.current
+        && requestIdRef.current === pickerRequestId
+        && typeof selected === "string"
+        && selected
+      ) {
         form.setFieldValue("privateKeyPath", selected);
       }
     } catch (error) {

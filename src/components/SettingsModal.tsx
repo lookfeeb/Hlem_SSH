@@ -11,9 +11,10 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { App as AntdApp, Button, Form, Modal } from "antd";
-import { useEffect, useState } from "react";
-import type { AppInfo, AppSettings, ConfigSnapshot, UpdateInfo } from "../types";
+import { useEffect, useRef, useState } from "react";
+import type { AppInfo, AppProxyOptions, AppSettings, ConfigSnapshot, UpdateInfo } from "../types";
 import { getErrorMessage } from "../lib/configMapping";
+import { useMountedRef } from "../lib/reactLifecycle";
 
 import { ProxyForm } from "./settings/ProxyForm";
 import { AiApiPanel } from "./settings/AiApiPanel";
@@ -25,7 +26,7 @@ interface SettingsModalProps {
   initialValue: AppSettings;
   sessions: { id: string; name: string; host: string; state: string }[];
   onClose: () => void;
-  onSubmit: (settings: AppSettings) => Promise<void>;
+  onSubmit: (proxy: AppProxyOptions | null) => Promise<void>;
   onBackupOpen: () => void;
   onTunnelOpen: () => void;
   onCreateSession: (onCreated?: (sessionId: string) => void) => void;
@@ -68,37 +69,64 @@ export function SettingsModal({
   const [aboutOpen, setAboutOpen] = useState(false);
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const mountedRef = useMountedRef();
+  const initializedForOpenRef = useRef(false);
+  const openCycleRef = useRef(0);
+  const openRef = useRef(open);
+  if (openRef.current !== open) {
+    openRef.current = open;
+    openCycleRef.current += 1;
+  }
+  const initialProxyEnabled = initialValue.proxy?.enabled ?? false;
+  const initialProxyKind = initialValue.proxy?.kind ?? "socks5";
+  const initialProxyHost = initialValue.proxy?.host ?? "127.0.0.1";
+  const initialProxyPort = initialValue.proxy?.port ?? 1080;
   const enabled = Form.useWatch("enabled", form) ?? false;
-  const proxyKind = Form.useWatch("kind", form) ?? initialValue.proxy?.kind ?? "socks5";
-  const proxyHost = Form.useWatch("host", form) ?? initialValue.proxy?.host ?? "127.0.0.1";
-  const proxyPort = Form.useWatch("port", form) ?? initialValue.proxy?.port ?? 1080;
+  const proxyKind = Form.useWatch("kind", form) ?? initialProxyKind;
+  const proxyHost = Form.useWatch("host", form) ?? initialProxyHost;
+  const proxyPort = Form.useWatch("port", form) ?? initialProxyPort;
   const proxyKindLabel = proxyKind === "httpConnect" ? "HTTP CONNECT" : "SOCKS5";
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      initializedForOpenRef.current = false;
+      setSaving(false);
+      setAboutOpen(false);
+      setReleaseNotesOpen(false);
+      return;
+    }
+    if (initializedForOpenRef.current) return;
+    initializedForOpenRef.current = true;
+    setSaving(savingRef.current);
     form.setFieldsValue({
-      enabled: initialValue.proxy?.enabled ?? false,
-      kind: initialValue.proxy?.kind ?? "socks5",
-      host: initialValue.proxy?.host ?? "127.0.0.1",
-      port: initialValue.proxy?.port ?? 1080,
+      enabled: initialProxyEnabled,
+      kind: initialProxyKind,
+      host: initialProxyHost,
+      port: initialProxyPort,
     });
-  }, [form, initialValue, open]);
+  }, [form, initialProxyEnabled, initialProxyHost, initialProxyKind, initialProxyPort, open]);
 
   async function submit() {
-    if (saving) return;
+    if (savingRef.current) return;
+    const openCycle = openCycleRef.current;
+    savingRef.current = true;
     setSaving(true);
     try {
       const values = await form.validateFields();
-      await onSubmit({
-        ...initialValue,
-        proxy: values.enabled ? { enabled: true, kind: values.kind, host: values.host.trim(), port: values.port } : null,
-      });
+      await onSubmit(values.enabled
+        ? { enabled: true, kind: values.kind, host: values.host.trim(), port: values.port }
+        : null);
+      if (openRef.current && openCycleRef.current === openCycle) onClose();
     } catch (error) {
       if (!(error && typeof error === "object" && "errorFields" in error)) {
-        message.error(getErrorMessage(error));
+        if (openRef.current && openCycleRef.current === openCycle) {
+          message.error(getErrorMessage(error));
+        }
       }
     } finally {
-      setSaving(false);
+      savingRef.current = false;
+      if (mountedRef.current) setSaving(false);
     }
   }
 

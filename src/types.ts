@@ -24,6 +24,7 @@ export interface RemoteSession {
   connectionNotice?: string | null;
   terminal: TerminalEntry[];
   telemetry: ServerTelemetry;
+  filesPath: string | null;
   files: RemoteFileEntry[];
 }
 
@@ -110,6 +111,13 @@ export interface RemoteFileEntry {
 
 export interface ConfigSnapshot {
   data: VaultData;
+  revision: number;
+}
+
+export interface AiApiSettings {
+  sessionIds: string[];
+  port?: number | null;
+  autoStart: boolean;
 }
 
 export interface VaultData {
@@ -345,6 +353,7 @@ export interface TransferHistorySnapshot {
 
 export interface FileSaveRecord {
   id: string;
+  attempt: number;
   sessionId?: string | null;
   path: string;
   directory: string;
@@ -357,6 +366,7 @@ export interface FileSaveRecord {
 
 export interface TelemetryJobInfo {
   jobId: string;
+  connectionId: string;
   sessionId: string;
   intervalMs: number;
   status: "queued" | "running" | "completed" | "failed" | "canceled";
@@ -365,6 +375,7 @@ export interface TelemetryJobInfo {
 
 export interface ForwardInfo {
   forwardId: string;
+  tunnelId?: string | null;
   sessionId: string;
   forwardType: "local" | "remote" | "dynamic";
   bindHost: string;
@@ -417,8 +428,11 @@ export interface UpdateInfo {
 
 export interface TelemetrySnapshotEvent {
   jobId: string;
+  connectionId: string;
   sessionId: string;
-  snapshot: ServerTelemetry;
+  snapshot?: ServerTelemetry;
+  error?: string;
+  terminal?: boolean;
 }
 
 export interface HostKeyVerification {

@@ -1,14 +1,13 @@
 use super::*;
 
 pub(super) async fn cleanup_transfer_staging(
-    runtime: &RemoteRuntime,
     request: &TransferRequest,
     transfer_id: &str,
+    cleanup_sftp: Option<&SftpSession>,
 ) {
     match request.direction {
         TransferDirection::Upload => {
-            if let Ok(record) = runtime.sftp_record(&request.sftp_id).await {
-                let sftp = record.next_transfer_session().await;
+            if let Some(sftp) = cleanup_sftp {
                 let path = format!("{}.helm-{}.part", request.remote_path, transfer_id);
                 let _ = sftp.remove_file(path).await;
             }
@@ -24,45 +23,37 @@ async fn sync_and_replace_local(staging: &str, target: &str) -> AppResult<()> {
     let file = File::open(staging).await.map_err(remote_error)?;
     file.sync_all().await.map_err(remote_error)?;
     drop(file);
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-        };
-        let from: Vec<u16> = std::ffi::OsStr::new(staging)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let to: Vec<u16> = std::ffi::OsStr::new(target)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let ok = unsafe {
-            MoveFileExW(
-                from.as_ptr(),
-                to.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        };
-        if ok == 0 {
-            return Err(AppError::Io(std::io::Error::last_os_error().to_string()));
-        }
-        Ok(())
+    crate::atomic_file::replace_file_async(Path::new(staging), Path::new(target)).await
+}
+
+struct AbortOnDropTask<T>(Option<JoinHandle<T>>);
+
+impl<T> AbortOnDropTask<T> {
+    fn new(handle: JoinHandle<T>) -> Self {
+        Self(Some(handle))
     }
-    #[cfg(not(windows))]
-    {
-        tokio::fs::rename(staging, target)
-            .await
-            .map_err(remote_error)
+
+    async fn join(mut self) -> Option<Result<T, tokio::task::JoinError>> {
+        let handle = self.0.take()?;
+        Some(handle.await)
     }
 }
 
-async fn await_progress_ticker(handle: tokio::task::JoinHandle<()>, transfer_id: &str) {
-    if let Err(error) = handle.await {
-        if !error.is_cancelled() {
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
+async fn await_progress_ticker(handle: AbortOnDropTask<()>, transfer_id: &str) {
+    match handle.join().await {
+        Some(Err(error)) if !error.is_cancelled() => {
             eprintln!("[helm] transfer progress ticker failed: {transfer_id}: {error}");
         }
+        Some(_) => {}
+        None => log::warn!("transfer progress ticker handle missing: {transfer_id}"),
     }
 }
 
@@ -410,11 +401,13 @@ where
 {
     let mut buffer = vec![0u8; buffer_size];
     loop {
+        ensure_transfer_not_canceled(cancel)?;
         wait_while_paused(paused, cancel).await?;
         let read = src.read(&mut buffer).await.map_err(remote_error)?;
         if read == 0 {
             break;
         }
+        ensure_transfer_not_canceled(cancel)?;
         wait_while_paused(paused, cancel).await?;
         dst.write_all(&buffer[..read]).await.map_err(remote_error)?;
         bytes_done.fetch_add(read as u64, Ordering::Relaxed);
@@ -423,11 +416,56 @@ where
     Ok(())
 }
 
+pub(super) async fn copy_async_limited<R, W>(
+    src: &mut R,
+    dst: &mut W,
+    buffer_size: usize,
+    cancel: &AtomicBool,
+    paused: &AtomicBool,
+    bytes_done: &AtomicU64,
+    max_bytes: u64,
+) -> AppResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin + ?Sized,
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    let mut buffer = vec![0u8; buffer_size];
+    loop {
+        ensure_transfer_not_canceled(cancel)?;
+        wait_while_paused(paused, cancel).await?;
+        let read = src.read(&mut buffer).await.map_err(remote_error)?;
+        if read == 0 {
+            break;
+        }
+        let current = bytes_done.load(Ordering::Relaxed);
+        if current.saturating_add(read as u64) > max_bytes {
+            return Err(AppError::InvalidInput(format!(
+                "上传文件不能超过 {} MB",
+                max_bytes / 1024 / 1024
+            )));
+        }
+        ensure_transfer_not_canceled(cancel)?;
+        wait_while_paused(paused, cancel).await?;
+        dst.write_all(&buffer[..read]).await.map_err(remote_error)?;
+        bytes_done.fetch_add(read as u64, Ordering::Relaxed);
+    }
+    dst.flush().await.map_err(remote_error)?;
+    Ok(())
+}
+
+fn ensure_transfer_not_canceled(cancel: &AtomicBool) -> AppResult<()> {
+    if cancel.load(Ordering::Relaxed) {
+        Err(AppError::Remote("传输已取消".to_string()))
+    } else {
+        Ok(())
+    }
+}
+
 /// UI 层定期 ticker：每 250ms 读 bytes_done 原子，按 1MB 阈值节流上报进度。
 /// 速度值做 EWMA 平滑；低速链路超过 2 秒也上报一次，避免 UI 长时间停在旧速度。
 /// 配合 copy_async 使用：调用方先 spawn 这个 ticker，再调 copy_async；
 /// copy_async 返回后 abort 或让其自然退出（cancel 置位时也会退）。
-pub(super) fn spawn_progress_ticker(
+fn spawn_progress_ticker(
     runtime: RemoteRuntime,
     app: AppHandle,
     transfer_id: String,
@@ -435,8 +473,8 @@ pub(super) fn spawn_progress_ticker(
     cancel: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> AbortOnDropTask<()> {
+    AbortOnDropTask::new(tokio::spawn(async move {
         let mut last_bytes: u64 = bytes_done.load(Ordering::Relaxed);
         let mut last_time = Instant::now();
         let mut smoothed_speed = 0.0;
@@ -485,7 +523,7 @@ pub(super) fn spawn_progress_ticker(
             last_time = now;
             last_bytes = cur;
         }
-    })
+    }))
 }
 
 /// `copy_async` 的有界版本：从 `src` 读取 **恰好 `limit` 字节** 写入 `dst`。
@@ -648,8 +686,7 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
     );
 
     let chunk_size = local_size / PARALLEL_UPLOAD_PARTS;
-    let mut handles: Vec<JoinHandle<AppResult<()>>> =
-        Vec::with_capacity(PARALLEL_UPLOAD_PARTS as usize);
+    let mut workers = Vec::with_capacity(PARALLEL_UPLOAD_PARTS as usize);
 
     log::info!(
         "并行上传启动：{} 字节 / {} 路 (chunk≈{} 字节)",
@@ -673,7 +710,7 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
         let task_paused = paused.clone();
         let task_bytes_done = bytes_done.clone();
 
-        let handle: JoinHandle<AppResult<()>> = tokio::spawn(async move {
+        workers.push(async move {
             let result: AppResult<()> = async {
                 let mut local_file = File::open(&task_local_path).await.map_err(remote_error)?;
                 if start > 0 {
@@ -713,26 +750,13 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
             }
             result
         });
-        handles.push(handle);
     }
 
     let mut first_error: Option<AppError> = None;
-    for handle in handles {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-            Err(join_error) => {
-                cancel.store(true, Ordering::Relaxed);
-                if first_error.is_none() {
-                    first_error = Some(AppError::Remote(format!(
-                        "并行上传任务异常退出: {}",
-                        join_error
-                    )));
-                }
+    for result in futures_util::future::join_all(workers).await {
+        if let Err(error) = result {
+            if first_error.is_none() {
+                first_error = Some(error);
             }
         }
     }
@@ -815,8 +839,7 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
     );
 
     let chunk_size = remote_size / PARALLEL_DOWNLOAD_PARTS;
-    let mut handles: Vec<JoinHandle<AppResult<()>>> =
-        Vec::with_capacity(PARALLEL_DOWNLOAD_PARTS as usize);
+    let mut workers = Vec::with_capacity(PARALLEL_DOWNLOAD_PARTS as usize);
 
     log::info!(
         "并行下载启动：{} 字节 / {} 路 (chunk≈{} 字节)",
@@ -843,7 +866,7 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
         let task_paused = paused.clone();
         let task_bytes_done = bytes_done.clone();
 
-        let handle: JoinHandle<AppResult<()>> = tokio::spawn(async move {
+        workers.push(async move {
             let result: AppResult<()> = async {
                 let mut remote_file = task_sftp
                     .open(task_remote_path)
@@ -889,28 +912,13 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
             }
             result
         });
-        handles.push(handle);
     }
 
-    // 顺序 await 每个 handle；因为各 task 自身已在出错时 store cancel，
-    // 兄弟 task 会在 1 个 buffer 周期内主动退出，不会阻塞过久。
     let mut first_error: Option<AppError> = None;
-    for handle in handles {
-        match handle.await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-            }
-            Err(join_error) => {
-                cancel.store(true, Ordering::Relaxed);
-                if first_error.is_none() {
-                    first_error = Some(AppError::Remote(format!(
-                        "并行下载任务异常退出: {}",
-                        join_error
-                    )));
-                }
+    for result in futures_util::future::join_all(workers).await {
+        if let Err(error) = result {
+            if first_error.is_none() {
+                first_error = Some(error);
             }
         }
     }
@@ -925,4 +933,106 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
     let final_bytes = bytes_done.load(Ordering::Relaxed);
     emit_transfer_progress(runtime, app, &info.transfer_id, final_bytes, 0.0).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cleanup_transfer_staging, copy_async, copy_async_limited};
+    use crate::errors::AppError;
+    use crate::remote::{TransferDirection, TransferRequest};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use tempfile::tempdir;
+    use tokio::io::{repeat, sink, AsyncReadExt};
+
+    #[tokio::test]
+    async fn limited_copy_accepts_exact_limit_and_counts_bytes() {
+        let mut source = repeat(1).take(4);
+        let mut destination = sink();
+        let cancel = AtomicBool::new(false);
+        let paused = AtomicBool::new(false);
+        let bytes_done = AtomicU64::new(0);
+
+        copy_async_limited(
+            &mut source,
+            &mut destination,
+            2,
+            &cancel,
+            &paused,
+            &bytes_done,
+            4,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(bytes_done.load(Ordering::Relaxed), 4);
+    }
+
+    #[tokio::test]
+    async fn limited_copy_rejects_chunked_input_beyond_limit_before_writing_extra_bytes() {
+        let mut source = repeat(1).take(5);
+        let mut destination = sink();
+        let cancel = AtomicBool::new(false);
+        let paused = AtomicBool::new(false);
+        let bytes_done = AtomicU64::new(0);
+
+        let error = copy_async_limited(
+            &mut source,
+            &mut destination,
+            2,
+            &cancel,
+            &paused,
+            &bytes_done,
+            4,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidInput(_)));
+        assert_eq!(bytes_done.load(Ordering::Relaxed), 4);
+    }
+
+    #[tokio::test]
+    async fn copy_stops_when_canceled_even_if_not_paused() {
+        let mut source = repeat(1).take(4);
+        let mut destination = sink();
+        let cancel = AtomicBool::new(true);
+        let paused = AtomicBool::new(false);
+        let bytes_done = AtomicU64::new(0);
+
+        let error = copy_async(
+            &mut source,
+            &mut destination,
+            2,
+            &cancel,
+            &paused,
+            &bytes_done,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, AppError::Remote(message) if message == "传输已取消"));
+        assert_eq!(bytes_done.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn download_staging_cleanup_does_not_require_a_live_sftp_record() {
+        let directory = tempdir().unwrap();
+        let target = directory.path().join("download.bin");
+        let staging = format!("{}.helm-transfer-1.part", target.display());
+        tokio::fs::write(&staging, b"partial").await.unwrap();
+        let request = TransferRequest {
+            sftp_id: "already-closed".to_string(),
+            direction: TransferDirection::Download,
+            local_path: target.to_string_lossy().into_owned(),
+            remote_path: "/tmp/download.bin".to_string(),
+            overwrite: true,
+            accelerated: false,
+            resume: false,
+        };
+
+        cleanup_transfer_staging(&request, "transfer-1", None).await;
+
+        assert!(!Path::new(&staging).exists());
+    }
 }

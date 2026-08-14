@@ -10,6 +10,7 @@ import {
   SearchOutlined,
 } from "@ant-design/icons";
 import { useMemo, useState, type ReactNode } from "react";
+import { getErrorMessage } from "../../lib/configMapping";
 import type { QuickCommand } from "../../types";
 
 export interface QuickCommandTopAreaProps {
@@ -61,7 +62,9 @@ export function QuickCommandDock({ id, commandItems, onSendCommand, onEditComman
   }, [commandItems, searchText]);
 
   function runCommand(command: QuickCommand) {
-    void onSendCommand(command);
+    void Promise.resolve(onSendCommand(command)).catch((error) => {
+      console.warn("[helm] failed to send quick command:", getErrorMessage(error));
+    });
   }
 
   function commandMenu(command: QuickCommand): MenuProps {

@@ -81,6 +81,8 @@ const TelemetrySidebarView = forwardRef<TelemetrySidebarHandle, TelemetrySidebar
   const serverUptimeRef = useRef<HTMLSpanElement | null>(null);
   const connectedDurationRef = useRef<HTMLSpanElement | null>(null);
   const durationTimerRef = useRef<number | null>(null);
+  const latencyRequestRef = useRef(0);
+  const latencyTestingRef = useRef(false);
   const serverUptimeStateRef = useRef({ connected: false, seconds: null as number | null, sampledAt: Date.now() });
   const connectionDurationStateRef = useRef({ connected: false, connectedAt: null as string | null | undefined });
   const isConnected = session.state === "connected";
@@ -144,25 +146,34 @@ const TelemetrySidebarView = forwardRef<TelemetrySidebarHandle, TelemetrySidebar
   }), []);
 
   useEffect(() => {
+    latencyRequestRef.current += 1;
+    latencyTestingRef.current = false;
     setLatencyProbe(null);
     setLatencyTesting(false);
   }, [session.connectionId]);
 
   async function testLatency() {
-    if (!session.connectionId || latencyTesting) return;
+    if (!session.connectionId || latencyTestingRef.current) return;
     const connectionId = session.connectionId;
+    const requestId = ++latencyRequestRef.current;
+    latencyTestingRef.current = true;
     setLatencyTesting(true);
     try {
       const result = await remoteApi.probeLatency(connectionId, 5);
-      if (!mountedRef.current || session.connectionId !== connectionId) return;
+      if (!mountedRef.current || requestId !== latencyRequestRef.current) return;
       setLatencyProbe(result);
       message.success(
         `SSH 延迟 ${formatLatency(result.medianMs)}（最低 ${formatLatency(result.minMs)}，抖动 ${result.jitterMs.toFixed(1)} ms）`,
       );
     } catch (error) {
-      if (mountedRef.current) message.error(`延迟测试失败：${getErrorMessage(error)}`);
+      if (mountedRef.current && requestId === latencyRequestRef.current) {
+        message.error(`延迟测试失败：${getErrorMessage(error)}`);
+      }
     } finally {
-      if (mountedRef.current) setLatencyTesting(false);
+      if (requestId === latencyRequestRef.current) {
+        latencyTestingRef.current = false;
+        if (mountedRef.current) setLatencyTesting(false);
+      }
     }
   }
 

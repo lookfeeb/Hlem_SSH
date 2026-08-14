@@ -1,40 +1,53 @@
-import { defaultBackupSettings, vaultApi } from "../api/vaultApi";
+import { vaultApi } from "../api/vaultApi";
+import { useRef } from "react";
+import { createAsyncQueue, isAsyncQueueInvalidatedError } from "../lib/asyncQueue";
 import { useMountedRef } from "../lib/reactLifecycle";
-import type { AppSettings, ConfigSnapshot } from "../types";
+import type { AppProxyOptions, ConfigSnapshot, QuickCommand } from "../types";
 
 type UseSettingsPersistenceOptions = {
-  configSnapshot: ConfigSnapshot | undefined;
   applyConfigSnapshot: (snapshot: ConfigSnapshot) => void;
-  onSettingsSaved: () => void;
 };
 
 export function useSettingsPersistence({
-  configSnapshot,
   applyConfigSnapshot,
-  onSettingsSaved,
 }: UseSettingsPersistenceOptions) {
   const mountedRef = useMountedRef();
+  const quickCommandQueueRef = useRef(createAsyncQueue());
 
-  async function saveSettings(settings: AppSettings) {
-    const snapshot = await vaultApi.settingsUpdate(settings);
+  async function saveSettings(proxy: AppProxyOptions | null) {
+    const snapshot = await vaultApi.settingsProxyUpdate(proxy);
     if (!mountedRef.current) return;
     applyConfigSnapshot(snapshot);
-    onSettingsSaved();
   }
 
-  async function saveQuickCommands(nextCommands: AppSettings["quickCommands"]) {
-    if (!configSnapshot) return;
-    const snapshot = await vaultApi.settingsUpdate({
-      ...configSnapshot.data.settings,
-      backup: configSnapshot.data.settings.backup ?? defaultBackupSettings(),
-      quickCommands: nextCommands ?? [],
+  async function upsertQuickCommand(command: QuickCommand) {
+    return quickCommandQueueRef.current.enqueue(async () => {
+      const snapshot = await vaultApi.quickCommandUpsert(command);
+      if (mountedRef.current) applyConfigSnapshot(snapshot);
+    }).catch((error) => {
+      if (isAsyncQueueInvalidatedError(error)) return;
+      throw error;
     });
-    if (!mountedRef.current) return;
-    applyConfigSnapshot(snapshot);
+  }
+
+  async function deleteQuickCommand(commandId: string) {
+    return quickCommandQueueRef.current.enqueue(async () => {
+      const snapshot = await vaultApi.quickCommandDelete(commandId);
+      if (mountedRef.current) applyConfigSnapshot(snapshot);
+    }).catch((error) => {
+      if (isAsyncQueueInvalidatedError(error)) return;
+      throw error;
+    });
+  }
+
+  function invalidateSettingsMutations() {
+    quickCommandQueueRef.current.invalidate();
   }
 
   return {
     saveSettings,
-    saveQuickCommands,
+    upsertQuickCommand,
+    deleteQuickCommand,
+    invalidateSettingsMutations,
   };
 }

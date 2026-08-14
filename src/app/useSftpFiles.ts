@@ -25,6 +25,7 @@ type OpenSftpResult = {
   sftp: { sftpId: string } | null;
   path: string;
   files: RemoteSession["files"];
+  filesPath: string | null;
   error: unknown;
 };
 
@@ -35,7 +36,7 @@ type UseSftpFilesOptions = {
   sessionsRef: MutableRefObject<RemoteSession[]>;
   updateSession: (sessionId: string, updater: (session: RemoteSession) => RemoteSession) => void;
   setSessionFilesLoading: (sessionId: string, loading: boolean) => void;
-  listFiles: (sftpId: string, path: string) => Promise<RemoteSession["files"]>;
+  listFiles: (sftpId: string, path: string, force?: boolean) => Promise<RemoteSession["files"]>;
   appendTerminal: (sessionId: string, kind: "system" | "error", content: string) => void;
   formatSessionError: (error: unknown, session: Pick<RemoteSession, "name" | "connectionId" | "terminalId" | "sftpId">) => string;
   upsertTransfer: (transfer: TransferInfo) => void;
@@ -68,18 +69,18 @@ export function useSftpFiles({
       sftp = await remoteApi.openSftp(connectionId);
       try {
         const files = await listFiles(sftp.sftpId, initialPath);
-        return { sftp, path: initialPath, files, error: null };
+        return { sftp, path: initialPath, files, filesPath: normalizeRemotePath(initialPath), error: null };
       } catch (error) {
         const homePath = loginPath ? normalizeRemotePath(loginPath) : defaultRemoteHomePath(username);
         if (normalizeRemotePath(initialPath) === homePath) throw error;
         const files = await listFiles(sftp.sftpId, homePath);
-        return { sftp, path: homePath, files, error: null };
+        return { sftp, path: homePath, files, filesPath: homePath, error: null };
       }
     } catch (error) {
       // Opening the SFTP channel and listing the initial directory are separate
       // concerns. Keep an opened channel even when the initial path cannot be
       // listed, otherwise a later retry needlessly tears down and recreates it.
-      return { sftp, path: initialPath, files: [], error };
+      return { sftp, path: initialPath, files: [], filesPath: null, error };
     }
   }
 
@@ -136,23 +137,28 @@ export function useSftpFiles({
           return;
         }
 
-        sessionsRef.current = sessionsRef.current.map((item) =>
-          item.id === sessionId && item.connectionId === expectedConnectionId && !item.sftpId
-            ? { ...item, currentPath: sftpResult.path, sftpId: sftp.sftpId, files: sftpResult.files }
-            : item,
-        );
+        const requestedPath = normalizeRemotePath(remoteSessionPath(current));
+        const latestPath = normalizeRemotePath(remoteSessionPath(latest));
+        const resultPath = normalizeRemotePath(sftpResult.path);
+        const targetPath = latestPath === requestedPath ? resultPath : latestPath;
+        const initialFilesMatchTarget = sftpResult.filesPath === targetPath;
+
         updateSession(sessionId, (item) =>
           item.connectionId === expectedConnectionId && !item.sftpId
             ? {
                 ...item,
-                currentPath: sftpResult.path,
+                currentPath: targetPath,
                 sftpId: sftp.sftpId,
-                files: sftpResult.files,
+                filesPath: initialFilesMatchTarget ? targetPath : null,
+                files: initialFilesMatchTarget ? sftpResult.files : item.files,
               }
             : item,
         );
         if (sftpResult.error) {
           console.warn("[helm] sftp connected but initial directory could not be listed:", getErrorMessage(sftpResult.error));
+        }
+        if (!initialFilesMatchTarget && latestPath !== requestedPath) {
+          await refreshFiles(sftp.sftpId, targetPath, sessionId);
         }
         notifyEditorSessionReconnected(sessionId);
       } finally {
@@ -172,10 +178,7 @@ export function useSftpFiles({
     if (!session) return;
     const previousPath = normalizeRemotePath(session.currentPath);
     const nextPath = normalizeRemotePath(path);
-    sessionsRef.current = sessionsRef.current.map((item) =>
-      item.id === session.id ? { ...item, currentPath: nextPath } : item,
-    );
-    updateSession(session.id, (item) => ({ ...item, currentPath: nextPath }));
+    updateSession(session.id, (item) => ({ ...item, currentPath: nextPath, filesPath: null }));
     if (!session.sftpId) return;
     setSessionFilesLoading(session.id, true);
     try {
@@ -207,10 +210,11 @@ export function useSftpFiles({
     }
   }
 
-  async function runFileOperation(sessionId: string, operation: FileOperation) {
+  async function runFileOperation(sessionId: string, operation: FileOperation): Promise<string[]> {
     const session = resolveSession(sessionId);
     if (!session?.sftpId) throw new Error("当前连接不可用");
     const sftpId = session.sftpId;
+    let affectedDirectories: string[];
     switch (operation.kind) {
       case "create":
         if (operation.entryType === "directory") {
@@ -218,27 +222,47 @@ export function useSftpFiles({
         } else {
           await remoteApi.createFile(sftpId, operation.path);
         }
+        affectedDirectories = [getRemoteParentPath(operation.path)];
         break;
       case "rename":
         await remoteApi.rename(sftpId, operation.sourcePath, operation.targetPath);
+        affectedDirectories = [
+          getRemoteParentPath(operation.sourcePath),
+          getRemoteParentPath(operation.targetPath),
+        ];
         break;
-      case "copy":
-        await remoteApi.copy(
+      case "copy": {
+        const resolvedTarget = await remoteApi.resolveTarget(
           sftpId,
+          remoteSessionPath(session),
           operation.sourcePath,
-          await remoteApi.resolveTarget(sftpId, remoteSessionPath(session), operation.sourcePath, operation.targetPath),
+          operation.targetPath,
         );
+        await remoteApi.copy(sftpId, operation.sourcePath, resolvedTarget);
+        affectedDirectories = [
+          getRemoteParentPath(operation.sourcePath),
+          getRemoteParentPath(resolvedTarget),
+        ];
         break;
-      case "move":
-        await remoteApi.rename(
+      }
+      case "move": {
+        const resolvedTarget = await remoteApi.resolveTarget(
           sftpId,
+          remoteSessionPath(session),
           operation.sourcePath,
-          await remoteApi.resolveTarget(sftpId, remoteSessionPath(session), operation.sourcePath, operation.targetPath),
+          operation.targetPath,
         );
+        await remoteApi.rename(sftpId, operation.sourcePath, resolvedTarget);
+        affectedDirectories = [
+          getRemoteParentPath(operation.sourcePath),
+          getRemoteParentPath(resolvedTarget),
+        ];
         break;
+      }
       case "delete":
         if (normalizeRemotePath(operation.sourcePath) === "/") throw new Error("不能删除根目录");
         await remoteApi.delete(sftpId, operation.sourcePath, true);
+        affectedDirectories = [getRemoteParentPath(operation.sourcePath)];
         break;
       case "deleteMany":
         for (const sourcePath of operation.sourcePaths) {
@@ -247,8 +271,10 @@ export function useSftpFiles({
         for (const sourcePath of operation.sourcePaths) {
           await remoteApi.delete(sftpId, sourcePath, true);
         }
+        affectedDirectories = operation.sourcePaths.map(getRemoteParentPath);
         break;
     }
+    return Array.from(new Set(affectedDirectories.map(normalizeRemotePath)));
   }
 
   async function uploadLocalFiles(sessionId: string, localPaths: string[], targetDirectory: string) {
@@ -259,8 +285,12 @@ export function useSftpFiles({
     if (expanded.length === 0) return;
     if (!isSessionSftpCurrent(session.id, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
     const remoteTargets = expanded.map((entry) => joinRemotePath(targetDirectory, remoteRelativePath(entry.relativePath)));
-    const existingRemoteTargets = (await Promise.all(remoteTargets.map(async (path) => (await remoteApi.pathExists(sftpId, path)) ? path : null))).filter((path): path is string => Boolean(path));
+    const existingRemoteTargets = (await Promise.all(remoteTargets.map(async (path) => {
+      if (!isSessionSftpCurrent(session.id, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
+      return (await remoteApi.pathExists(sftpId, path)) ? path : null;
+    }))).filter((path): path is string => Boolean(path));
     if (existingRemoteTargets.length > 0 && !(await confirmOverwrite(`将覆盖 ${existingRemoteTargets.length} 个远端文件，是否继续？`))) return;
+    if (!isSessionSftpCurrent(session.id, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
     const queueConcurrency = expanded.length === 1 ? 1 : uploadConcurrency(expanded.length);
     const dirsToCreate = new Set<string>();
     for (const entry of expanded) {
@@ -271,6 +301,7 @@ export function useSftpFiles({
     }
     const sortedDirs = [...dirsToCreate].sort((a, b) => a.length - b.length);
     for (const dir of sortedDirs) {
+      if (!isSessionSftpCurrent(session.id, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
       try {
         await remoteApi.mkdir(sftpId, dir);
       } catch (error) {
@@ -281,6 +312,9 @@ export function useSftpFiles({
       expanded,
       queueConcurrency,
       (entry) => {
+        if (!isSessionSftpCurrent(session.id, sftpId)) {
+          return Promise.reject(new Error("当前 SFTP 会话已变化，请重试"));
+        }
         const remotePath = joinRemotePath(targetDirectory, remoteRelativePath(entry.relativePath));
         return remoteApi.upload(sftpId, entry.localPath, remotePath, true, true, false);
       },
@@ -356,7 +390,23 @@ export function useSftpFiles({
 
   function confirmOverwrite(content: string) {
     return new Promise<boolean>((resolve) => {
-      Modal.confirm({ title: "确认覆盖", content, okText: "覆盖", cancelText: "取消", onOk: () => resolve(true), onCancel: () => resolve(false) });
+      let settled = false;
+      const finish = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      Modal.confirm({
+        title: "确认覆盖",
+        content,
+        okText: "覆盖",
+        cancelText: "取消",
+        onOk: () => finish(true),
+        onCancel: () => finish(false),
+        // 配置恢复、窗口销毁等路径会直接销毁静态弹窗，此时 Ant Design
+        // 不保证触发 onCancel。兜底完成 Promise，避免下载流程永久挂起。
+        afterClose: () => finish(false),
+      });
     });
   }
 
@@ -381,11 +431,11 @@ export function useSftpFiles({
     const requestSeq = (refreshRequestSeqRef.current.get(sessionId) ?? 0) + 1;
     refreshRequestSeqRef.current.set(sessionId, requestSeq);
     try {
-      const files = await listFiles(sftpId, normalizedPath);
+      const files = await listFiles(sftpId, normalizedPath, true);
       if (!isCurrentFileRequest(sessionId, sftpId, normalizedPath, requestSeq)) return "stale";
       updateSession(sessionId, (session) =>
         session.sftpId === sftpId && normalizeRemotePath(session.currentPath) === normalizedPath
-          ? { ...session, files }
+          ? { ...session, filesPath: normalizedPath, files }
           : session,
       );
       return "applied";
@@ -398,6 +448,7 @@ export function useSftpFiles({
   }
 
   async function refreshFilesForTransfer(transfer: TransferInfo) {
+    if (transfer.direction !== "upload") return;
     const directory = getRemoteParentPath(transfer.remotePath);
     const targets = sessionsRef.current.filter(
       (session) => session.sftpId === transfer.sftpId && normalizeRemotePath(remoteSessionPath(session)) === directory,
@@ -415,23 +466,25 @@ export function useSftpFiles({
     );
   }
 
-  async function searchRemoteFile(sessionId: string, query: string) {
+  async function searchRemoteFile(sessionId: string, query: string, signal?: AbortSignal) {
+    if (signal?.aborted) return null;
     const session = resolveSession(sessionId);
     if (!session?.sftpId) return null;
     const sftpId = session.sftpId;
     const targetPath = await remoteApi.searchFile(sftpId, remoteSessionPath(session), query);
     const currentSession = sessionsRef.current.find((item) => item.id === sessionId);
-    if (!mountedRef.current || currentSession?.sftpId !== sftpId) return null;
+    if (signal?.aborted || !mountedRef.current || currentSession?.sftpId !== sftpId) return null;
     if (!targetPath) return null;
     const directory = getRemoteParentPath(targetPath);
     setSessionFilesLoading(sessionId, true);
     try {
       const files = await listFiles(sftpId, directory);
       const latestSession = sessionsRef.current.find((item) => item.id === sessionId);
-      if (!mountedRef.current || latestSession?.sftpId !== sftpId) return null;
+      if (signal?.aborted || !mountedRef.current || latestSession?.sftpId !== sftpId) return null;
       updateSession(sessionId, (item) => ({
         ...item,
         currentPath: directory,
+        filesPath: directory,
         files,
       }));
     } finally {
@@ -442,10 +495,10 @@ export function useSftpFiles({
     return targetPath;
   }
 
-  async function listRemoteDirectory(sessionId: string, path: string) {
+  async function listRemoteDirectory(sessionId: string, path: string, force = false) {
     const session = resolveSession(sessionId);
     if (!session?.sftpId) throw new Error("当前 SFTP 不可用");
-    return listFiles(session.sftpId, path);
+    return listFiles(session.sftpId, path, force);
   }
 
   return {

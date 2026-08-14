@@ -107,6 +107,7 @@ pub(super) struct SftpChangedPayload {
 #[serde(rename_all = "camelCase")]
 pub(super) struct TelemetrySnapshotPayload {
     pub(super) job_id: String,
+    pub(super) connection_id: String,
     pub(super) session_id: String,
     pub(super) snapshot: ServerTelemetry,
 }
@@ -115,8 +116,10 @@ pub(super) struct TelemetrySnapshotPayload {
 #[serde(rename_all = "camelCase")]
 pub(super) struct TelemetryErrorPayload {
     pub(super) job_id: String,
+    pub(super) connection_id: String,
     pub(super) session_id: String,
     pub(super) error: String,
+    pub(super) terminal: bool,
 }
 
 #[cfg(test)]

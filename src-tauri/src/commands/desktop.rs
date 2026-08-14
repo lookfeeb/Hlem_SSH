@@ -340,9 +340,7 @@ pub async fn download_update(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "HelM-update.exe".to_string());
     let target = downloads.join(name);
-    tokio::fs::write(&target, bytes)
-        .await
-        .map_err(|error| AppError::Io(error.to_string()))?;
+    crate::atomic_file::write_atomic_async(&target, &bytes).await?;
     Ok(target.display().to_string())
 }
 

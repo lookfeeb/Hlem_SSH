@@ -13,6 +13,7 @@ pub const FORWARD_STATUS: &str = "forward://status";
 pub const HOST_KEY_VERIFY: &str = "host-key://verify";
 pub const TRAY_ACTION: &str = "tray://action";
 pub const API_LOG: &str = "api://log";
+pub const API_STATUS: &str = "api://status";
 pub const CONFIG_CHANGED: &str = "config://changed";
 
 pub fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {

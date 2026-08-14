@@ -1,5 +1,14 @@
 import { Modal } from "antd";
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { appApi } from "./api/appApi";
 import { appEvents } from "./api/appEvents";
 import { remoteApi } from "./api/remoteApi";
@@ -35,12 +44,19 @@ import { AppStatusBar } from "./components/AppStatusBar";
 import { ConnectionSidebar } from "./components/ConnectionSidebar";
 import { MigrationGate } from "./components/MigrationGate";
 import { SessionConfigModal } from "./components/SessionConfigModal";
+import { closeSharedDetachedEditorChannel } from "./components/FileManager";
 import { SessionWorkspace, type SessionWorkspaceActions } from "./components/SessionWorkspace";
 import { TopBar } from "./components/TopBar";
 import { EmptyWorkspace } from "./components/shared/EmptyWorkspace";
 import { configToRemoteSession, getErrorMessage } from "./lib/configMapping";
+import { isConfigSnapshotCurrent } from "./lib/configSnapshot";
 import { getParentPath as getRemoteParentPath, normalizePath as normalizeRemotePath } from "./lib/path";
+import { createKeyedInFlightCache } from "./lib/keyedInFlight";
 import { isRuntimeSession, remoteSessionConfigId } from "./lib/session";
+import { commitRefState } from "./lib/stateRef";
+import { invalidateAsyncQueues } from "./lib/asyncQueue";
+import { loadStableSnapshot } from "./lib/stableSnapshot";
+import { emitSftpDirectoryInvalidation } from "./lib/sftpDirectoryEvents";
 import { TERMINAL_SCROLLBACK, TERMINAL_WEBGL_ENABLED } from "./lib/performanceDefaults";
 import type {
   ConfigSnapshot,
@@ -55,7 +71,7 @@ const EMPTY_QUICK_COMMANDS: QuickCommand[] = [];
 
 function App() {
   const [configSnapshot, setConfigSnapshot] = useState<ConfigSnapshot>();
-  const [sessions, setSessions] = useState<RemoteSession[]>([]);
+  const [sessions, setSessionsState] = useState<RemoteSession[]>([]);
   const [openSessionIds, setOpenSessionIds] = useState<string[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
   const [transferCenterOpen, setTransferCenterOpen] = useState(false);
@@ -71,35 +87,80 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tunnelOpen, setTunnelOpen] = useState(false);
   const [aiApiOpen, setAiApiOpen] = useState(false);
+  const [earlyEventsReady, setEarlyEventsReady] = useState(false);
   const [fileLoadingSessionIds, setFileLoadingSessionIds] = useState<Set<string>>(new Set());
   const sessionsRef = useRef<RemoteSession[]>([]);
   const configSnapshotRef = useRef<ConfigSnapshot | undefined>(configSnapshot);
   const autoSftpConnectionKeysRef = useRef<Set<string>>(new Set());
   const fileLoadingCountsRef = useRef<Map<string, number>>(new Map());
-  const sftpListRequestsRef = useRef<Map<string, Promise<RemoteFileEntry[]>>>(new Map());
+  const sftpListRequestsRef = useRef(createKeyedInFlightCache<string, RemoteFileEntry[]>());
   const sftpRefreshTimersRef = useRef<Map<string, number>>(new Map());
   const sftpChangedDirectoriesRef = useRef<Map<string, Set<string>>>(new Map());
   const connectionSectionSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const connectionSectionSaveVersionRef = useRef(0);
+  const sshEventVersionRef = useRef(0);
+  const connectionListEpochRef = useRef(0);
   const sessionWorkspaceActionsRef = useRef<SessionWorkspaceActions | null>(null);
-  const listSftpFiles = useCallback((sftpId: string, path: string) => {
-    const normalizedPath = normalizeRemotePath(path);
-    const requestKey = `${sftpId}:${normalizedPath}`;
-    const existing = sftpListRequestsRef.current.get(requestKey);
-    if (existing) return existing;
-    const request = remoteApi.listFiles(sftpId, normalizedPath).finally(() => {
-      if (sftpListRequestsRef.current.get(requestKey) === request) {
-        sftpListRequestsRef.current.delete(requestKey);
-      }
-    });
-    sftpListRequestsRef.current.set(requestKey, request);
-    return request;
+  const setSessions: Dispatch<SetStateAction<RemoteSession[]>> = useCallback(
+    (action) => commitRefState(sessionsRef, setSessionsState, action),
+    [],
+  );
+  useEffect(() => () => {
+    clearPendingSftpRefreshes();
+    sftpListRequestsRef.current.clear();
+    closeSharedDetachedEditorChannel();
   }, []);
+  const sftpListRequestKey = useCallback(
+    (sftpId: string, path: string) => `${sftpId}:${normalizeRemotePath(path)}`,
+    [],
+  );
+  const invalidateSftpListRequest = useCallback((sftpId: string, path: string) => {
+    sftpListRequestsRef.current.invalidate(sftpListRequestKey(sftpId, path));
+  }, [sftpListRequestKey]);
+  const listSftpFiles = useCallback((sftpId: string, path: string, force = false) => {
+    const normalizedPath = normalizeRemotePath(path);
+    const requestKey = sftpListRequestKey(sftpId, normalizedPath);
+    if (force) sftpListRequestsRef.current.invalidate(requestKey);
+    return sftpListRequestsRef.current.run(
+      requestKey,
+      () => remoteApi.listFiles(sftpId, normalizedPath),
+    );
+  }, [sftpListRequestKey]);
   const {
     apiServerRunning,
     setApiServerRunning,
     initializeApiServerRuntime,
-  } = useApiServerRuntime(configSnapshotRef);
+  } = useApiServerRuntime();
+
+  const earlyEventHandlersRef = useRef({ applySnapshot, setApiServerRunning });
+  earlyEventHandlersRef.current = { applySnapshot, setApiServerRunning };
+
+  useEffect(() => {
+    let disposed = false;
+    let cleanups: Array<() => void> = [];
+    void Promise.allSettled([
+      appEvents.onConfigChanged((payload) => earlyEventHandlersRef.current.applySnapshot(payload)),
+      appEvents.onApiStatus((payload) => earlyEventHandlersRef.current.setApiServerRunning(payload.running)),
+    ]).then((results) => {
+      const items = results.flatMap((result) => {
+        if (result.status === "fulfilled") return [result.value];
+        console.warn("[helm] failed to register early app event listener:", getErrorMessage(result.reason));
+        return [];
+      });
+      if (disposed) {
+        items.forEach((cleanup) => cleanup());
+        return;
+      }
+      cleanups = items;
+      setEarlyEventsReady(true);
+      // 状态查询必须发生在监听器注册后，避免自动启动事件落在初始化窗口里。
+      void initializeApiServerRuntime();
+    });
+    return () => {
+      disposed = true;
+      cleanups.forEach((cleanup) => cleanup());
+    };
+  }, []);
   const {
     appReady,
     migrationNeeded,
@@ -111,12 +172,12 @@ function App() {
     handleMigrate,
     handleSkipMigration,
   } = useAppBootstrap({
+    enabled: earlyEventsReady,
     applySnapshot,
-    initializeApiServerRuntime,
+    onFrontendReady: initializeApiServerRuntime,
   });
   const {
     forwards,
-    upsertForward,
     resetForwards,
     createTunnel,
     updateTunnel,
@@ -162,11 +223,11 @@ function App() {
   });
   const {
     saveSettings,
-    saveQuickCommands,
+    upsertQuickCommand,
+    deleteQuickCommand,
+    invalidateSettingsMutations,
   } = useSettingsPersistence({
-    configSnapshot,
     applyConfigSnapshot,
-    onSettingsSaved: () => setSettingsOpen(false),
   });
   const configSessions = useMemo(() => sessions.filter((session) => !isRuntimeSession(session)), [sessions]);
   const sessionsById = useMemo(() => new Map(sessions.map((session) => [session.id, session])), [sessions]);
@@ -230,6 +291,7 @@ function App() {
     closeSession,
     disconnectSession,
     handleSshStatus,
+    handleTelemetryEvent,
     connectSession,
   } = useSessionRuntime({
     sessions,
@@ -289,10 +351,12 @@ function App() {
     saveBackupSettings,
     runConfiguredBackup,
     deleteBackupRecord,
+    clearBackupRecords,
   } = useBackupWorkflow({
     applySnapshot,
     applyConfigSnapshot,
     resetRuntimeState: resetRuntimeStateForSnapshot,
+    prepareConfigReplacement,
   });
   useTrayActions({
     appReady,
@@ -300,16 +364,6 @@ function App() {
     onOpenBackup: () => setBackupOpen(true),
     onRunBackup: () => void runConfiguredBackup(),
   });
-
-  useEffect(() => {
-    sessionsRef.current = sessions;
-  }, [sessions]);
-
-  useEffect(() => {
-    configSnapshotRef.current = configSnapshot;
-  }, [configSnapshot]);
-
-  useEffect(() => () => clearPendingSftpRefreshes(), []);
 
   useEffect(() => {
     if (!appReady) return;
@@ -325,42 +379,59 @@ function App() {
     }
   }, [appReady, sessions]);
 
-  useEffect(() => {
-    if (!appReady) return;
-    void refreshTransferHistory().catch((error) => {
-      console.warn("[helm] failed to load transfer history:", getErrorMessage(error));
-    });
-  }, [appReady]);
+  const appEventHandlersRef = useRef({
+    handleSshStatus,
+    handleSftpChanged,
+    handleTerminalOutput,
+    handleTerminalClosed,
+    handleTelemetryEvent,
+    upsertTransfer,
+    refreshFilesForTransfer,
+    applyConfigSnapshot,
+    appendTerminal,
+  });
+  appEventHandlersRef.current = {
+    handleSshStatus,
+    handleSftpChanged,
+    handleTerminalOutput,
+    handleTerminalClosed,
+    handleTelemetryEvent,
+    upsertTransfer,
+    refreshFilesForTransfer,
+    applyConfigSnapshot,
+    appendTerminal,
+  };
 
   useEffect(() => {
     if (!appReady) return;
     let disposed = false;
     let cleanups: Array<() => void> = [];
     void Promise.allSettled([
-      remoteApi.onSshStatus(handleSshStatus),
-      remoteApi.onSftpChanged(handleSftpChanged),
-      remoteApi.onTerminalOutput(handleTerminalOutput),
-      remoteApi.onTerminalClosed(handleTerminalClosed),
-      remoteApi.onTelemetrySnapshot((payload) => {
-        if (!payload.snapshot) return;
-        setSessions((current) =>
-          current.map((session) =>
-            session.id === payload.sessionId
-              ? { ...session, telemetry: payload.snapshot }
-              : session,
-          ),
-        );
+      remoteApi.onSshStatus((payload) => {
+        sshEventVersionRef.current += 1;
+        appEventHandlersRef.current.handleSshStatus(payload);
       }),
-      remoteApi.onTransferProgress(upsertTransfer),
+      remoteApi.onSftpChanged((payload) => appEventHandlersRef.current.handleSftpChanged(payload)),
+      remoteApi.onTerminalOutput((payload) => appEventHandlersRef.current.handleTerminalOutput(payload)),
+      remoteApi.onTerminalClosed((payload) => appEventHandlersRef.current.handleTerminalClosed(payload)),
+      remoteApi.onTelemetrySnapshot((payload) => appEventHandlersRef.current.handleTelemetryEvent(payload)),
+      remoteApi.onTransferProgress((payload) => appEventHandlersRef.current.upsertTransfer(payload)),
       remoteApi.onTransferCompleted((payload) => {
-        upsertTransfer(payload);
-        void refreshFilesForTransfer(payload);
+        appEventHandlersRef.current.upsertTransfer(payload);
+        if (payload.direction === "upload") {
+          invalidateSftpDirectories(payload.sftpId, [getRemoteParentPath(payload.remotePath)]);
+        }
+        void appEventHandlersRef.current.refreshFilesForTransfer(payload).catch((error) => {
+          console.warn("[helm] failed to refresh files after transfer:", getErrorMessage(error));
+        });
       }),
-      remoteApi.onTransferFailed(upsertTransfer),
-      appEvents.onConfigChanged(applyConfigSnapshot),
-      remoteApi.onForwardStatus(upsertForward),
+      remoteApi.onTransferFailed((payload) => appEventHandlersRef.current.upsertTransfer(payload)),
       remoteApi.onHostKeyVerify((payload) => {
-        appendTerminal(payload.sessionId, "system", `主机密钥待确认：${payload.fingerprint}`);
+        appEventHandlersRef.current.appendTerminal(
+          payload.sessionId,
+          "system",
+          `主机密钥待确认：${payload.fingerprint}`,
+        );
       }),
     ]).then((results) => {
       const items = results.flatMap((result) => {
@@ -373,6 +444,20 @@ function App() {
         return;
       }
       cleanups = items;
+      const connectionListEpoch = connectionListEpochRef.current;
+      void loadStableSnapshot(
+        remoteApi.listConnections,
+        () => sshEventVersionRef.current,
+        () => !disposed && connectionListEpoch === connectionListEpochRef.current,
+      ).then((connections) => {
+        connections?.forEach((connection) => appEventHandlersRef.current.handleSshStatus(connection));
+      }).catch((error) => {
+        if (!disposed) console.warn("[helm] failed to list runtime connections:", getErrorMessage(error));
+      });
+      // 传输事件监听就绪后再补查，查询期间若又有事件，hook 会自动重试到稳定版本。
+      void refreshTransferHistory().catch((error) => {
+        console.warn("[helm] failed to load transfer history:", getErrorMessage(error));
+      });
     });
     return () => {
       disposed = true;
@@ -401,11 +486,10 @@ function App() {
   }
 
   function applySnapshot(snapshot: ConfigSnapshot, preferredSessionId?: string, preserveRuntime = true) {
+    if (!commitConfigSnapshot(snapshot)) return;
     const mappedSessions = snapshot.data.sessions.map(configToRemoteSession);
     const mappedIdSet = new Set(mappedSessions.map((session) => session.id));
     const preferredId = preferredSessionId && mappedIdSet.has(preferredSessionId) ? preferredSessionId : "";
-    configSnapshotRef.current = snapshot;
-    setConfigSnapshot(snapshot);
     if (preserveRuntime) {
       setSessions((current) => mergeSnapshotSessions(mappedSessions, current));
     } else {
@@ -450,6 +534,7 @@ function App() {
         connectionNotice: current.connectionNotice,
         terminal: current.terminal,
         telemetry: current.telemetry,
+        filesPath: current.filesPath,
         files: current.files,
       };
     });
@@ -472,8 +557,15 @@ function App() {
   }
 
   function applyConfigSnapshot(snapshot: ConfigSnapshot) {
+    commitConfigSnapshot(snapshot);
+  }
+
+  function commitConfigSnapshot(snapshot: ConfigSnapshot) {
+    const current = configSnapshotRef.current;
+    if (!isConfigSnapshotCurrent(current, snapshot)) return false;
     configSnapshotRef.current = snapshot;
     setConfigSnapshot(snapshot);
+    return true;
   }
 
   async function createSessionGroup(name: string) {
@@ -513,6 +605,7 @@ function App() {
     const version = connectionSectionSaveVersionRef.current + 1;
     connectionSectionSaveVersionRef.current = version;
     const task = connectionSectionSaveQueueRef.current.then(async () => {
+      if (version !== connectionSectionSaveVersionRef.current) return;
       const snapshot = await vaultApi.connectionSectionStateUpdate(collapsedSectionIds);
       if (version === connectionSectionSaveVersionRef.current) applyConfigSnapshot(snapshot);
     });
@@ -538,13 +631,26 @@ function App() {
   }
 
   function resetRuntimeStateForSnapshot() {
+    connectionListEpochRef.current += 1;
+    prepareConfigReplacement();
     clearPendingSftpRefreshes();
+    sftpListRequestsRef.current.clear();
     resetSessionRuntime();
     resetTerminalRuntime();
     resetTransferHistory();
     resetForwards();
     fileLoadingCountsRef.current.clear();
     setFileLoadingSessionIds(new Set());
+  }
+
+  function prepareConfigReplacement() {
+    connectionSectionSaveVersionRef.current += 1;
+    invalidateAsyncQueues();
+    invalidateSettingsMutations();
+    setSettingsOpen(false);
+    setTunnelOpen(false);
+    setAiApiOpen(false);
+    closeSessionConfigModal();
   }
 
   function updateSession(sessionId: string, updater: (session: RemoteSession) => RemoteSession) {
@@ -567,8 +673,12 @@ function App() {
   }
 
   function handleSftpChanged(payload: SftpChangedEvent) {
+    const changedDirectory = getRemoteParentPath(payload.path);
+    // 事件表示远端变更已经提交。立即切断变更前仍在途的列表 Promise，避免
+    // 防抖窗口内的展开或刷新继续复用旧响应。
+    invalidateSftpDirectories(payload.sftpId, [changedDirectory]);
     const directories = sftpChangedDirectoriesRef.current.get(payload.sftpId) ?? new Set<string>();
-    directories.add(getRemoteParentPath(payload.path));
+    directories.add(changedDirectory);
     sftpChangedDirectoriesRef.current.set(payload.sftpId, directories);
 
     const existingTimer = sftpRefreshTimersRef.current.get(payload.sftpId);
@@ -583,10 +693,27 @@ function App() {
           changedDirectories.has(normalizeRemotePath(remoteSessionPath(session))),
       );
       for (const session of affected) {
-        void refreshFiles(payload.sftpId, remoteSessionPath(session), session.id);
+        void refreshFiles(payload.sftpId, remoteSessionPath(session), session.id).catch((error) => {
+          console.warn("[helm] failed to refresh changed SFTP directory:", getErrorMessage(error));
+        });
       }
     }, SFTP_REFRESH_DEBOUNCE_MS);
     sftpRefreshTimersRef.current.set(payload.sftpId, timer);
+  }
+
+  function invalidateSftpDirectories(sftpId: string, directories: Iterable<string>) {
+    const normalizedDirectories = Array.from(new Set(Array.from(directories, normalizeRemotePath)));
+    if (normalizedDirectories.length === 0) return;
+    for (const directory of normalizedDirectories) invalidateSftpListRequest(sftpId, directory);
+    const changed = new Set(normalizedDirectories);
+    setSessions((current) => current.map((session) => (
+      session.sftpId === sftpId
+        && session.filesPath
+        && changed.has(normalizeRemotePath(session.filesPath))
+        ? { ...session, filesPath: null }
+        : session
+    )));
+    emitSftpDirectoryInvalidation(sftpId, normalizedDirectories);
   }
 
   function clearPendingSftpRefreshes() {
@@ -609,7 +736,8 @@ function App() {
     downloadRemoteFiles,
     readRemoteText,
     writeRemoteText,
-    saveQuickCommands,
+    upsertQuickCommand,
+    deleteQuickCommand,
   };
 
   const currentSettings = configSnapshot?.data.settings ?? { proxy: null, backup: defaultBackupSettings(), quickCommands: [] };
@@ -727,12 +855,8 @@ function App() {
               transfers={transfers}
               sessions={sessions}
               saveRecords={fileSaveRecords}
-              backupRecords={(() => {
-                const records = configSnapshot?.data.backupRecords ?? [];
-                if (records.length === 0) return [];
-                const sorted = [...records].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-                return sorted.slice(0, 1);
-              })()}
+              backupRecords={[...(configSnapshot?.data.backupRecords ?? [])]
+                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())}
               canUpload={Boolean(activeSession?.sftpId)}
               onClose={() => setTransferCenterOpen(false)}
               onPause={(id) => void pauseTransfer(id)}
@@ -742,15 +866,26 @@ function App() {
               onRemove={(id) => void removeTransfer(id)}
               onRetrySave={(id) => void retryFileSaveRecord(id)}
               onRemoveSave={removeFileSaveRecord}
-              onRestoreBackup={(id) => void restoreBackupRecord(id)}
-              onRemoveBackup={(id) => void deleteBackupRecord(id, false)}
-              onClear={() => {
-                void clearFinishedTransferHistory();
-                clearFileSaveRecords();
-                void vaultApi.backupRecordsClear().then(applyConfigSnapshot);
+              onRestoreBackup={restoreBackupRecord}
+              onRemoveBackup={(id) => deleteBackupRecord(id, false)}
+              onClear={async () => {
+                try {
+                  await Promise.all([
+                    clearFinishedTransferHistory(),
+                    clearBackupRecords(),
+                  ]);
+                  clearFileSaveRecords();
+                } catch (error) {
+                  Modal.error({ title: "清理传输记录失败", content: getErrorMessage(error) });
+                  throw error;
+                }
               }}
               onUploadFiles={(paths) => {
-                if (activeSession) void uploadLocalFiles(activeSession.id, paths, activeSession.currentPath);
+                if (activeSession) {
+                  void uploadLocalFiles(activeSession.id, paths, activeSession.currentPath).catch((error) => {
+                    Modal.error({ title: "上传文件失败", content: getErrorMessage(error) });
+                  });
+                }
               }}
               onOpenDir={(dir) => void openPathDir(dir)}
             />
@@ -817,6 +952,7 @@ function App() {
           <Suspense fallback={null}>
             <SessionConfigModal
               open
+              requestId={sessionModal.requestId}
               mode={sessionModal.mode}
               initialValue={sessionModal.input}
               groups={configSnapshot.data.groups}

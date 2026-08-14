@@ -45,6 +45,29 @@ pub(super) fn verify_session_access(
     Ok(())
 }
 
+pub(super) fn verify_session_access_and_exists(
+    state: &ApiServerState,
+    session_id: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    verify_session_access(state, session_id)?;
+    let store = state.vault.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "内部锁错误".to_string(),
+            }),
+        )
+    })?;
+    store.session(session_id).map(|_| ()).map_err(|_| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiError {
+                error: format!("会话 {} 不存在", session_id),
+            }),
+        )
+    })
+}
+
 fn session_is_authorized(allowed_session_ids: &[String], session_id: &str) -> bool {
     allowed_session_ids
         .iter()

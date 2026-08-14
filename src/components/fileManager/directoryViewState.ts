@@ -1,24 +1,36 @@
 import { sortRemoteEntries } from "../../lib/fileClassify";
-import { getParentPath, getPathSegments, joinPath, normalizePath } from "../../lib/path";
+import { getPathSegments, joinPath, normalizePath } from "../../lib/path";
 import type { RemoteFileEntry, RemoteSession } from "../../types";
 
 export type DirectoryViewState = {
   sftpId: string | null;
+  currentPath: string;
   entries: Record<string, RemoteFileEntry[]>;
   expandedKeys: string[];
 };
 
-type DirectorySessionState = Pick<RemoteSession, "id" | "sftpId" | "currentPath" | "files">;
+export type DirectorySessionIdentity = {
+  sessionId: string;
+  sftpId: string | null;
+};
+
+type DirectorySessionState = Pick<RemoteSession, "id" | "sftpId" | "currentPath" | "filesPath" | "files">;
 
 const directoryViewStateCache = new Map<string, DirectoryViewState>();
 
 export function saveDirectoryViewState(
   sessionId: string,
   sftpId: string | null,
+  currentPath: string,
   entries: Record<string, RemoteFileEntry[]>,
   expandedKeys: string[],
 ) {
-  directoryViewStateCache.set(sessionId, { sftpId, entries, expandedKeys });
+  directoryViewStateCache.set(sessionId, {
+    sftpId,
+    currentPath: normalizePath(currentPath),
+    entries,
+    expandedKeys,
+  });
 }
 
 export function loadDirectoryViewState(session: DirectorySessionState): DirectoryViewState {
@@ -26,27 +38,33 @@ export function loadDirectoryViewState(session: DirectorySessionState): Director
   const path = normalizePath(session.currentPath);
   const cached = directoryViewStateCache.get(session.id);
   const entries = cached?.sftpId === sftpId ? { ...cached.entries } : {};
-  if (sftpId && filesBelongToDirectory(session.files, path)) {
+  if (sftpId && session.filesPath && normalizePath(session.filesPath) === path) {
     entries[path] = sortRemoteEntries(session.files);
   }
   const expandedKeys = cached?.sftpId === sftpId
-    ? uniqueKeys([...cached.expandedKeys, ...getDirectoryParentPaths(path)])
+    ? expandDirectoryParentsForPathChange([...cached.expandedKeys], cached.currentPath, path)
     : sftpId
       ? getDirectoryParentPaths(path)
       : ["/"];
-  return { sftpId, entries, expandedKeys };
+  return { sftpId, currentPath: path, entries, expandedKeys };
 }
 
 export function clearDirectoryViewStateCache() {
   directoryViewStateCache.clear();
 }
 
-export function filesBelongToDirectory(files: RemoteFileEntry[], directoryPath: string) {
-  const normalizedDirectory = normalizePath(directoryPath);
-  return files.every((entry) => {
-    if (!entry.path) return true;
-    return getParentPath(entry.path) === normalizedDirectory;
-  });
+export function sameDirectorySession(left: DirectorySessionIdentity, right: DirectorySessionIdentity) {
+  return left.sessionId === right.sessionId && left.sftpId === right.sftpId;
+}
+
+export function expandDirectoryParentsForPathChange(
+  expandedKeys: string[],
+  previousPath: string,
+  nextPath: string,
+) {
+  if (normalizePath(previousPath) === normalizePath(nextPath)) return expandedKeys;
+  const next = uniqueKeys([...expandedKeys, ...getDirectoryParentPaths(nextPath)]);
+  return sameKeys(expandedKeys, next) ? expandedKeys : next;
 }
 
 export function getDirectoryParentPaths(path: string) {
@@ -62,4 +80,8 @@ export function getDirectoryParentPaths(path: string) {
 
 export function uniqueKeys(keys: string[]) {
   return Array.from(new Set(keys));
+}
+
+function sameKeys(left: string[], right: string[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }

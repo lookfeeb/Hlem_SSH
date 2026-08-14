@@ -108,13 +108,18 @@ export function useTerminalRuntime({
     if (!session || session.currentPath === nextPath) return;
     updateSession(session.id, (item) => ({ ...item, currentPath: nextPath }));
     if (!session.sftpId) return;
+    const requestSftpId = session.sftpId;
     setSessionFilesLoading(session.id, true);
-    void listFiles(session.sftpId, nextPath)
+    void listFiles(requestSftpId, nextPath)
       .then((files) => {
         if (!mountedRef.current) return;
         setSessions((current) =>
           current.map((item) =>
-            item.id === session.id && normalizeRemotePath(item.currentPath) === nextPath ? { ...item, files } : item,
+            item.id === session.id
+              && item.sftpId === requestSftpId
+              && normalizeRemotePath(item.currentPath) === nextPath
+              ? { ...item, filesPath: nextPath, files }
+              : item,
           ),
         );
       })

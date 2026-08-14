@@ -280,6 +280,7 @@ pub struct SftpOptions {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigSnapshot {
     pub data: VaultData,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -353,12 +354,39 @@ impl VaultData {
 }
 
 pub fn migrate_vault_data(data: &mut VaultData) -> bool {
-    if data.version >= VAULT_DATA_VERSION {
-        return false;
+    let mut changed = false;
+    if data.version < VAULT_DATA_VERSION {
+        data.version = VAULT_DATA_VERSION;
+        changed = true;
     }
-    data.version = VAULT_DATA_VERSION;
-    data.touch();
-    true
+    // Older builds stored only one authorized AI API session. Keep that
+    // authorization when the vector field is first introduced, then make the
+    // legacy field follow the normalized vector as a compatibility mirror.
+    if data.settings.ai_api_session_ids.is_empty() {
+        if let Some(session_id) = data
+            .settings
+            .ai_api_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+        {
+            data.settings.ai_api_session_ids = vec![session_id.to_string()];
+            changed = true;
+        }
+    }
+    let normalized_legacy_id = data.settings.ai_api_session_ids.first().cloned();
+    if data.settings.ai_api_session_id != normalized_legacy_id {
+        data.settings.ai_api_session_id = normalized_legacy_id;
+        changed = true;
+    }
+    if data.settings.ai_api_session_ids.is_empty() && data.settings.ai_api_auto_start {
+        data.settings.ai_api_auto_start = false;
+        changed = true;
+    }
+    if changed {
+        data.touch();
+    }
+    changed
 }
 
 impl TunnelConfig {
@@ -877,7 +905,16 @@ fn normalize_remote_path(path: &str) -> String {
     if path.trim().is_empty() {
         return String::new();
     }
-    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
     if parts.is_empty() {
         "/".to_string()
     } else {
@@ -888,6 +925,13 @@ fn normalize_remote_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_remote_paths_resolve_dot_segments() {
+        assert_eq!(normalize_remote_path("/srv/./app/../logs"), "/srv/logs");
+        assert_eq!(normalize_remote_path("/srv/.."), "/");
+        assert_eq!(normalize_remote_path("   "), "");
+    }
 
     fn session_input(name: &str) -> SessionInput {
         SessionInput {
@@ -983,6 +1027,31 @@ mod tests {
         assert!(value["settings"]["quickCommands"][0]
             .get("clickCount")
             .is_none());
+    }
+
+    #[test]
+    fn migration_preserves_legacy_single_ai_api_authorization() {
+        let mut data = VaultData::empty();
+        data.settings.ai_api_session_id = Some(" session-a ".to_string());
+        data.settings.ai_api_auto_start = true;
+
+        assert!(migrate_vault_data(&mut data));
+        assert_eq!(data.settings.ai_api_session_ids, vec!["session-a"]);
+        assert_eq!(
+            data.settings.ai_api_session_id.as_deref(),
+            Some("session-a")
+        );
+        assert!(data.settings.ai_api_auto_start);
+        assert!(!migrate_vault_data(&mut data));
+    }
+
+    #[test]
+    fn migration_disables_ai_api_autostart_without_authorized_sessions() {
+        let mut data = VaultData::empty();
+        data.settings.ai_api_auto_start = true;
+
+        assert!(migrate_vault_data(&mut data));
+        assert!(!data.settings.ai_api_auto_start);
     }
 
     #[test]

@@ -98,6 +98,21 @@ export function connectingSessionIdsFor(
     .map((session) => session.id);
 }
 
+export function remainingOpenSessionIds(
+  currentIds: readonly string[],
+  closingIds: ReadonlySet<string>,
+): string[] {
+  return currentIds.filter((id) => !closingIds.has(id));
+}
+
+export function activeSessionIdAfterClose(
+  currentActiveId: string,
+  remainingIds: readonly string[],
+  closingIds: ReadonlySet<string>,
+): string {
+  return closingIds.has(currentActiveId) ? remainingIds[0] ?? "" : currentActiveId;
+}
+
 export function normalizeDisconnectReason(reason?: string | null) {
   const value = reason?.trim();
   if (

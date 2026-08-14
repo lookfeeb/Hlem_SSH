@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { detectFileLanguage } from "../src/lib/fileLanguage.ts";
-import { detectLineEnding, detectTextEncoding } from "../src/lib/textFileMetadata.ts";
+import { detectFileLanguage } from "../src/lib/fileLanguage";
+import { detectLineEnding, detectTextEncoding } from "../src/lib/textFileMetadata";
 
 test("recognizes the original type behind common backup suffixes", () => {
   assert.equal(detectFileLanguage("/root/.profile.bak-cargo-env-20260616050251").id, "shell");

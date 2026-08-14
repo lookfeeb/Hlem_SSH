@@ -8,6 +8,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { appApi } from "../api/appApi";
 import { readClipboardText, writeClipboardText } from "../lib/clipboard";
+import { getErrorMessage } from "../lib/configMapping";
 import { useAnimationFrameRegistry } from "../lib/reactLifecycle";
 import { registerTerminalSink } from "../lib/terminalRegistry";
 import { TerminalViewportFollower } from "../lib/terminalViewportFollow";
@@ -168,7 +169,9 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(new WebLinksAddon((_event, url) => {
-      void appApi.openExternalUrl(url);
+      void appApi.openExternalUrl(url).catch((error) => {
+        console.warn("[helm] failed to open terminal link:", getErrorMessage(error));
+      });
     }));
     terminal.open(host);
     const viewportFollower = new TerminalViewportFollower(

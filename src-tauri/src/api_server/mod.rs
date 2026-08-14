@@ -4,11 +4,10 @@ mod guard;
 mod handlers_admin;
 mod handlers_remote;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 
 use axum::{
-    extract::DefaultBodyLimit,
     http::{header, HeaderValue, Method, StatusCode},
     response::Json,
     routing::{delete, get, patch, post, put},
@@ -18,12 +17,13 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::{
     net::TcpListener,
-    sync::{watch, Notify, RwLock},
+    sync::{watch, Mutex as TokioMutex, Notify, RwLock},
     task::JoinHandle,
     time::{timeout, Duration},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
+use crate::config_mutation::ConfigMutationCoordinator;
 use crate::events as app_events;
 use crate::remote::RemoteRuntime;
 use crate::vault::VaultStore;
@@ -34,7 +34,7 @@ pub use handlers_remote::FileEntry;
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
-const MAX_UPLOAD_BODY: usize = 512 * 1024 * 1024;
+pub(super) const MAX_UPLOAD_BODY: u64 = 512 * 1024 * 1024;
 const MAX_LOG_ENTRIES: usize = 100;
 const LOG_FLUSH_DEBOUNCE: Duration = Duration::from_secs(1);
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -51,6 +51,10 @@ pub struct ApiServerState {
     pub allowed_session_names: Arc<StdRwLock<Vec<(String, String)>>>,
     pub logs: Arc<RwLock<Vec<ApiLogEntry>>>,
     pub log_dirty: Arc<Notify>,
+    pub backup_operation: Arc<TokioMutex<()>>,
+    pub tunnel_operation: Arc<TokioMutex<()>>,
+    pub connection_config_gate: Arc<RwLock<()>>,
+    pub config_mutations: ConfigMutationCoordinator,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +81,8 @@ pub struct ApiServerHandle {
     shutdown_tx: watch::Sender<bool>,
     server_task: JoinHandle<()>,
     log_task: JoinHandle<()>,
+    app: AppHandle,
+    remote: RemoteRuntime,
     pub port: u16,
     pub api_key: String,
     pub allowed_session_ids: Arc<StdRwLock<Vec<String>>>,
@@ -94,6 +100,10 @@ pub struct ApiServerStartOptions {
     pub allowed_session_ids: Vec<String>,
     pub allowed_session_names: Vec<(String, String)>,
     pub log_file: PathBuf,
+    pub backup_operation: Arc<TokioMutex<()>>,
+    pub tunnel_operation: Arc<TokioMutex<()>>,
+    pub connection_config_gate: Arc<RwLock<()>>,
+    pub config_mutations: ConfigMutationCoordinator,
 }
 
 impl ApiServerHandle {
@@ -105,23 +115,35 @@ impl ApiServerHandle {
         if let Err(error) = self.shutdown_tx.send(true) {
             eprintln!("[helm] failed to signal API server shutdown: {error}");
         }
-        shutdown_task(self.server_task, "API server").await;
-        shutdown_task(self.log_task, "API log flusher").await;
+        tokio::join!(
+            shutdown_task(self.server_task, "API server"),
+            shutdown_task(self.log_task, "API log flusher")
+        );
+        self.remote
+            .shutdown_automation_connections(&self.app, None)
+            .await;
     }
 
-    pub fn update_allowed_sessions(
+    pub async fn update_allowed_sessions(
         &self,
         allowed_session_ids: Vec<String>,
         allowed_session_names: Vec<(String, String)>,
     ) -> Result<(), String> {
-        *self
-            .allowed_session_ids
-            .write()
-            .map_err(|_| "更新 API 会话限制失败：内部锁错误".to_string())? = allowed_session_ids;
-        *self
-            .allowed_session_names
-            .write()
-            .map_err(|_| "更新 API 会话名称失败：内部锁错误".to_string())? = allowed_session_names;
+        {
+            let mut ids = self
+                .allowed_session_ids
+                .write()
+                .map_err(|_| "更新 API 会话限制失败：内部锁错误".to_string())?;
+            let mut names = self
+                .allowed_session_names
+                .write()
+                .map_err(|_| "更新 API 会话名称失败：内部锁错误".to_string())?;
+            *ids = allowed_session_ids.clone();
+            *names = allowed_session_names;
+        }
+        self.remote
+            .shutdown_automation_connections(&self.app, Some(&allowed_session_ids))
+            .await;
         Ok(())
     }
 
@@ -203,17 +225,53 @@ async fn push_log_with_response(
     state.log_dirty.notify_one();
 }
 
-async fn load_logs_from_file(path: &PathBuf) -> Vec<ApiLogEntry> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => Vec::new(),
+pub(crate) async fn load_logs_from_file(path: &Path) -> Vec<ApiLogEntry> {
+    let content = match tokio::fs::read(path).await {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            eprintln!("[helm] failed to read api logs {}: {error}", path.display());
+            return Vec::new();
+        }
+    };
+    match serde_json::from_slice(&content) {
+        Ok(logs) => logs,
+        Err(error) => {
+            quarantine_invalid_api_logs(path, &error).await;
+            Vec::new()
+        }
     }
 }
 
-async fn flush_logs_to_file(logs: &Arc<RwLock<Vec<ApiLogEntry>>>, path: &PathBuf) {
+async fn quarantine_invalid_api_logs(path: &Path, error: &serde_json::Error) {
+    let file_stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("api_logs");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("json");
+    let quarantine_path = path.with_file_name(format!(
+        "{file_stem}.corrupt-{}.{extension}",
+        uuid::Uuid::new_v4()
+    ));
+    match tokio::fs::rename(path, &quarantine_path).await {
+        Ok(()) => eprintln!(
+            "[helm] invalid api logs moved to {}: {error}",
+            quarantine_path.display()
+        ),
+        Err(rename_error) => eprintln!(
+            "[helm] invalid api logs ignored; failed to quarantine {}: {rename_error}; parse error: {error}",
+            path.display()
+        ),
+    }
+}
+
+async fn flush_logs_to_file(logs: &Arc<RwLock<Vec<ApiLogEntry>>>, path: &Path) {
     let snapshot = logs.read().await.clone();
     if let Ok(json) = serde_json::to_string(&snapshot) {
-        if let Err(error) = tokio::fs::write(path, json).await {
+        if let Err(error) = crate::atomic_file::write_atomic_async(path, json.as_bytes()).await {
             eprintln!("[helm] failed to flush api logs: {error}");
         }
     }
@@ -257,19 +315,51 @@ fn friendly_error_detail(detail: &str, state: &ApiServerState) -> String {
 }
 
 fn allowed_session_ids_snapshot(state: &ApiServerState) -> Vec<String> {
-    state
+    let runtime_ids = state
         .allowed_session_ids
         .read()
         .map(|items| items.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let configured_ids = state
+        .vault
+        .lock()
+        .ok()
+        .and_then(|store| store.snapshot().ok())
+        .map(|snapshot| {
+            let settings = snapshot.data.settings;
+            let mut ids = settings.ai_api_session_ids;
+            if let Some(legacy_id) = settings.ai_api_session_id {
+                if !legacy_id.is_empty() && !ids.contains(&legacy_id) {
+                    ids.push(legacy_id);
+                }
+            }
+            ids
+        })
+        .unwrap_or_default();
+    intersect_allowed_session_ids(&runtime_ids, &configured_ids)
 }
 
 fn allowed_session_names_snapshot(state: &ApiServerState) -> Vec<(String, String)> {
+    let allowed_ids = allowed_session_ids_snapshot(state);
     state
         .allowed_session_names
         .read()
-        .map(|items| items.clone())
+        .map(|items| {
+            items
+                .iter()
+                .filter(|(id, _)| allowed_ids.contains(id))
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default()
+}
+
+fn intersect_allowed_session_ids(runtime_ids: &[String], configured_ids: &[String]) -> Vec<String> {
+    runtime_ids
+        .iter()
+        .filter(|id| configured_ids.contains(id))
+        .cloned()
+        .collect()
 }
 
 fn truncate_for_log(value: &str, max_chars: usize) -> String {
@@ -371,12 +461,17 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         allowed_session_ids,
         allowed_session_names,
         log_file,
+        backup_operation,
+        tunnel_operation,
+        connection_config_gate,
+        config_mutations,
     } = options;
     let existing_logs = load_logs_from_file(&log_file).await;
     let logs = Arc::new(RwLock::new(existing_logs));
     let log_dirty = Arc::new(Notify::new());
     let allowed_session_ids = Arc::new(StdRwLock::new(allowed_session_ids));
     let allowed_session_names = Arc::new(StdRwLock::new(allowed_session_names));
+    let handle_remote = remote.clone();
     let state = ApiServerState {
         api_key: Arc::new(RwLock::new(api_key.clone())),
         app: app.clone(),
@@ -386,6 +481,10 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         allowed_session_names: allowed_session_names.clone(),
         logs: logs.clone(),
         log_dirty: log_dirty.clone(),
+        backup_operation,
+        tunnel_operation,
+        connection_config_gate,
+        config_mutations,
     };
 
     let cors = CorsLayer::new()
@@ -400,7 +499,12 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]);
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::RANGE])
+        .expose_headers([
+            header::ACCEPT_RANGES,
+            header::CONTENT_DISPOSITION,
+            header::CONTENT_RANGE,
+        ]);
 
     let app_router = Router::new()
         // 鉴权探活
@@ -450,7 +554,6 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         // PUT body 是文件原始字节，服务端流式直写 SFTP，无 temp 文件。
         .route("/api/upload", put(handlers_remote::upload_file_raw))
         .route("/api/download", get(handlers_remote::download_file))
-        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY))
         .layer(cors)
         .with_state(state);
 
@@ -488,8 +591,11 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         })
     };
 
+    let server_shutdown = shutdown_tx.clone();
+    let server_remote = handle_remote.clone();
+    let server_app = app.clone();
     let server_task = tokio::spawn(async move {
-        if let Err(error) = axum::serve(listener, app_router)
+        let result = axum::serve(listener, app_router)
             .with_graceful_shutdown(async move {
                 while !*shutdown_rx.borrow_and_update() {
                     if shutdown_rx.changed().await.is_err() {
@@ -497,9 +603,27 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
                     }
                 }
             })
-            .await
-        {
+            .await;
+        if let Err(error) = &result {
             eprintln!("[helm] api server stopped with error: {error}");
+        }
+        // The listener can terminate without a command-driven shutdown (for
+        // example after an accept-loop failure). Wake the log flusher and tear
+        // down automation resources even if no later status query observes it.
+        let _ = server_shutdown.send(true);
+        server_remote
+            .shutdown_automation_connections(&server_app, None)
+            .await;
+        if result.is_err() {
+            crate::events::emit(
+                &server_app,
+                crate::events::API_STATUS,
+                ApiServerInfo {
+                    running: false,
+                    port: 0,
+                    api_key: String::new(),
+                },
+            );
         }
     });
 
@@ -507,6 +631,8 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         shutdown_tx,
         server_task,
         log_task,
+        app,
+        remote: handle_remote,
         port: actual_port,
         api_key,
         allowed_session_ids,
@@ -540,7 +666,11 @@ fn is_allowed_local_origin(origin: &HeaderValue) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{command_log_detail, response_log_preview};
+    use super::{
+        command_log_detail, intersect_allowed_session_ids, load_logs_from_file,
+        response_log_preview,
+    };
+    use tempfile::tempdir;
 
     #[test]
     fn api_logs_hide_sensitive_command_arguments_and_output() {
@@ -564,5 +694,33 @@ mod tests {
             response_log_preview("uname -a", "Linux helm", 2_000).as_deref(),
             Some("Linux helm")
         );
+    }
+
+    #[test]
+    fn effective_api_authorization_is_the_runtime_and_persisted_intersection() {
+        let runtime = vec!["session-a".to_string(), "session-b".to_string()];
+        let configured = vec!["session-b".to_string(), "session-c".to_string()];
+        assert_eq!(
+            intersect_allowed_session_ids(&runtime, &configured),
+            ["session-b"]
+        );
+        assert!(intersect_allowed_session_ids(&runtime, &[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn corrupt_api_logs_are_quarantined() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("api_logs.json");
+        tokio::fs::write(&path, b"{not-json").await.unwrap();
+
+        assert!(load_logs_from_file(&path).await.is_empty());
+        assert!(!path.exists());
+        let names = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 1);
+        assert!(names[0].starts_with("api_logs.corrupt-"));
+        assert!(names[0].ends_with(".json"));
     }
 }

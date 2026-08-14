@@ -2,6 +2,7 @@ use super::*;
 
 impl RemoteRuntime {
     pub async fn open_sftp(&self, connection_id: &str) -> AppResult<SftpInfo> {
+        let _lifecycle_guard = self.lifecycle_gate.read().await;
         let open_lock = self.sftp_open_lock(connection_id).await;
         let _open_guard = open_lock.lock().await;
         if let Some(info) = self
@@ -9,7 +10,9 @@ impl RemoteRuntime {
             .read()
             .await
             .values()
-            .find(|record| record.info.connection_id == connection_id)
+            .find(|record| {
+                record.info.connection_id == connection_id && !record.closed.load(Ordering::Acquire)
+            })
             .map(|record| record.info.clone())
         {
             log::info!(
@@ -35,8 +38,13 @@ impl RemoteRuntime {
             crate::errors::register_resource_label(&info.sftp_id, &label);
         }
         let transfer_sessions = Arc::new(RwLock::new(vec![sftp.clone()]));
+        let closed = Arc::new(AtomicBool::new(false));
         let transfer_pool_ready = Arc::new(AtomicBool::new(false));
         let transfer_pool_notify = Arc::new(Notify::new());
+        let transfer_pool_builder = Arc::new(StdMutex::new(None));
+        let active_api_uploads = Arc::new(AtomicU64::new(0));
+        let api_upload_notify = Arc::new(Notify::new());
+        let (pool_start_tx, pool_start_rx) = oneshot::channel();
         let record = SftpRecord {
             info: info.clone(),
             session: sftp,
@@ -45,7 +53,58 @@ impl RemoteRuntime {
             transfer_slots: Arc::new(Semaphore::new(MAX_SFTP_TRANSFER_CONCURRENCY)),
             transfer_pool_ready: transfer_pool_ready.clone(),
             transfer_pool_notify: transfer_pool_notify.clone(),
+            transfer_pool_builder: transfer_pool_builder.clone(),
+            closed: closed.clone(),
+            active_api_uploads,
+            api_upload_notify,
         };
+
+        // Register the builder before publishing the SFTP record. This closes
+        // the window where close_sftp could remove the record while the
+        // background task was not yet reachable for cancellation.
+        let conn = connection.clone();
+        let pool = transfer_sessions;
+        let builder_closed = closed.clone();
+        let builder_ready = transfer_pool_ready.clone();
+        let builder_notify = transfer_pool_notify.clone();
+        let pool_builder = tokio::spawn(async move {
+            if pool_start_rx.await.is_err() {
+                return;
+            }
+            let extra_count = SFTP_TRANSFER_POOL_SIZE - 1;
+            let futures = (0..extra_count).map(|_| {
+                let connection = conn.clone();
+                async move { open_sftp_channel(&connection).await }
+            });
+            // These are ordinary futures, not detached Tokio tasks. Aborting
+            // the builder therefore also drops every in-flight channel open.
+            for result in futures_util::future::join_all(futures).await {
+                if builder_closed.load(Ordering::Acquire) {
+                    break;
+                }
+                if let Ok(session) = result {
+                    let mut sessions = pool.write().await;
+                    // Closing can win while this task waits for the pool lock.
+                    // Re-check before publishing so a closed record never
+                    // regains background transfer channels.
+                    if builder_closed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    sessions.push(Arc::new(session));
+                }
+            }
+            builder_ready.store(true, Ordering::Release);
+            builder_notify.notify_waiters();
+        });
+        if !install_sftp_pool_builder(
+            transfer_pool_builder.as_ref(),
+            closed.as_ref(),
+            pool_builder,
+        ) {
+            return Err(AppError::Remote(
+                "SFTP 传输通道池已在启动期间关闭".to_string(),
+            ));
+        }
         self.sftp_sessions
             .write()
             .await
@@ -56,34 +115,32 @@ impl RemoteRuntime {
             connection_id
         );
 
-        // Expand the transfer pool in the background (non-blocking)
-        let conn = connection.clone();
-        let pool = transfer_sessions;
-        tokio::spawn(async move {
-            let extra_count = SFTP_TRANSFER_POOL_SIZE - 1;
-            let mut futures = Vec::with_capacity(extra_count);
-            for _ in 0..extra_count {
-                let c = conn.clone();
-                futures.push(tokio::spawn(async move { open_sftp_channel(&c).await }));
+        // Let the already-registered task start only after the record is
+        // visible. A concurrent close can now always find and abort it.
+        if pool_start_tx.send(()).is_err() {
+            if let Some(record) = self.sftp_sessions.write().await.remove(&info.sftp_id) {
+                record.close().await;
             }
-            for future in futures {
-                if let Ok(Ok(session)) = future.await {
-                    pool.write().await.push(Arc::new(session));
-                }
-            }
-            transfer_pool_ready.store(true, Ordering::Release);
-            transfer_pool_notify.notify_waiters();
-        });
+            crate::errors::forget_resource_label(&info.sftp_id);
+            return Err(AppError::Remote(
+                "SFTP 传输通道池启动任务异常结束".to_string(),
+            ));
+        }
 
         Ok(info)
     }
 
-    pub async fn close_sftp(&self, sftp_id: &str) -> AppResult<()> {
-        self.sftp_sessions
+    pub async fn close_sftp(&self, app: &AppHandle, sftp_id: &str) -> AppResult<()> {
+        let record = self
+            .sftp_sessions
             .write()
             .await
             .remove(sftp_id)
             .ok_or_else(|| AppError::missing_sftp(sftp_id))?;
+        record.begin_close();
+        self.cancel_transfers_for_sftp_ids(app, &[sftp_id.to_string()], "SFTP 已关闭")
+            .await;
+        record.close().await;
         crate::errors::forget_resource_label(sftp_id);
         Ok(())
     }
@@ -131,8 +188,8 @@ impl RemoteRuntime {
             && visited.len() < MAX_SFTP_SEARCH_DIRS
             && scanned_entries < MAX_SFTP_SEARCH_ENTRIES
         {
-            let mut handles = Vec::new();
-            while handles.len() < MAX_SFTP_SEARCH_CONCURRENCY {
+            let mut requests = Vec::new();
+            while requests.len() < MAX_SFTP_SEARCH_CONCURRENCY {
                 let Some(directory) = queue.pop_front() else {
                     break;
                 };
@@ -141,7 +198,7 @@ impl RemoteRuntime {
                 }
                 visited.insert(directory.clone());
                 let sftp = sftp.clone();
-                handles.push(tokio::spawn(async move {
+                requests.push(async move {
                     let entries = sftp
                         .read_dir(directory.clone())
                         .await
@@ -154,17 +211,16 @@ impl RemoteRuntime {
                                 .collect::<Vec<_>>()
                         });
                     (directory, entries)
-                }));
+                });
             }
 
-            if handles.is_empty() {
+            if requests.is_empty() {
                 continue;
             }
 
-            for handle in handles {
-                let Ok((directory, entries)) = handle.await else {
-                    continue;
-                };
+            // Keep directory reads concurrent without detaching Tokio tasks.
+            // Returning early after a match now drops no background work.
+            for (directory, entries) in futures_util::future::join_all(requests).await {
                 let Ok(entries) = entries else {
                     continue;
                 };
@@ -410,18 +466,56 @@ async fn open_sftp_channel(connection: &ConnectionRecord) -> AppResult<SftpSessi
     open_sftp_channel_from_channel(channel).await
 }
 
+fn install_sftp_pool_builder(
+    slot: &StdMutex<Option<JoinHandle<()>>>,
+    closed: &AtomicBool,
+    builder: JoinHandle<()>,
+) -> bool {
+    let mut slot = lock_unpoisoned(slot, "SFTP transfer pool task registry");
+    if closed.load(Ordering::Acquire) {
+        builder.abort();
+        return false;
+    }
+    if let Some(previous) = slot.replace(builder) {
+        previous.abort();
+    }
+    true
+}
+
 async fn open_sftp_channel_from_channel(channel: Channel<client::Msg>) -> AppResult<SftpSession> {
-    channel
-        .request_subsystem(true, "sftp")
-        .await
-        .map_err(remote_error)?;
-    SftpSession::new_with_config(
-        channel.into_stream(),
-        SftpClientConfig {
-            request_timeout_secs: SFTP_REQUEST_TIMEOUT_SECS,
-            ..Default::default()
-        },
+    run_ssh_channel_control("启动 SFTP 子系统", channel.request_subsystem(true, "sftp")).await?;
+    match timeout(
+        Duration::from_secs(SFTP_REQUEST_TIMEOUT_SECS),
+        SftpSession::new_with_config(
+            channel.into_stream(),
+            SftpClientConfig {
+                request_timeout_secs: SFTP_REQUEST_TIMEOUT_SECS,
+                ..Default::default()
+            },
+        ),
     )
     .await
-    .map_err(remote_error)
+    {
+        Ok(result) => result.map_err(remote_error),
+        Err(_) => Err(AppError::Remote("初始化 SFTP 会话超时".to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pool_builder_registered_after_close_is_aborted() {
+        let slot = StdMutex::new(None);
+        let closed = AtomicBool::new(true);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = task.abort_handle();
+
+        assert!(!install_sftp_pool_builder(&slot, &closed, task));
+        tokio::task::yield_now().await;
+
+        assert!(abort_handle.is_finished());
+        assert!(slot.lock().unwrap().is_none());
+    }
 }

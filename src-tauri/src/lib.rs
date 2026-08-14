@@ -1,9 +1,11 @@
 #![cfg_attr(target_env = "msvc", allow(linker_messages))]
 
 mod api_server;
+mod atomic_file;
 mod backup;
 mod commands;
 mod config;
+mod config_mutation;
 mod crypto;
 mod direct_broker;
 mod errors;
@@ -13,37 +15,51 @@ mod remote;
 mod vault;
 
 use commands::{
-    api_server_logs, api_server_regenerate_key, api_server_start, api_server_status,
-    api_server_stop, api_server_update_sessions, app_info, backup_record_delete,
-    backup_record_restore, backup_records_clear, backup_run_now, check_update, config_snapshot,
+    api_server_configure_and_start, api_server_logs, api_server_regenerate_key, api_server_status,
+    api_server_stop, app_info, backup_record_delete, backup_record_restore, backup_records_clear,
+    backup_run_now, check_update, config_snapshot, connection_list,
     connection_section_state_update, download_update, forward_list, forward_start_dynamic,
     forward_start_local, forward_start_remote, forward_stop, group_create, group_delete,
     group_update, install_update, latency_probe, local_create_directories, local_expand_paths,
-    local_path_exists, open_database_dir, open_external_url, open_path_dir, resolve_vault_path,
-    session_clear_recent, session_create, session_delete, session_favorite_update,
-    session_mark_recent, session_update, settings_update, sftp_close, sftp_copy, sftp_create_file,
-    sftp_delete, sftp_exists, sftp_list, sftp_mkdir, sftp_open, sftp_read_text, sftp_rename,
-    sftp_resolve_target, sftp_search, sftp_write_text, spawn_api_server_autostart,
-    spawn_auto_backup_scheduler, ssh_connect, ssh_disconnect, ssh_exec, ssh_exec_on_connection,
-    ssh_trust_host_key, telemetry_snapshot, telemetry_start, telemetry_stop, terminal_close,
-    terminal_open, terminal_resize, terminal_start, terminal_write, transfer_cancel,
-    transfer_download, transfer_history_clear_finished, transfer_history_snapshot, transfer_pause,
-    transfer_remove, transfer_resume, transfer_retry, transfer_upload, tunnel_create,
-    tunnel_delete, tunnel_update, vault_backup_export, vault_backup_import, vault_migrate,
-    vault_needs_migration, vault_skip_migration, AppState,
+    local_path_exists, open_database_dir, open_external_url, open_path_dir, quick_command_delete,
+    quick_command_upsert, resolve_vault_path, session_clear_recent, session_create, session_delete,
+    session_favorite_update, session_mark_recent, session_update, settings_ai_api_update,
+    settings_backup_update, settings_ignore_update_version, settings_proxy_update, sftp_close,
+    sftp_copy, sftp_create_file, sftp_delete, sftp_exists, sftp_list, sftp_mkdir, sftp_open,
+    sftp_read_text, sftp_rename, sftp_resolve_target, sftp_search, sftp_write_text,
+    spawn_api_server_autostart, spawn_auto_backup_scheduler, ssh_connect, ssh_disconnect, ssh_exec,
+    ssh_exec_on_connection, ssh_trust_host_key, telemetry_snapshot, telemetry_start,
+    telemetry_stop, terminal_close, terminal_open, terminal_resize, terminal_start, terminal_write,
+    transfer_cancel, transfer_download, transfer_history_clear_finished, transfer_history_snapshot,
+    transfer_pause, transfer_remove, transfer_resume, transfer_retry, transfer_upload,
+    tunnel_create, tunnel_delete, tunnel_update, vault_backup_export, vault_backup_import,
+    vault_migrate, vault_needs_migration, vault_skip_migration, AppState,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    ExitRequestApi, Manager, RunEvent, WindowEvent,
 };
+
+const APP_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub fn run_direct_broker_from_args() -> bool {
     direct_broker::run_from_args_if_requested()
 }
 
 #[tauri::command]
-fn frontend_ready(app: tauri::AppHandle) {
+fn frontend_ready(app: tauri::AppHandle, state: tauri::State<'_, AppState>) {
+    state
+        .frontend_ready
+        .store(true, std::sync::atomic::Ordering::Release);
+    if let Ok(snapshot) = state
+        .vault
+        .lock()
+        .map_err(|_| ())
+        .and_then(|store| store.snapshot().map_err(|_| ()))
+    {
+        crate::events::emit(&app, crate::events::CONFIG_CHANGED, snapshot);
+    }
     if let Some(window) = app.get_webview_window("main") {
         log_window_result("show main window on frontend ready", window.show());
         log_window_result("focus main window on frontend ready", window.set_focus());
@@ -88,8 +104,9 @@ pub fn run() {
                 }
             });
             let app_handle = app.handle().clone();
+            let reaper_shutdown = state.shutdown_receiver();
             tauri::async_runtime::spawn(async move {
-                remote.spawn_dead_connection_reaper(app_handle);
+                remote.spawn_dead_connection_reaper(app_handle, reaper_shutdown);
             });
             app.manage(state);
             spawn_api_server_autostart(app.handle().clone());
@@ -120,7 +137,12 @@ pub fn run() {
             backup_record_restore,
             backup_record_delete,
             backup_records_clear,
-            settings_update,
+            settings_proxy_update,
+            settings_backup_update,
+            quick_command_upsert,
+            quick_command_delete,
+            settings_ai_api_update,
+            settings_ignore_update_version,
             connection_section_state_update,
             group_create,
             group_update,
@@ -136,6 +158,7 @@ pub fn run() {
             tunnel_delete,
             ssh_connect,
             ssh_disconnect,
+            connection_list,
             ssh_trust_host_key,
             terminal_open,
             terminal_start,
@@ -175,15 +198,49 @@ pub fn run() {
             forward_start_dynamic,
             forward_stop,
             forward_list,
-            api_server_start,
+            api_server_configure_and_start,
             api_server_stop,
             api_server_status,
             api_server_regenerate_key,
-            api_server_logs,
-            api_server_update_sessions
+            api_server_logs
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run HelM");
+        .build(tauri::generate_context!())
+        .expect("failed to build HelM")
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { code, api, .. } => {
+                handle_exit_requested(app, code, api);
+            }
+            RunEvent::Exit => app.state::<AppState>().request_shutdown(),
+            _ => {}
+        });
+}
+
+fn handle_exit_requested(app: &tauri::AppHandle, code: Option<i32>, api: ExitRequestApi) {
+    let state = app.state::<AppState>();
+    if state.shutdown_complete() {
+        return;
+    }
+
+    api.prevent_exit();
+    if !state.begin_shutdown() {
+        return;
+    }
+    state.request_shutdown();
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let cleanup = async {
+            app.state::<AppState>().shutdown_runtime(&app).await;
+        };
+        if tokio::time::timeout(APP_SHUTDOWN_TIMEOUT, cleanup)
+            .await
+            .is_err()
+        {
+            eprintln!("[helm] graceful shutdown timed out; forcing application exit");
+        }
+        app.state::<AppState>().finish_shutdown();
+        app.exit(code.unwrap_or(0));
+    });
 }
 
 fn configure_main_window(app: &mut tauri::App) {

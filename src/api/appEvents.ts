@@ -1,5 +1,5 @@
 import { listenEvent } from "./bridge";
-import type { ApiLogEntry } from "./appApi";
+import type { ApiLogEntry, ApiServerInfo } from "./appApi";
 import type { ConfigSnapshot } from "../types";
 
 type TrayAction = "lock" | "settings" | "backup" | "backupNow";
@@ -15,6 +15,9 @@ export const appEvents = {
    */
   onApiLog: async (handler: (entry: ApiLogEntry) => void): Promise<Unlisten> => {
     return listenEvent("api://log", handler);
+  },
+  onApiStatus: async (handler: (info: ApiServerInfo) => void): Promise<Unlisten> => {
+    return listenEvent("api://status", handler);
   },
   onConfigChanged: async (handler: (snapshot: ConfigSnapshot) => void): Promise<Unlisten> => {
     return listenEvent("config://changed", handler);

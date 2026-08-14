@@ -1,5 +1,13 @@
 export function normalizePath(path: string): string {
-  const parts = path.split("/").filter((part) => part.length > 0);
+  const parts: string[] = [];
+  for (const part of path.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
   return `/${parts.join("/")}`;
 }
 

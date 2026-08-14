@@ -13,14 +13,15 @@ export interface SessionWorkspaceActions {
   clearTerminal: (sessionId: string) => void;
   changePath: (sessionId: string, path: string) => Promise<void>;
   refreshSessionFiles: (sessionId: string) => Promise<void>;
-  searchRemoteFile: (sessionId: string, query: string) => Promise<string | null>;
-  listRemoteDirectory: (sessionId: string, path: string) => Promise<RemoteFileEntry[]>;
-  runFileOperation: (sessionId: string, operation: FileOperation) => Promise<void>;
+  searchRemoteFile: (sessionId: string, query: string, signal?: AbortSignal) => Promise<string | null>;
+  listRemoteDirectory: (sessionId: string, path: string, force?: boolean) => Promise<RemoteFileEntry[]>;
+  runFileOperation: (sessionId: string, operation: FileOperation) => Promise<string[]>;
   uploadLocalFiles: (sessionId: string, localPaths: string[], targetDirectory: string) => Promise<void>;
   downloadRemoteFiles: (sessionId: string, files: RemoteDownloadSelection[]) => Promise<void>;
   readRemoteText: (path: string, sessionId?: string) => Promise<string>;
   writeRemoteText: (path: string, content: string, sessionId?: string) => Promise<void>;
-  saveQuickCommands: (commands: QuickCommand[]) => Promise<void>;
+  upsertQuickCommand: (command: QuickCommand) => Promise<void>;
+  deleteQuickCommand: (commandId: string) => Promise<void>;
 }
 
 interface SessionWorkspaceProps {
@@ -80,8 +81,8 @@ function SessionWorkspaceView({
               active={active}
               onPathChange={(path) => void actions().changePath(session.id, path)}
               onRefresh={() => actions().refreshSessionFiles(session.id)}
-              onRemoteSearch={(query) => actions().searchRemoteFile(session.id, query)}
-              onListDirectory={(path) => actions().listRemoteDirectory(session.id, path)}
+              onRemoteSearch={(query, signal) => actions().searchRemoteFile(session.id, query, signal)}
+              onListDirectory={(path, force) => actions().listRemoteDirectory(session.id, path, force)}
               onFileOperation={(operation) => actions().runFileOperation(session.id, operation)}
               onUploadFiles={(paths, targetDirectory) => actions().uploadLocalFiles(session.id, paths, targetDirectory)}
               onDownloadFiles={(files) => actions().downloadRemoteFiles(session.id, files)}
@@ -89,7 +90,8 @@ function SessionWorkspaceView({
               onWriteText={(path, content, sessionId) => actions().writeRemoteText(path, content, sessionId ?? session.id)}
               onSendCommand={(command) => actions().sendTerminalCommand(session.id, session.terminalId, command)}
               quickCommands={quickCommands}
-              onQuickCommandsChange={(commands) => actions().saveQuickCommands(commands)}
+              onQuickCommandUpsert={(command) => actions().upsertQuickCommand(command)}
+              onQuickCommandDelete={(commandId) => actions().deleteQuickCommand(commandId)}
               filesLoading={filesLoading}
             />
           }

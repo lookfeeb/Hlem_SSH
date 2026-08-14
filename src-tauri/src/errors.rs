@@ -67,6 +67,8 @@ pub enum AppError {
     NotFound(String),
     #[error("参数无效: {0}")]
     InvalidInput(String),
+    #[error("配置冲突: {0}")]
+    ConfigConflict(String),
     #[error("主机密钥未信任")]
     HostKeyUntrusted(Box<HostKeyVerification>),
     #[error("主机密钥已变更")]

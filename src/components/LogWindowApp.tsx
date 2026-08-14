@@ -1,11 +1,12 @@
 import { CheckOutlined, CloseOutlined, CopyOutlined } from "@ant-design/icons";
 import { Button, ConfigProvider, Empty, Tooltip, theme } from "antd";
 import zhCN from "antd/locale/zh_CN";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { appApi, type ApiLogEntry } from "../api/appApi";
 import { appEvents } from "../api/appEvents";
 import { writeClipboardText } from "../lib/clipboard";
 import { getErrorMessage } from "../lib/configMapping";
+import { apiLogEntryKey, mergeApiLogEntries } from "../lib/apiLogEntries";
 import { formatBeijingMonthDayTime } from "../lib/format";
 import { useMountedRef, useTimeoutRegistry } from "../lib/reactLifecycle";
 
@@ -15,7 +16,6 @@ export function LogWindowApp() {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [detailCopied, setDetailCopied] = useState(false);
   const [selectedLog, setSelectedLog] = useState<ApiLogEntry | null>(null);
-  const listRef = useRef<HTMLDivElement>(null);
   const mountedRef = useMountedRef();
   const setSafeTimeout = useTimeoutRegistry();
 
@@ -26,24 +26,23 @@ export function LogWindowApp() {
     const load = () => {
       void appApi.apiServerLogs()
         .then((items) => {
-          if (mounted) setLogs(items);
+          if (mounted) setLogs((current) => mergeApiLogEntries(current, items));
         })
         .catch((error) => {
           console.warn("[helm] failed to load api logs:", getErrorMessage(error));
         });
     };
-    load();
     void appEvents.onApiLog((entry) => {
       if (!mounted) return;
       if (pollingTimer !== null) { clearInterval(pollingTimer); pollingTimer = null; }
       setLogs((prev) => {
-        const next = [...prev, entry];
-        return next.length > 100 ? next.slice(next.length - 100) : next;
+        return mergeApiLogEntries(prev, [entry]);
       });
     }).then((u) => {
       if (!mounted) { u(); return; }
       unlisten = u;
-      pollingTimer = window.setInterval(load, 5000);
+      // 查询和订阅之间产生的日志由这次补查合并进来，merge 会去重。
+      load();
     }).catch((error) => {
       console.warn("[helm] failed to subscribe api logs:", getErrorMessage(error));
       if (mounted) pollingTimer = window.setInterval(load, 3000);
@@ -108,7 +107,7 @@ export function LogWindowApp() {
             </Tooltip>
           </div>
         </header>
-        <div className="logWindowBody" ref={listRef} style={{ position: "relative" }}>
+        <div className="logWindowBody">
           {reversed.length === 0 ? (
             <div className="logWindowEmpty">
               <Empty description="暂无日志" image={Empty.PRESENTED_IMAGE_SIMPLE} />
@@ -214,5 +213,5 @@ function formatLogDetail(log: ApiLogEntry) {
 }
 
 function logKey(log: ApiLogEntry) {
-  return `${log.timestamp}|${log.action}|${log.durationMs}|${log.success ? 1 : 0}|${log.detail}`;
+  return apiLogEntryKey(log);
 }

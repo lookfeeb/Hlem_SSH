@@ -12,7 +12,7 @@ import {
   WarningOutlined,
 } from "@ant-design/icons";
 import { App as AntdApp, Button, Form, Input, InputNumber, Modal, Popconfirm, Segmented, Select, Switch, Tooltip } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppSettings, BackupRecord, BackupSettings } from "../types";
 import { defaultBackupSettings } from "../api/vaultApi";
 import { getErrorMessage } from "../lib/configMapping";
@@ -27,7 +27,7 @@ interface BackupModalProps {
   onClose: () => void;
   onExport: (path: string) => Promise<void>;
   onImport: (path: string) => Promise<void>;
-  onSettingsSave: (settings: AppSettings) => Promise<void>;
+  onSettingsSave: (settings: BackupSettings) => Promise<void>;
   onRunNow: () => Promise<void>;
   onRestoreRecord: (recordId: string) => Promise<void>;
   onDeleteRecord: (recordId: string, deleteFile: boolean) => Promise<void>;
@@ -92,12 +92,32 @@ export function BackupModal({
     : isWebdavBackupConfigured(watchedCloud.webdav);
   const activeTargetConfigured = isCloudTarget ? activeCloudConfigured : Boolean(watchedLocalDirectory?.trim());
   const mountedRef = useMountedRef();
-  const [savingSettings, setSavingSettings] = useState(false);
   const [recordQuery, setRecordQuery] = useState("");
   const [recordStatusFilter, setRecordStatusFilter] = useState<BackupRecordStatusFilter>("all");
+  const initializedForOpenRef = useRef(false);
+  const openCycleRef = useRef(0);
+  const openRef = useRef(open);
+  if (openRef.current !== open) {
+    openRef.current = open;
+    openCycleRef.current += 1;
+  }
+
+  function currentOpenCycle() {
+    return open ? openCycleRef.current : -1;
+  }
+
+  function isCurrentOpenCycle(cycle: number) {
+    return mountedRef.current && openRef.current && openCycleRef.current === cycle;
+  }
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      initializedForOpenRef.current = false;
+      return;
+    }
+    // 备份记录或其他配置变化也会产生新快照，不能覆盖用户尚未保存的表单。
+    if (initializedForOpenRef.current) return;
+    initializedForOpenRef.current = true;
     form.setFieldsValue({
       ...normalizedSettings,
       targetKind: defaultTarget,
@@ -113,6 +133,7 @@ export function BackupModal({
   }, [backupTarget, open]);
 
   async function chooseExportPath() {
+    const openCycle = currentOpenCycle();
     try {
       const { save } = await import("@tauri-apps/plugin-dialog");
       const path = await save({
@@ -120,15 +141,16 @@ export function BackupModal({
         defaultPath: `HelM-backup-${formatBeijingCompactTimestamp()}-BJT.zip`,
         filters: [{ name: "HelM 备份包", extensions: ["zip"] }],
       });
-      if (!path) return;
+      if (!isCurrentOpenCycle(openCycle) || !path) return;
       await onExport(path);
-      if (mountedRef.current) message.success("备份已导出");
+      if (isCurrentOpenCycle(openCycle)) message.success("备份已导出");
     } catch (error) {
-      if (mountedRef.current) message.error(getErrorMessage(error));
+      if (isCurrentOpenCycle(openCycle)) message.error(getErrorMessage(error));
     }
   }
 
   async function chooseImportPath() {
+    const openCycle = currentOpenCycle();
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const path = await open({
@@ -136,7 +158,7 @@ export function BackupModal({
         multiple: false,
         filters: [{ name: "HelM 备份", extensions: ["zip", "rpvault"] }],
       });
-      if (typeof path !== "string" || !path) return;
+      if (!isCurrentOpenCycle(openCycle) || typeof path !== "string" || !path) return;
       modal.confirm({
         title: "恢复备份",
         content: "恢复会断开当前所有连接，并用备份覆盖本机数据。",
@@ -144,24 +166,26 @@ export function BackupModal({
         cancelText: "取消",
         okButtonProps: { danger: true },
         onOk: async () => {
+          if (!isCurrentOpenCycle(openCycle)) return;
           await onImport(path);
-          if (mountedRef.current) message.success("备份已恢复");
+          if (isCurrentOpenCycle(openCycle)) message.success("备份已恢复");
         },
       });
     } catch (error) {
-      if (mountedRef.current) message.error(getErrorMessage(error));
+      if (isCurrentOpenCycle(openCycle)) message.error(getErrorMessage(error));
     }
   }
 
   async function chooseLocalDirectory() {
+    const openCycle = currentOpenCycle();
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const path = await open({ title: "选择本地备份目录", directory: true, multiple: false });
-      if (typeof path === "string" && path) {
-        if (mountedRef.current) form.setFieldValue("localDirectory", path);
+      if (isCurrentOpenCycle(openCycle) && typeof path === "string" && path) {
+        form.setFieldValue("localDirectory", path);
       }
     } catch (error) {
-      if (mountedRef.current) message.error(getErrorMessage(error));
+      if (isCurrentOpenCycle(openCycle)) message.error(getErrorMessage(error));
     }
   }
 
@@ -185,7 +209,7 @@ export function BackupModal({
   }
 
   async function saveBackupSettings() {
-    setSavingSettings(true);
+    const openCycle = currentOpenCycle();
     try {
       const backupValues = normalizeBackupSettingsForForm(await form.validateFields());
       const localDirectory = backupValues.localDirectory?.trim() || null;
@@ -193,36 +217,33 @@ export function BackupModal({
       ensureCloudBackupReady(cloud, isCloudTarget);
       form.setFieldValue(["cloud", "kind"], cloud.kind);
       await onSettingsSave({
-        ...settings,
-        backup: {
-          ...backupValues,
-          localDirectory,
-          retentionCount: backupValues.retentionCount || 10,
-          retentionDays: backupValues.retentionDays || 30,
-          cloud: {
-            ...cloud,
-            enabled: isCloudBackupConfigured(cloud),
-          },
+        ...backupValues,
+        localDirectory,
+        retentionCount: backupValues.retentionCount || 10,
+        retentionDays: backupValues.retentionDays || 30,
+        cloud: {
+          ...cloud,
+          enabled: isCloudBackupConfigured(cloud),
         },
       });
-      if (mountedRef.current) message.success("备份设置已保存");
+      if (isCurrentOpenCycle(openCycle)) message.success("备份设置已保存");
     } catch (error) {
-      if (mountedRef.current) message.error(getErrorMessage(error));
-    } finally {
-      if (mountedRef.current) setSavingSettings(false);
+      if (isCurrentOpenCycle(openCycle)) message.error(getErrorMessage(error));
     }
   }
 
   async function runBackupNow() {
+    const openCycle = currentOpenCycle();
     try {
       await onRunNow();
-      if (mountedRef.current) message.success("备份已完成");
+      if (isCurrentOpenCycle(openCycle)) message.success("备份已完成");
     } catch (error) {
-      if (mountedRef.current) message.error(getErrorMessage(error));
+      if (isCurrentOpenCycle(openCycle)) message.error(getErrorMessage(error));
     }
   }
 
   function restoreRecord(record: BackupRecord) {
+    const openCycle = currentOpenCycle();
     modal.confirm({
       title: "恢复此备份",
       content: `将恢复 ${record.fileName}，并断开当前所有连接。`,
@@ -230,8 +251,9 @@ export function BackupModal({
       cancelText: "取消",
       okButtonProps: { danger: true },
       onOk: async () => {
+        if (!isCurrentOpenCycle(openCycle)) return;
         await onRestoreRecord(record.id);
-        if (mountedRef.current) message.success("备份已恢复");
+        if (isCurrentOpenCycle(openCycle)) message.success("备份已恢复");
       },
     });
   }
@@ -328,16 +350,22 @@ export function BackupModal({
                   size="small"
                   className="backupRecordActionButton"
                   icon={<ImportOutlined />}
-                  disabled={record.status !== "success"}
+                  disabled={busy || record.status !== "success"}
                   onClick={() => restoreRecord(record)}
                 />
               </Tooltip>
               <Popconfirm
+                disabled={busy}
                 title="删除备份记录"
                 description={record.targetKind === "local" ? "同时删除本地备份文件。" : "仅删除记录，不会删除云端文件。"}
                 okText="删除"
                 cancelText="取消"
-                onConfirm={() => void onDeleteRecord(record.id, record.targetKind === "local")}
+                onConfirm={async () => {
+                  const openCycle = currentOpenCycle();
+                  if (!isCurrentOpenCycle(openCycle)) return;
+                  await onDeleteRecord(record.id, record.targetKind === "local");
+                  if (isCurrentOpenCycle(openCycle)) message.success("备份记录已删除");
+                }}
               >
                 <Tooltip title="删除备份记录" mouseEnterDelay={0.15}>
                   <Button
@@ -345,6 +373,7 @@ export function BackupModal({
                     size="small"
                     className="backupRecordActionButton is-danger"
                     icon={<DeleteOutlined />}
+                    disabled={busy}
                   />
                 </Tooltip>
               </Popconfirm>
@@ -375,7 +404,12 @@ export function BackupModal({
       }
       className="backupModal"
       footer={null}
-      onCancel={onClose}
+      onCancel={() => {
+        if (!busy) onClose();
+      }}
+      closable={!busy}
+      keyboard={!busy}
+      maskClosable={!busy}
       destroyOnHidden
       centered
       transitionName="helm-modal-motion"
@@ -387,6 +421,7 @@ export function BackupModal({
         layout="vertical"
         requiredMark={false}
         className="backupForm"
+        disabled={busy}
         initialValues={{ ...normalizedSettings, targetKind: defaultTarget }}
       >
         <div className="backupLayout">
@@ -432,6 +467,7 @@ export function BackupModal({
                 className="backupQuickAction is-primary"
                 icon={<PlayCircleOutlined />}
                 loading={busy}
+                disabled={busy}
                 onClick={() => void runBackupNow()}
               >
                 立即创建备份
@@ -441,6 +477,7 @@ export function BackupModal({
                 className="backupQuickAction"
                 icon={<ExportOutlined />}
                 loading={busy}
+                disabled={busy}
                 onClick={() => void chooseExportPath()}
               >
                 导出备份包
@@ -451,6 +488,7 @@ export function BackupModal({
                 className="backupQuickAction is-danger"
                 icon={<ImportOutlined />}
                 loading={busy}
+                disabled={busy}
                 onClick={() => void chooseImportPath()}
               >
                 从文件恢复
@@ -491,7 +529,7 @@ export function BackupModal({
                   type="primary"
                   size="small"
                   className="backupSaveButton"
-                  loading={savingSettings}
+                  loading={busy}
                   disabled={busy}
                   onClick={() => void saveBackupSettings()}
                 >

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatUptimeSeconds } from "../src/lib/duration.ts";
+import { formatUptimeSeconds } from "../src/lib/duration";
 
 test("formats server uptime as cumulative hours, minutes, and seconds", () => {
   assert.equal(formatUptimeSeconds(7), "0 小时 00 分钟 07 秒");

@@ -34,10 +34,11 @@ const EVENT_NAMES = {
 } as const;
 
 export const remoteApi = {
+  listConnections: () => call<ConnectionInfo[]>("connection_list", undefined, { retries: 1 }),
   connect: (sessionId: string) => call<ConnectionInfo>("ssh_connect", { sessionId }),
   disconnect: (connectionId: string) => call<void>("ssh_disconnect", { connectionId }),
-  trustHostKey: (sessionId: string, algorithm: string, fingerprint: string) =>
-    call<ConfigSnapshot>("ssh_trust_host_key", { sessionId, algorithm, fingerprint }),
+  trustHostKey: (sessionId: string, host: string, port: number, algorithm: string, fingerprint: string) =>
+    call<ConfigSnapshot>("ssh_trust_host_key", { sessionId, host, port, algorithm, fingerprint }),
   openTerminal: (connectionId: string, cols = 100, rows = 30) =>
     call<TerminalInfo>("terminal_open", { connectionId, cols, rows }),
   startTerminal: (terminalId: string) => call<void>("terminal_start", { terminalId }),
@@ -54,7 +55,6 @@ export const remoteApi = {
       timeoutMs,
     }),
   openSftp: (connectionId: string) => call<SftpInfo>("sftp_open", { connectionId }),
-  closeSftp: (sftpId: string) => call<void>("sftp_close", { sftpId }),
   listFiles: (sftpId: string, path: string) =>
     call<RemoteFileEntry[]>("sftp_list", { sftpId, path }, { retries: 1 }),
   searchFile: (sftpId: string, basePath: string, query: string) =>
@@ -116,21 +116,24 @@ export const remoteApi = {
     bindPort: number,
     remoteHost: string,
     remotePort: number,
+    tunnelId?: string | null,
   ) =>
-    call<ForwardInfo>("forward_start_local", { sessionId, bindHost, bindPort, remoteHost, remotePort }),
+    call<ForwardInfo>("forward_start_local", { sessionId, bindHost, bindPort, remoteHost, remotePort, tunnelId }),
   startRemoteForward: (
     sessionId: string,
     remoteBindHost: string,
     remoteBindPort: number,
     localHost: string,
     localPort: number,
+    tunnelId?: string | null,
   ) =>
-    call<ForwardInfo>("forward_start_remote", { sessionId, remoteBindHost, remoteBindPort, localHost, localPort }),
-  startDynamicForward: (sessionId: string, bindHost: string, bindPort: number) =>
+    call<ForwardInfo>("forward_start_remote", { sessionId, remoteBindHost, remoteBindPort, localHost, localPort, tunnelId }),
+  startDynamicForward: (sessionId: string, bindHost: string, bindPort: number, tunnelId?: string | null) =>
     call<ForwardInfo>("forward_start_dynamic", {
       sessionId,
       bindHost,
       bindPort,
+      tunnelId,
     }),
   stopForward: (forwardId: string) => call<void>("forward_stop", { forwardId }),
   listForwards: () => call<ForwardInfo[]>("forward_list", undefined, { retries: 1 }),

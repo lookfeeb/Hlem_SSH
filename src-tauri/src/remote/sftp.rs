@@ -173,7 +173,16 @@ pub(super) fn system_time_rfc3339(time: SystemTime) -> String {
 }
 
 pub(super) fn normalize_remote_path(path: &str) -> String {
-    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
     if parts.is_empty() {
         "/".to_string()
     } else {

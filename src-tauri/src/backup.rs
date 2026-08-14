@@ -31,22 +31,41 @@ const BACKUP_MANIFEST_NAME: &str = "manifest.json";
 const CLOUD_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 const CLOUD_TRANSFER_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub fn backup_file_name() -> String {
-    let beijing = beijing_now();
-    format!("HelM-backup-{}-BJT.zip", beijing.format("%Y%m%d-%H%M%S"))
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackupCleanupTarget {
+    Local(PathBuf),
+    Webdav {
+        config: WebdavBackupConfig,
+        target: String,
+    },
+    S3 {
+        config: S3BackupConfig,
+        key: String,
+    },
 }
 
-pub async fn remove_backup_file_best_effort(path: impl AsRef<Path>, context: &str) {
-    let path = path.as_ref();
-    match tokio::fs::remove_file(path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => {
-            eprintln!(
-                "[helm] failed to remove backup file after {context}: {}: {error}",
-                path.display()
-            );
-        }
+pub fn backup_file_name() -> String {
+    let beijing = beijing_now();
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    format!(
+        "HelM-backup-{}-{}-BJT.zip",
+        beijing.format("%Y%m%d-%H%M%S-%6f"),
+        &unique[..8]
+    )
+}
+
+pub async fn remove_backup_target_best_effort(target: BackupCleanupTarget, context: &str) {
+    let result = match &target {
+        BackupCleanupTarget::Local(path) => match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(AppError::Io(error.to_string())),
+        },
+        BackupCleanupTarget::Webdav { config, target } => delete_webdav(config, target).await,
+        BackupCleanupTarget::S3 { config, key } => delete_s3(config, key).await,
+    };
+    if let Err(error) = result {
+        log::warn!("failed to remove backup target after {context}: {target:?}: {error}");
     }
 }
 
@@ -66,6 +85,7 @@ pub struct BackupRunPlan {
     pub settings: BackupSettings,
     pub vault_path: PathBuf,
     pub file_name: String,
+    pub existing_records: Vec<BackupRecord>,
 }
 
 pub fn prepare_backup_run(store: &VaultStore) -> AppResult<BackupRunPlan> {
@@ -75,6 +95,7 @@ pub fn prepare_backup_run(store: &VaultStore) -> AppResult<BackupRunPlan> {
         settings: snapshot.data.settings.backup,
         vault_path: store.vault_file_path(),
         file_name: backup_file_name(),
+        existing_records: snapshot.data.backup_records,
     })
 }
 
@@ -130,22 +151,33 @@ async fn run_backup(
 }
 
 pub async fn merge_configured_backup_records(
-    settings: &BackupSettings,
+    plan: &BackupRunPlan,
     backup_outcomes: Vec<BackupRecord>,
 ) -> Vec<BackupRecord> {
-    match list_configured_backup_records(settings).await {
+    match list_configured_backup_records(&plan.settings).await {
         Ok(mut records) => {
-            for outcome in backup_outcomes {
-                let already_listed = records.iter().any(|r| {
-                    r.target_kind == outcome.target_kind && r.target_path == outcome.target_path
-                });
-                if outcome.status != "success" || !already_listed {
-                    records.push(outcome);
-                }
-            }
+            merge_backup_outcomes(&mut records, backup_outcomes);
             records
         }
-        Err(_) => backup_outcomes,
+        Err(error) => {
+            log::warn!("failed to refresh configured backup records: {error}");
+            let mut records = plan.existing_records.clone();
+            merge_backup_outcomes(&mut records, backup_outcomes);
+            records
+        }
+    }
+}
+
+fn merge_backup_outcomes(records: &mut Vec<BackupRecord>, backup_outcomes: Vec<BackupRecord>) {
+    for outcome in backup_outcomes {
+        let already_listed = records.iter().any(|record| {
+            record.target_kind == outcome.target_kind
+                && record.target_path == outcome.target_path
+                && record.status == outcome.status
+        });
+        if !already_listed {
+            records.push(outcome);
+        }
     }
 }
 
@@ -231,12 +263,7 @@ async fn write_local_backup(
     size: u64,
 ) -> BackupRecord {
     let target = directory.join(file_name);
-    let write_result = async {
-        tokio::fs::create_dir_all(directory).await?;
-        tokio::fs::write(&target, package).await?;
-        Ok::<(), std::io::Error>(())
-    }
-    .await;
+    let write_result = crate::atomic_file::write_atomic_async(&target, package).await;
     match write_result {
         Ok(()) => BackupRecord::success(
             file_name.to_string(),
@@ -346,6 +373,31 @@ pub async fn download_cloud_backup(
         _ => Err(AppError::InvalidInput(
             "该备份记录不是可下载的云端备份".to_string(),
         )),
+    }
+}
+
+pub fn backup_cleanup_target(
+    settings: &BackupSettings,
+    record: &BackupRecord,
+) -> Option<BackupCleanupTarget> {
+    if record.status != "success" || !is_backup_file(&record.file_name) {
+        return None;
+    }
+    match record.target_kind.as_str() {
+        "local" => local_backup_delete_path(settings, record).map(BackupCleanupTarget::Local),
+        "webdav" => webdav_backup_delete_target(&settings.cloud.webdav, record).map(|target| {
+            BackupCleanupTarget::Webdav {
+                config: settings.cloud.webdav.clone(),
+                target,
+            }
+        }),
+        "s3" => {
+            s3_backup_delete_key(&settings.cloud.s3, record).map(|key| BackupCleanupTarget::S3 {
+                config: settings.cloud.s3.clone(),
+                key,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -477,6 +529,28 @@ async fn download_webdav(config: &WebdavBackupConfig, target: &str) -> AppResult
         .await
         .map(|bytes| bytes.to_vec())
         .map_err(remote_error)
+}
+
+async fn delete_webdav(config: &WebdavBackupConfig, target: &str) -> AppResult<()> {
+    let client = http_client(CLOUD_TRANSFER_TIMEOUT)?;
+    let username = config.username.trim().to_string();
+    let password = config.password.clone();
+    let response = send_with_retry("WebDAV 删除", || {
+        let request = client.delete(target);
+        if username.is_empty() {
+            request
+        } else {
+            request.basic_auth(username.clone(), Some(password.clone()))
+        }
+    })
+    .await?;
+    if response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    Err(AppError::Remote(format!(
+        "WebDAV 删除失败: HTTP {}",
+        response.status()
+    )))
 }
 
 async fn list_webdav_backups(config: &WebdavBackupConfig) -> AppResult<Vec<BackupRecord>> {
@@ -677,6 +751,70 @@ async fn download_s3(config: &S3BackupConfig, target_path: &str) -> AppResult<Ve
         .await
         .map(|bytes| bytes.to_vec())
         .map_err(remote_error)
+}
+
+async fn delete_s3(config: &S3BackupConfig, key: &str) -> AppResult<()> {
+    let (url, canonical_uri, host) = s3_url(config, key)?;
+    let now = Utc::now();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let short_date = now.format("%Y%m%d").to_string();
+    let payload_hash = hex::encode(Sha256::digest([]));
+    let canonical_headers = format!(
+        "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+        host, payload_hash, amz_date
+    );
+    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+    let canonical_request = format!(
+        "DELETE\n{}\n\n{}{}\n{}",
+        canonical_uri, canonical_headers, signed_headers, payload_hash
+    );
+    let credential_scope = format!("{}/{}/s3/aws4_request", short_date, config.region.trim());
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+        amz_date,
+        credential_scope,
+        hex::encode(Sha256::digest(canonical_request.as_bytes()))
+    );
+    let signing_key = s3_signing_key(&config.secret_access_key, &short_date, config.region.trim())?;
+    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+        config.access_key_id.trim(),
+        credential_scope,
+        signed_headers,
+        signature
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HOST,
+        HeaderValue::from_str(&host).map_err(|error| AppError::Remote(error.to_string()))?,
+    );
+    headers.insert(
+        "x-amz-content-sha256",
+        HeaderValue::from_str(&payload_hash)
+            .map_err(|error| AppError::Remote(error.to_string()))?,
+    );
+    headers.insert(
+        "x-amz-date",
+        HeaderValue::from_str(&amz_date).map_err(|error| AppError::Remote(error.to_string()))?,
+    );
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&authorization)
+            .map_err(|error| AppError::Remote(error.to_string()))?,
+    );
+    let client = http_client(CLOUD_TRANSFER_TIMEOUT)?;
+    let response = send_with_retry("S3 删除", || {
+        client.delete(url.as_str()).headers(headers.clone())
+    })
+    .await?;
+    if response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    Err(AppError::Remote(format!(
+        "S3 删除失败: HTTP {}",
+        response.status()
+    )))
 }
 
 async fn list_s3_backups(config: &S3BackupConfig) -> AppResult<Vec<BackupRecord>> {
@@ -929,9 +1067,110 @@ fn remote_error(error: reqwest::Error) -> AppError {
     AppError::Remote(error.to_string())
 }
 
-fn is_backup_file(file_name: &str) -> bool {
+pub(crate) fn is_backup_file(file_name: &str) -> bool {
     let lower = file_name.to_ascii_lowercase();
     lower.starts_with("helm-backup-") && (lower.ends_with(".zip") || lower.ends_with(".rpvault"))
+}
+
+pub(crate) fn local_backup_delete_path(
+    settings: &BackupSettings,
+    record: &BackupRecord,
+) -> Option<PathBuf> {
+    if record.target_kind != "local" || record.status != "success" {
+        return None;
+    }
+    let configured_directory = configured_local_backup_directory(settings)?;
+    let target = PathBuf::from(record.target_path.trim());
+    let target_name = target.file_name()?.to_string_lossy();
+    if !is_backup_file(&target_name) || !file_names_equal(&target_name, &record.file_name) {
+        return None;
+    }
+    let configured_directory = normalize_absolute_path(&configured_directory)?;
+    let target = normalize_absolute_path(&target)?;
+    if !paths_equal(target.parent()?, &configured_directory) {
+        return None;
+    }
+    Some(target)
+}
+
+fn webdav_backup_delete_target(
+    config: &WebdavBackupConfig,
+    record: &BackupRecord,
+) -> Option<String> {
+    let expected = Url::parse(
+        &join_remote_url(&config.endpoint, &config.remote_path, &record.file_name).ok()?,
+    )
+    .ok()?;
+    let target = Url::parse(record.target_path.trim()).ok()?;
+    if urls_equal(&target, &expected) {
+        Some(target.to_string())
+    } else {
+        None
+    }
+}
+
+fn s3_backup_delete_key(config: &S3BackupConfig, record: &BackupRecord) -> Option<String> {
+    let key = s3_key_from_target(config, record.target_path.trim()).ok()?;
+    let expected = join_object_key(&config.prefix, &record.file_name);
+    if key == expected {
+        Some(key)
+    } else {
+        None
+    }
+}
+
+fn urls_equal(left: &Url, right: &Url) -> bool {
+    left.scheme().eq_ignore_ascii_case(right.scheme())
+        && left.host_str().map(str::to_ascii_lowercase)
+            == right.host_str().map(str::to_ascii_lowercase)
+        && left.port_or_known_default() == right.port_or_known_default()
+        && left.username() == right.username()
+        && left.password() == right.password()
+        && left.path() == right.path()
+        && left.query() == right.query()
+        && left.fragment() == right.fragment()
+}
+
+fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+
+    let source = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in source.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    Some(normalized)
+}
+
+fn file_names_equal(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    if cfg!(windows) {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    } else {
+        left == right
+    }
 }
 
 fn s3_key_from_target(config: &S3BackupConfig, target_path: &str) -> AppResult<String> {
@@ -1059,6 +1298,108 @@ mod tests {
     }
 
     #[test]
+    fn generated_backup_names_are_unique_and_match_the_scanner() {
+        let names = (0..128)
+            .map(|_| backup_file_name())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(names.len(), 128);
+        assert!(names.iter().all(|name| is_backup_file(name)));
+        assert!(names.iter().all(|name| name.ends_with("-BJT.zip")));
+    }
+
+    #[test]
+    fn local_backup_deletion_stays_inside_the_configured_directory() {
+        let dir = tempdir().unwrap();
+        let backup_dir = dir.path().join("backups");
+        let file_name = "HelM-backup-20260508-153012-BJT.zip";
+        let settings = BackupSettings {
+            local_directory: Some(backup_dir.to_string_lossy().to_string()),
+            ..BackupSettings::default()
+        };
+        let valid = BackupRecord::success(
+            file_name.to_string(),
+            "local",
+            backup_dir.join(file_name).to_string_lossy().to_string(),
+            1,
+        );
+        assert_eq!(
+            local_backup_delete_path(&settings, &valid),
+            normalize_absolute_path(&backup_dir.join(file_name))
+        );
+
+        let escaped = BackupRecord {
+            target_path: backup_dir
+                .join("..")
+                .join(file_name)
+                .to_string_lossy()
+                .to_string(),
+            ..valid.clone()
+        };
+        assert!(local_backup_delete_path(&settings, &escaped).is_none());
+
+        let unrelated = BackupRecord {
+            file_name: "notes.zip".to_string(),
+            target_path: backup_dir.join("notes.zip").to_string_lossy().to_string(),
+            ..valid
+        };
+        assert!(local_backup_delete_path(&settings, &unrelated).is_none());
+    }
+
+    #[test]
+    fn cloud_backup_deletion_requires_exact_configured_object() {
+        let settings = BackupSettings {
+            cloud: CloudBackupSettings {
+                kind: "webdav".to_string(),
+                webdav: WebdavBackupConfig {
+                    endpoint: "https://dav.example/root".to_string(),
+                    remote_path: "helm".to_string(),
+                    ..WebdavBackupConfig::default()
+                },
+                s3: S3BackupConfig {
+                    endpoint: "https://s3.example.com".to_string(),
+                    bucket: "helm".to_string(),
+                    prefix: "backups".to_string(),
+                    ..S3BackupConfig::default()
+                },
+                ..CloudBackupSettings::default()
+            },
+            ..BackupSettings::default()
+        };
+        let file_name = "HelM-backup-20260508-153012-BJT.zip";
+        let webdav = BackupRecord::success(
+            file_name.to_string(),
+            "webdav",
+            format!("https://dav.example/root/helm/{file_name}"),
+            1,
+        );
+        assert!(matches!(
+            backup_cleanup_target(&settings, &webdav),
+            Some(BackupCleanupTarget::Webdav { .. })
+        ));
+        let tampered_webdav = BackupRecord {
+            target_path: format!("https://dav.example/other/{file_name}"),
+            ..webdav
+        };
+        assert!(backup_cleanup_target(&settings, &tampered_webdav).is_none());
+
+        let s3 = BackupRecord::success(
+            file_name.to_string(),
+            "s3",
+            format!("s3://helm/backups/{file_name}"),
+            1,
+        );
+        assert!(matches!(
+            backup_cleanup_target(&settings, &s3),
+            Some(BackupCleanupTarget::S3 { .. })
+        ));
+        let tampered_s3 = BackupRecord {
+            target_path: format!("s3://helm/other/{file_name}"),
+            ..s3
+        };
+        assert!(backup_cleanup_target(&settings, &tampered_s3).is_none());
+    }
+
+    #[test]
     fn packages_backup_payload_as_zip() {
         let payload = br#"{"magic":"RPVAULT"}"#.to_vec();
         let package = build_backup_package_sync(&payload).unwrap();
@@ -1124,6 +1465,7 @@ mod tests {
             settings,
             vault_path,
             file_name: "HelM-backup-test-BJT.zip".to_string(),
+            existing_records: Vec::new(),
         };
 
         assert!(matches!(
@@ -1146,6 +1488,7 @@ mod tests {
             settings,
             vault_path,
             file_name: "HelM-backup-test-BJT.zip".to_string(),
+            existing_records: Vec::new(),
         };
 
         let records = run_configured_backup(&plan).await.unwrap();
@@ -1170,6 +1513,7 @@ mod tests {
             settings,
             vault_path,
             file_name: "HelM-backup-test-BJT.zip".to_string(),
+            existing_records: Vec::new(),
         };
         let targets = vec!["local".to_string()];
 
@@ -1216,7 +1560,13 @@ mod tests {
             "disk full".to_string(),
         );
 
-        let merged = merge_configured_backup_records(&settings, vec![duplicate, failed]).await;
+        let plan = BackupRunPlan {
+            settings,
+            vault_path: dir.path().join("vault.rpvault"),
+            file_name: "unused.zip".to_string(),
+            existing_records: Vec::new(),
+        };
+        let merged = merge_configured_backup_records(&plan, vec![duplicate, failed]).await;
         assert_eq!(
             merged
                 .iter()
@@ -1224,6 +1574,50 @@ mod tests {
                 .count(),
             1
         );
+        assert!(merged.iter().any(|record| record.status == "failed"));
+    }
+
+    #[tokio::test]
+    async fn backup_refresh_failure_preserves_existing_restore_points() {
+        let dir = tempdir().unwrap();
+        let not_a_directory = dir.path().join("not-a-directory");
+        tokio::fs::write(&not_a_directory, b"fixture")
+            .await
+            .unwrap();
+        let existing = BackupRecord::success(
+            "HelM-backup-existing.zip".to_string(),
+            "local",
+            dir.path()
+                .join("HelM-backup-existing.zip")
+                .to_string_lossy()
+                .to_string(),
+            1,
+        );
+        let failed = BackupRecord::failed(
+            "HelM-backup-failed.zip".to_string(),
+            "local",
+            dir.path()
+                .join("HelM-backup-failed.zip")
+                .to_string_lossy()
+                .to_string(),
+            "disk full".to_string(),
+        );
+        let plan = BackupRunPlan {
+            settings: BackupSettings {
+                // read_dir on a missing path is intentionally treated as an
+                // empty backup directory. A regular file reliably exercises
+                // the actual refresh-error fallback instead.
+                local_directory: Some(not_a_directory.to_string_lossy().to_string()),
+                ..BackupSettings::default()
+            },
+            vault_path: dir.path().join("vault.rpvault"),
+            file_name: "unused.zip".to_string(),
+            existing_records: vec![existing.clone()],
+        };
+
+        let merged = merge_configured_backup_records(&plan, vec![failed]).await;
+
+        assert!(merged.iter().any(|record| record.id == existing.id));
         assert!(merged.iter().any(|record| record.status == "failed"));
     }
 }

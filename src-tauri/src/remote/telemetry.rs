@@ -10,20 +10,28 @@ pub(super) fn emit_telemetry_snapshot(
         events::TELEMETRY_SNAPSHOT,
         TelemetrySnapshotPayload {
             job_id: info.job_id.clone(),
+            connection_id: info.connection_id.clone(),
             session_id: info.session_id.clone(),
             snapshot,
         },
     );
 }
 
-pub(super) fn emit_telemetry_error(app: &AppHandle, info: &TelemetryJobInfo, error: String) {
+pub(super) fn emit_telemetry_error(
+    app: &AppHandle,
+    info: &TelemetryJobInfo,
+    error: String,
+    terminal: bool,
+) {
     events::emit(
         app,
         events::TELEMETRY_SNAPSHOT,
         TelemetryErrorPayload {
             job_id: info.job_id.clone(),
+            connection_id: info.connection_id.clone(),
             session_id: info.session_id.clone(),
             error,
+            terminal,
         },
     );
 }

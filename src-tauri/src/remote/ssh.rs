@@ -51,19 +51,36 @@ pub(super) async fn authenticate(
     }
 }
 
-/// 单次 channel_open_session 的硬超时。若 SSH session 已经静默死亡，russh 自身要等
-/// `keepalive_interval × keepalive_max ≈ 45s` 才会把 handle 标记 closed；在那之前
-/// `channel_open_session().await` 会一直挂着。这里挂载在 `handle.lock()` 之内，
-/// 一旦超时就放锁、释放整条排队，避免一个挂死请求拖垮所有并发。
-const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+/// SSH 控制面操作的硬超时。若 SSH session 已经静默死亡，russh 自身要等
+/// `keepalive_interval × keepalive_max ≈ 45s` 才会把 handle 标记 closed；在那之前，
+/// 打开通道、申请/取消远程监听等请求都可能一直等待服务器确认。
+///
+/// 超时范围同时覆盖 handle 锁等待，避免某个慢请求让后续控制操作无限排队。
+const SSH_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// AutoClosingChannel::drop 里 close 任务的硬超时。若 SSH 已死，
-/// `channel.close().await` 可能长时间不返回；超时后结束后台清理任务。
+/// SSH channel 关闭的硬超时。若 SSH 已死，`channel.close().await`
+/// 可能长时间不返回；调用方等待到此上限后直接释放本地句柄。
 const CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub(super) async fn run_ssh_channel_control<T, F>(operation: &str, future: F) -> AppResult<T>
+where
+    F: std::future::Future<Output = Result<T, russh::Error>>,
+{
+    match timeout(SSH_CONTROL_TIMEOUT, future).await {
+        Ok(result) => result.map_err(remote_error),
+        Err(_) => Err(AppError::Remote(format!(
+            "{operation}超时（连接可能已断开）"
+        ))),
+    }
+}
+
 pub(super) async fn open_session_channel(handle: &SshHandle) -> AppResult<Channel<client::Msg>> {
-    let handle = handle.lock().await;
-    match timeout(CHANNEL_OPEN_TIMEOUT, handle.channel_open_session()).await {
+    match timeout(SSH_CONTROL_TIMEOUT, async {
+        let handle = handle.lock().await;
+        handle.channel_open_session().await
+    })
+    .await
+    {
         Ok(Ok(channel)) => Ok(channel),
         Ok(Err(error)) => Err(AppError::Remote(format!(
             "打开 SSH 通道失败：{}（可能是同一 SSH 连接的 channel 已满）",
@@ -72,6 +89,74 @@ pub(super) async fn open_session_channel(handle: &SshHandle) -> AppResult<Channe
         Err(_) => Err(AppError::Remote(
             "打开 SSH 通道超时（连接可能已断开或 channel 已满）".to_string(),
         )),
+    }
+}
+
+pub(super) async fn open_direct_tcpip_channel(
+    handle: &SshHandle,
+    remote_host: &str,
+    remote_port: u16,
+) -> AppResult<Channel<client::Msg>> {
+    let target = format!("{remote_host}:{remote_port}");
+    match timeout(SSH_CONTROL_TIMEOUT, async {
+        let handle = handle.lock().await;
+        handle
+            .channel_open_direct_tcpip(remote_host.to_string(), remote_port as u32, "127.0.0.1", 0)
+            .await
+    })
+    .await
+    {
+        Ok(Ok(channel)) => Ok(channel),
+        Ok(Err(error)) => Err(AppError::Remote(format!(
+            "打开 SSH 直连通道失败（{target}）：{error}"
+        ))),
+        Err(_) => Err(AppError::Remote(format!(
+            "打开 SSH 直连通道超时（{target}，连接可能已断开）"
+        ))),
+    }
+}
+
+pub(super) async fn request_remote_forward(
+    handle: &SshHandle,
+    bind_host: &str,
+    bind_port: u32,
+) -> AppResult<u32> {
+    match timeout(SSH_CONTROL_TIMEOUT, async {
+        let handle = handle.lock().await;
+        handle.tcpip_forward(bind_host.to_string(), bind_port).await
+    })
+    .await
+    {
+        Ok(Ok(port)) => Ok(port),
+        Ok(Err(error)) => Err(AppError::Remote(format!(
+            "申请远程端口转发失败（{bind_host}:{bind_port}）：{error}"
+        ))),
+        Err(_) => Err(AppError::Remote(format!(
+            "申请远程端口转发超时（{bind_host}:{bind_port}，连接可能已断开）"
+        ))),
+    }
+}
+
+pub(super) async fn cancel_remote_forward(
+    handle: &SshHandle,
+    bind_host: &str,
+    bind_port: u32,
+) -> AppResult<()> {
+    match timeout(SSH_CONTROL_TIMEOUT, async {
+        let handle = handle.lock().await;
+        handle
+            .cancel_tcpip_forward(bind_host.to_string(), bind_port)
+            .await
+    })
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(AppError::Remote(format!(
+            "取消远程端口转发失败（{bind_host}:{bind_port}）：{error}"
+        ))),
+        Err(_) => Err(AppError::Remote(format!(
+            "取消远程端口转发超时（{bind_host}:{bind_port}，连接可能已断开）"
+        ))),
     }
 }
 
@@ -91,9 +176,9 @@ pub(super) async fn exec_with_channel(
 ) -> AppResult<ExecResult> {
     let started = Instant::now();
     let timeout_duration = Duration::from_millis(timeout_ms.max(1));
-    let future = async {
-        let mut channel = AutoClosingChannel::new(channel);
-        channel.exec(command).await.map_err(remote_error)?;
+    let mut channel = channel;
+    let result = timeout(timeout_duration, async {
+        run_ssh_channel_control("启动远程命令", channel.exec(true, command)).await?;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -107,9 +192,13 @@ pub(super) async fn exec_with_channel(
             }
         }
         Ok::<_, AppError>((stdout, stderr, exit_status))
-    };
+    })
+    .await;
+    if let Err(error) = close_ssh_channel(&channel).await {
+        log::debug!("failed to close SSH command channel: {error}");
+    }
 
-    match timeout(timeout_duration, future).await {
+    match result {
         Ok(Ok((stdout, stderr, exit_status))) => Ok(ExecResult {
             stdout: String::from_utf8_lossy(&stdout).to_string(),
             stderr: String::from_utf8_lossy(&stderr).to_string(),
@@ -128,36 +217,9 @@ pub(super) async fn exec_with_channel(
     }
 }
 
-struct AutoClosingChannel(Option<Channel<client::Msg>>);
-
-impl AutoClosingChannel {
-    fn new(channel: Channel<client::Msg>) -> Self {
-        Self(Some(channel))
-    }
-
-    async fn exec(&self, command: String) -> Result<(), russh::Error> {
-        if let Some(channel) = self.0.as_ref() {
-            channel.exec(true, command).await
-        } else {
-            Ok(())
-        }
-    }
-
-    async fn wait(&mut self) -> Option<ChannelMsg> {
-        self.0.as_mut()?.wait().await
-    }
-}
-
-impl Drop for AutoClosingChannel {
-    fn drop(&mut self) {
-        if let Some(channel) = self.0.take() {
-            tokio::spawn(async move {
-                match timeout(CHANNEL_CLOSE_TIMEOUT, channel.close()).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => log::debug!("failed to close SSH channel: {error}"),
-                    Err(_) => log::debug!("timed out while closing SSH channel"),
-                }
-            });
-        }
+pub(super) async fn close_ssh_channel(channel: &Channel<client::Msg>) -> AppResult<()> {
+    match timeout(CHANNEL_CLOSE_TIMEOUT, channel.close()).await {
+        Ok(result) => result.map_err(remote_error),
+        Err(_) => Err(AppError::Remote("关闭 SSH 通道超时".to_string())),
     }
 }

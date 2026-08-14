@@ -1,3 +1,4 @@
+use super::runtime_connection::connection_record_is_closed;
 use super::*;
 use crate::api_server::FileEntry;
 use bytes::Bytes;
@@ -7,13 +8,40 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::io::AsyncRead;
-use tokio::sync::mpsc;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
+use tokio::sync::{mpsc, OwnedSemaphorePermit};
+use tokio_util::io::ReaderStream;
+
+pub struct SftpDownloadStream {
+    inner: Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>>,
+    _permit: OwnedSemaphorePermit,
+    closed: Arc<AtomicBool>,
+    stopped: bool,
+}
+
+impl Stream for SftpDownloadStream {
+    type Item = io::Result<Bytes>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.stopped {
+            return Poll::Ready(None);
+        }
+        if self.closed.load(Ordering::Acquire) {
+            self.stopped = true;
+            return Poll::Ready(Some(Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "SFTP 已关闭，下载已取消",
+            ))));
+        }
+        self.inner.as_mut().poll_next(cx)
+    }
+}
 
 /// 顺序拼接多个 worker 的 SFTP 字节流，用于 HTTP 并行下载响应。
 /// 每个 worker 独立读取一个远端范围，主流按范围顺序输出并保留反压。
 pub struct OrderedChunkStream {
     receivers: VecDeque<mpsc::Receiver<io::Result<Bytes>>>,
+    workers: Vec<JoinHandle<()>>,
 }
 
 impl Stream for OrderedChunkStream {
@@ -22,7 +50,10 @@ impl Stream for OrderedChunkStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             match self.receivers.front_mut() {
-                None => return Poll::Ready(None),
+                None => {
+                    abort_download_workers(&mut self.workers);
+                    return Poll::Ready(None);
+                }
                 Some(rx) => match rx.poll_recv(cx) {
                     Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
                     Poll::Ready(None) => {
@@ -36,9 +67,71 @@ impl Stream for OrderedChunkStream {
     }
 }
 
+impl Drop for OrderedChunkStream {
+    fn drop(&mut self) {
+        abort_download_workers(&mut self.workers);
+    }
+}
+
+fn abort_download_workers(workers: &mut Vec<JoinHandle<()>>) {
+    for worker in workers.drain(..) {
+        worker.abort();
+    }
+}
+
 /// 每个 worker 的 mpsc 通道深度（以 chunk 计，每 chunk 至多 buffer_size 字节）。
 /// 4 worker × 4 槽 × 1MB = 最多 16MB 飞行内存，给客户端慢消费的反压预留空间。
 const PER_WORKER_QUEUE_DEPTH: usize = 4;
+
+struct RemoteTempFileGuard {
+    sftp: Arc<SftpSession>,
+    path: Option<String>,
+    active_upload: Option<ActiveApiUploadGuard>,
+}
+
+impl RemoteTempFileGuard {
+    fn new(sftp: Arc<SftpSession>, path: String, active_upload: ActiveApiUploadGuard) -> Self {
+        Self {
+            sftp,
+            path: Some(path),
+            active_upload: Some(active_upload),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+        self.active_upload = None;
+    }
+
+    async fn cleanup(&mut self) {
+        let Some(path) = self.path.clone() else {
+            self.active_upload = None;
+            return;
+        };
+        let _ = self.sftp.remove_file(path).await;
+        self.path = None;
+        self.active_upload = None;
+    }
+}
+
+impl Drop for RemoteTempFileGuard {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        let sftp = self.sftp.clone();
+        let active_upload = self.active_upload.take();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                // Keep the SFTP close barrier active until the best-effort
+                // cleanup finishes. This matters when the HTTP request future
+                // is dropped by a disconnected client.
+                let _active_upload = active_upload;
+                let _ = sftp.remove_file(path).await;
+            });
+        }
+    }
+}
 
 async fn send_download_worker_error(
     tx: &mpsc::Sender<io::Result<Bytes>>,
@@ -80,24 +173,25 @@ impl RemoteRuntime {
                 .values()
                 .find(|record| {
                     record.info.session_id == session_id
+                        && record.origin == ConnectionOrigin::Automation
                         && record.info.status == RuntimeStatus::Connected
+                        && !connection_record_is_closed(record)
                 })
                 .map(|record| record.info.connection_id.clone())
         };
         let Some(connection_id) = connection_id else {
             return (false, false);
         };
-        let sftp_available = self
-            .sftp_sessions
-            .read()
-            .await
-            .values()
-            .any(|record| record.info.connection_id == connection_id);
+        let sftp_available = self.sftp_sessions.read().await.values().any(|record| {
+            record.info.connection_id == connection_id && !record.closed.load(Ordering::Acquire)
+        });
         (true, sftp_available)
     }
 
     pub async fn api_ensure_sftp(&self, session_id: &str) -> Result<(), String> {
-        let connection_id = self.find_connection_for_session(session_id).await?;
+        let connection_id = self
+            .find_connection_for_session(session_id, ConnectionOrigin::Automation)
+            .await?;
         self.open_sftp(&connection_id)
             .await
             .map(|_| ())
@@ -109,7 +203,9 @@ impl RemoteRuntime {
         session_id: &str,
         samples: Option<u8>,
     ) -> Result<LatencyProbeResult, String> {
-        let connection_id = self.find_connection_for_session(session_id).await?;
+        let connection_id = self
+            .find_connection_for_session(session_id, ConnectionOrigin::Automation)
+            .await?;
         self.probe_latency(&connection_id, samples)
             .await
             .map_err(|error| error.to_string())
@@ -122,7 +218,10 @@ impl RemoteRuntime {
         app: &AppHandle,
         session_id: &str,
     ) -> Result<(), String> {
-        let connection_id = match self.find_connection_by_session(session_id).await {
+        let connection_id = match self
+            .find_connection_by_session(session_id, ConnectionOrigin::Automation)
+            .await
+        {
             Some(record) => record.info.connection_id,
             None => return Err(format!("会话 {} 当前未连接", session_id)),
         };
@@ -138,7 +237,9 @@ impl RemoteRuntime {
         command: &str,
         timeout_ms: u64,
     ) -> Result<ExecResult, String> {
-        let connection_id = self.find_connection_for_session(session_id).await?;
+        let connection_id = self
+            .find_connection_for_session(session_id, ConnectionOrigin::Automation)
+            .await?;
         self.exec_on_connection(&connection_id, command.to_string(), Some(timeout_ms))
             .await
             .map_err(|e| e.to_string())
@@ -190,13 +291,19 @@ impl RemoteRuntime {
 
     // ─── Internal helpers ──────────────────────────────────────────────────────
 
-    async fn find_connection_for_session(&self, session_id: &str) -> Result<String, String> {
+    pub(super) async fn find_connection_for_session(
+        &self,
+        session_id: &str,
+        origin: ConnectionOrigin,
+    ) -> Result<String, String> {
         let connections = self.connections.read().await;
         connections
             .values()
             .find(|record| {
                 record.info.session_id == session_id
+                    && record.origin == origin
                     && record.info.status == RuntimeStatus::Connected
+                    && !connection_record_is_closed(record)
             })
             .map(|record| record.info.connection_id.clone())
             .ok_or_else(|| format!("会话 {} 未连接", session_id))
@@ -206,13 +313,69 @@ impl RemoteRuntime {
         &self,
         session_id: &str,
     ) -> Result<Arc<SftpSession>, String> {
-        let connection_id = self.find_connection_for_session(session_id).await?;
+        let connection_id = self
+            .find_connection_for_session(session_id, ConnectionOrigin::Automation)
+            .await?;
         let sftp_sessions = self.sftp_sessions.read().await;
         let record = sftp_sessions
             .values()
-            .find(|record| record.info.connection_id == connection_id)
+            .find(|record| {
+                record.info.connection_id == connection_id && !record.closed.load(Ordering::Acquire)
+            })
             .ok_or_else(|| format!("会话 {} 没有可用的 SFTP 连接", session_id))?;
         Ok(record.next_transfer_session().await)
+    }
+
+    pub async fn download_stream(
+        &self,
+        session_id: &str,
+        path: String,
+        start_offset: u64,
+        total_len: u64,
+        buffer_size: usize,
+    ) -> Result<SftpDownloadStream, String> {
+        let connection_id = self
+            .find_connection_for_session(session_id, ConnectionOrigin::Automation)
+            .await?;
+        let sftp_record = {
+            let sftp_sessions = self.sftp_sessions.read().await;
+            sftp_sessions
+                .values()
+                .find(|record| {
+                    record.info.connection_id == connection_id
+                        && !record.closed.load(Ordering::Acquire)
+                })
+                .cloned()
+                .ok_or_else(|| format!("会话 {} 没有可用的 SFTP 连接", session_id))?
+        };
+        let permit = sftp_record
+            .transfer_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| format!("获取传输配额失败: {error}"))?;
+        if sftp_record.closed.load(Ordering::Acquire) {
+            return Err(format!("会话 {} 的 SFTP 连接已关闭", session_id));
+        }
+        let sftp = sftp_record.next_transfer_session().await;
+        let mut file = sftp
+            .open(path)
+            .await
+            .map_err(|error| format!("打开远程文件失败: {error}"))?;
+        if start_offset > 0 {
+            file.seek(std::io::SeekFrom::Start(start_offset))
+                .await
+                .map_err(|error| format!("seek 远程文件失败: {error}"))?;
+        }
+        file.set_read_limit(total_len)
+            .map_err(|error| format!("设置读取范围失败: {error}"))?;
+        let stream = ReaderStream::with_capacity(file.take(total_len), buffer_size.max(1));
+        Ok(SftpDownloadStream {
+            inner: Box::pin(stream),
+            _permit: permit,
+            closed: sftp_record.closed.clone(),
+            stopped: false,
+        })
     }
 
     /// 流式上传：从任意 AsyncRead 直写到远端 SFTP 文件。
@@ -226,54 +389,105 @@ impl RemoteRuntime {
         session_id: &str,
         remote_path: &str,
         reader: &mut R,
-    ) -> Result<u64, String> {
+        max_bytes: u64,
+    ) -> AppResult<u64> {
         use std::sync::atomic::{AtomicBool, AtomicU64};
-        let connection_id = self.find_connection_for_session(session_id).await?;
+        let connection_id = self
+            .find_connection_for_session(session_id, ConnectionOrigin::Automation)
+            .await
+            .map_err(AppError::Remote)?;
         let sftp_record = {
             let sftp_sessions = self.sftp_sessions.read().await;
             sftp_sessions
                 .values()
-                .find(|record| record.info.connection_id == connection_id)
+                .find(|record| {
+                    record.info.connection_id == connection_id
+                        && !record.closed.load(Ordering::Acquire)
+                })
                 .cloned()
-                .ok_or_else(|| format!("会话 {} 没有可用的 SFTP 连接", session_id))?
+                .ok_or_else(|| {
+                    AppError::Remote(format!("会话 {} 没有可用的 SFTP 连接", session_id))
+                })?
         };
         let _permit = sftp_record
             .transfer_slots
             .clone()
             .acquire_owned()
             .await
-            .map_err(|e| format!("获取传输配额失败: {}", e))?;
+            .map_err(|e| AppError::Remote(format!("获取传输配额失败: {}", e)))?;
+        // Register only after acquiring the quota. If close began while this
+        // request was queued, registration fails instead of letting an upload
+        // start after close_sftp has already finished waiting for active work.
+        let active_upload = sftp_record.register_api_upload()?;
         let sftp = sftp_record.next_transfer_session().await;
         let normalized = normalize_remote_path(remote_path);
-        let mut remote = sftp
-            .open_with_flags(
-                normalized,
-                OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
-            )
-            .await
-            .map_err(|e| format!("打开远程文件失败: {}", e))?;
+        ensure_not_root_path(&normalized, "上传目标不能是根目录")?;
+        let parent = normalized
+            .rsplit_once('/')
+            .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+            .unwrap_or("/");
+        let temp_path = join_remote_path(parent, &format!(".helm-upload-{}.part", Uuid::new_v4()));
+        let mut temp_guard =
+            RemoteTempFileGuard::new(sftp.clone(), temp_path.clone(), active_upload);
 
         // dummy 信号：API 路径没有 pause/cancel 概念（HTTP 请求生命周期已经覆盖了）
         let dummy_cancel = AtomicBool::new(false);
         let dummy_paused = AtomicBool::new(false);
         let bytes_done = AtomicU64::new(0);
-
-        super::transfer::copy_async(
-            reader,
-            &mut remote,
-            4 * 1024 * 1024,
-            &dummy_cancel,
-            &dummy_paused,
-            &bytes_done,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-        remote
-            .shutdown()
-            .await
-            .map_err(|e| format!("关闭远程文件失败: {}", e))?;
-
-        Ok(bytes_done.load(std::sync::atomic::Ordering::Relaxed))
+        let result = async {
+            let mut remote = sftp
+                .open_with_flags(
+                    temp_path.clone(),
+                    OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE,
+                )
+                .await
+                .map_err(remote_error)?;
+            let wait_for_close = async {
+                loop {
+                    let notified = sftp_record.api_upload_notify.notified();
+                    if sftp_record.closed.load(Ordering::Acquire) {
+                        break;
+                    }
+                    notified.await;
+                }
+            };
+            tokio::select! {
+                result = super::transfer::copy_async_limited(
+                    reader,
+                    &mut remote,
+                    4 * 1024 * 1024,
+                    &dummy_cancel,
+                    &dummy_paused,
+                    &bytes_done,
+                    max_bytes,
+                ) => result?,
+                _ = wait_for_close => {
+                    return Err(AppError::Remote("SFTP 已关闭，上传已取消".to_string()));
+                }
+            }
+            remote.shutdown().await.map_err(remote_error)?;
+            let written = bytes_done.load(std::sync::atomic::Ordering::Relaxed);
+            let remote_size = sftp
+                .metadata(temp_path.clone())
+                .await
+                .map_err(remote_error)?
+                .len();
+            if remote_size != written {
+                return Err(AppError::Remote(format!(
+                    "上传校验失败：远端大小 {} 字节，接收大小 {} 字节",
+                    remote_size, written
+                )));
+            }
+            self.replace_remote_file(&sftp_record.info.sftp_id, &temp_path, &normalized)
+                .await?;
+            temp_guard.disarm();
+            Ok(written)
+        }
+        .await;
+        if result.is_err() {
+            temp_guard.cleanup().await;
+        }
+        result
     }
 
     /// 多 File handle 并行流式下载。与 UI 拖拽下载共用阈值和缓冲策略，
@@ -296,15 +510,21 @@ impl RemoteRuntime {
             // 空 range（理论上调用方应避免走这里），返回空流即可
             return Ok(OrderedChunkStream {
                 receivers: VecDeque::new(),
+                workers: Vec::new(),
             });
         }
 
-        let connection_id = self.find_connection_for_session(session_id).await?;
+        let connection_id = self
+            .find_connection_for_session(session_id, ConnectionOrigin::Automation)
+            .await?;
         let sftp_record = {
             let sftp_sessions = self.sftp_sessions.read().await;
             sftp_sessions
                 .values()
-                .find(|record| record.info.connection_id == connection_id)
+                .find(|record| {
+                    record.info.connection_id == connection_id
+                        && !record.closed.load(Ordering::Acquire)
+                })
                 .cloned()
                 .ok_or_else(|| format!("会话 {} 没有可用的 SFTP 连接", session_id))?
         };
@@ -319,12 +539,16 @@ impl RemoteRuntime {
             .acquire_owned()
             .await
             .map_err(|e| format!("获取传输配额失败: {}", e))?;
+        if sftp_record.closed.load(Ordering::Acquire) {
+            return Err(format!("会话 {} 的 SFTP 连接已关闭", session_id));
+        }
         let permit = Arc::new(permit);
 
         let parts = parts.max(2);
         let chunk_size = total_len / parts;
         let mut receivers: VecDeque<mpsc::Receiver<io::Result<Bytes>>> =
             VecDeque::with_capacity(parts as usize);
+        let mut workers = Vec::with_capacity(parts as usize);
 
         log::info!(
             "API 并行下载启动：{} 字节 / {} 路 (chunk≈{} 字节)",
@@ -345,8 +569,9 @@ impl RemoteRuntime {
             let task_sftp = sftp_record.next_transfer_session().await;
             let task_path = path.clone();
             let task_permit = permit.clone();
+            let task_closed = sftp_record.closed.clone();
 
-            tokio::spawn(async move {
+            let worker = tokio::spawn(async move {
                 // permit 跟随 task 生命周期；最后一个 task 退出时 Arc 计数归零自动 drop。
                 let _hold_permit = task_permit;
 
@@ -374,6 +599,10 @@ impl RemoteRuntime {
                 let mut remaining = chunk_len;
                 let mut buf = vec![0u8; buffer_size];
                 while remaining > 0 {
+                    if task_closed.load(Ordering::Acquire) {
+                        send_download_worker_error(&tx, "SFTP 已关闭，下载已取消").await;
+                        return;
+                    }
                     let to_read = std::cmp::min(remaining as usize, buf.len());
                     match file.read(&mut buf[..to_read]).await {
                         Ok(0) => {
@@ -414,189 +643,49 @@ impl RemoteRuntime {
             });
 
             receivers.push_back(rx);
+            workers.push(worker);
         }
 
-        Ok(OrderedChunkStream { receivers })
+        Ok(OrderedChunkStream { receivers, workers })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn closed_sftp_download_stream_reports_cancellation_once() {
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        let closed = Arc::new(AtomicBool::new(true));
+        let mut stream = SftpDownloadStream {
+            inner: Box::pin(futures_util::stream::pending()),
+            _permit: permit,
+            closed,
+            stopped: false,
+        };
+
+        let error = futures_util::StreamExt::next(&mut stream)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        assert!(futures_util::StreamExt::next(&mut stream).await.is_none());
     }
 
-    /// Start a tunnel (port forward) based on a TunnelConfig. Returns (bind_host, bind_port, forward_id).
-    pub async fn api_start_tunnel(
-        &self,
-        tunnel: &crate::config::TunnelConfig,
-    ) -> Result<(String, u16, String), String> {
-        let connection_id = self.find_connection_for_session(&tunnel.session_id).await?;
-        let connection = self
-            .connection(&connection_id)
-            .await
-            .map_err(|e| e.to_string())?;
+    #[tokio::test]
+    async fn dropping_ordered_stream_aborts_download_workers() {
+        let (_tx, rx) = mpsc::channel(1);
+        let worker = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = worker.abort_handle();
+        let stream = OrderedChunkStream {
+            receivers: VecDeque::from([rx]),
+            workers: vec![worker],
+        };
 
-        match tunnel.forward_type.as_str() {
-            "local" => {
-                let listener = TcpListener::bind((tunnel.bind_host.as_str(), tunnel.bind_port))
-                    .await
-                    .map_err(|e| format!("绑定端口失败: {}", e))?;
-                let actual_port = listener
-                    .local_addr()
-                    .map_err(|e| format!("获取端口失败: {}", e))?
-                    .port();
-                let forward_id = Uuid::new_v4().to_string();
-                let info = ForwardInfo {
-                    forward_id: forward_id.clone(),
-                    session_id: tunnel.session_id.clone(),
-                    forward_type: ForwardType::Local,
-                    bind_host: tunnel.bind_host.clone(),
-                    bind_port: actual_port,
-                    target_host: tunnel.target_host.clone(),
-                    target_port: tunnel.target_port,
-                    status: TaskStatus::Running,
-                    started_at: now(),
-                    error: None,
-                };
-                let handle = connection.handle.clone();
-                let remote_host = tunnel.target_host.clone();
-                let remote_port = tunnel.target_port;
-                let task = tokio::spawn(async move {
-                    while let Ok((stream, _)) = listener.accept().await {
-                        let handle = handle.clone();
-                        let host = remote_host.clone();
-                        tokio::spawn(async move {
-                            if let Err(error) =
-                                pipe_local_to_ssh(stream, handle, host.clone(), remote_port).await
-                            {
-                                eprintln!(
-                                    "[helm] API local tunnel connection failed: {host}:{remote_port}: {error}"
-                                );
-                            }
-                        });
-                    }
-                });
-                self.forwards.write().await.insert(
-                    forward_id.clone(),
-                    ForwardRecord {
-                        info,
-                        handle: Some(task),
-                    },
-                );
-                Ok((tunnel.bind_host.clone(), actual_port, forward_id))
-            }
-            "dynamic" => {
-                let listener = TcpListener::bind((tunnel.bind_host.as_str(), tunnel.bind_port))
-                    .await
-                    .map_err(|e| format!("绑定端口失败: {}", e))?;
-                let actual_port = listener
-                    .local_addr()
-                    .map_err(|e| format!("获取端口失败: {}", e))?
-                    .port();
-                let forward_id = Uuid::new_v4().to_string();
-                let info = ForwardInfo {
-                    forward_id: forward_id.clone(),
-                    session_id: tunnel.session_id.clone(),
-                    forward_type: ForwardType::Dynamic,
-                    bind_host: tunnel.bind_host.clone(),
-                    bind_port: actual_port,
-                    target_host: "SOCKS5".to_string(),
-                    target_port: 0,
-                    status: TaskStatus::Running,
-                    started_at: now(),
-                    error: None,
-                };
-                let handle = connection.handle.clone();
-                let task = tokio::spawn(async move {
-                    while let Ok((stream, _)) = listener.accept().await {
-                        let handle = handle.clone();
-                        tokio::spawn(async move {
-                            if let Err(error) = handle_socks5(stream, handle).await {
-                                eprintln!("[helm] API dynamic tunnel connection failed: {error}");
-                            }
-                        });
-                    }
-                });
-                self.forwards.write().await.insert(
-                    forward_id.clone(),
-                    ForwardRecord {
-                        info,
-                        handle: Some(task),
-                    },
-                );
-                Ok((tunnel.bind_host.clone(), actual_port, forward_id))
-            }
-            "remote" => {
-                let target = RemoteForwardTarget {
-                    local_host: tunnel.target_host.clone(),
-                    local_port: tunnel.target_port,
-                };
-                connection
-                    .remote_forwards
-                    .write()
-                    .await
-                    .insert(forward_key(&tunnel.bind_host, tunnel.bind_port), target);
-                let assigned_port = {
-                    let handle = connection.handle.lock().await;
-                    handle
-                        .tcpip_forward(tunnel.bind_host.clone(), tunnel.bind_port as u32)
-                        .await
-                        .map_err(|e| format!("远程转发失败: {}", e))? as u16
-                };
-                let forward_id = Uuid::new_v4().to_string();
-                let info = ForwardInfo {
-                    forward_id: forward_id.clone(),
-                    session_id: tunnel.session_id.clone(),
-                    forward_type: ForwardType::Remote,
-                    bind_host: tunnel.bind_host.clone(),
-                    bind_port: assigned_port,
-                    target_host: "local".to_string(),
-                    target_port: tunnel.target_port,
-                    status: TaskStatus::Running,
-                    started_at: now(),
-                    error: None,
-                };
-                self.forwards
-                    .write()
-                    .await
-                    .insert(forward_id.clone(), ForwardRecord { info, handle: None });
-                Ok((tunnel.bind_host.clone(), assigned_port, forward_id))
-            }
-            other => Err(format!("不支持的隧道类型: {}", other)),
-        }
-    }
+        drop(stream);
+        tokio::task::yield_now().await;
 
-    /// Stop a running tunnel by forward_id.
-    pub async fn api_stop_tunnel(&self, forward_id: &str) -> Result<(), String> {
-        let mut record = self
-            .forwards
-            .write()
-            .await
-            .remove(forward_id)
-            .ok_or_else(|| format!("转发 {} 不存在或已停止", forward_id))?;
-        if let Some(handle) = record.handle.take() {
-            handle.abort();
-        }
-        if matches!(record.info.forward_type, ForwardType::Remote) {
-            if let Some(connection) = self
-                .find_connection_by_session(&record.info.session_id)
-                .await
-            {
-                let handle = connection.handle.lock().await;
-                if let Err(error) = handle
-                    .cancel_tcpip_forward(
-                        record.info.bind_host.clone(),
-                        record.info.bind_port as u32,
-                    )
-                    .await
-                {
-                    eprintln!(
-                        "[helm] failed to cancel API remote tunnel: {}:{}: {error}",
-                        record.info.bind_host, record.info.bind_port
-                    );
-                }
-                connection
-                    .remote_forwards
-                    .write()
-                    .await
-                    .remove(&forward_key(&record.info.bind_host, record.info.bind_port));
-            }
-        }
-        record.info.status = TaskStatus::Canceled;
-        Ok(())
+        assert!(abort_handle.is_finished());
     }
 }

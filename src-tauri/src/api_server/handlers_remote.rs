@@ -8,17 +8,17 @@ use axum::{
 };
 use futures_util::{stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio_util::io::{ReaderStream, StreamReader};
+use tokio_util::io::StreamReader;
 
 use crate::remote::{ExecResult, RemoteRuntime};
 
-use super::auth::{verify_auth, verify_session_access};
+use super::auth::{verify_auth, verify_session_access, verify_session_access_and_exists};
 use super::field_catalog;
 use super::guard::check_dangerous_command;
 use super::{
     allowed_session_ids_snapshot, command_log_detail, friendly_error_detail, map_remote_error,
     push_log, push_log_with_response, response_log_preview, ApiError, ApiServerState,
+    MAX_UPLOAD_BODY,
 };
 
 const MAX_API_EXEC_TIMEOUT_MS: u64 = 5 * 60_000;
@@ -54,7 +54,7 @@ pub(super) struct UploadResponse {
     size: u64,
 }
 
-/// raw PUT 上传 query。Content-Range 头可选，用于并发分块。
+/// raw PUT 上传 query。请求体必须是完整文件内容。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UploadRawQuery {
@@ -160,6 +160,26 @@ fn bad_request(message: &str) -> (StatusCode, Json<ApiError>) {
     )
 }
 
+fn payload_too_large(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(ApiError {
+            error: message.into(),
+        }),
+    )
+}
+
+fn reject_unsupported_upload_headers(
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if headers.contains_key(header::CONTENT_RANGE) {
+        return Err(bad_request(
+            "暂不支持 Content-Range 分块上传，请在单次 PUT 中提交完整文件",
+        ));
+    }
+    Ok(())
+}
+
 fn internal_error(message: impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -191,9 +211,11 @@ async fn ensure_api_session_ready(
     session_id: &str,
     require_sftp: bool,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
+    verify_session_access_and_exists(state, session_id)?;
     let (connected, sftp_available) = state.remote.api_session_status(session_id).await;
     if !connected {
-        let bundle = {
+        let _config_guard = state.connection_config_gate.read().await;
+        let (session, known_host) = {
             let store = state
                 .vault
                 .lock()
@@ -203,9 +225,41 @@ async fn ensure_api_session_ready(
         };
         state
             .remote
-            .api_connect_session(&state.app, bundle.0, bundle.1)
+            .api_connect_session(&state.app, session.clone(), known_host)
             .await
             .map_err(|error| map_remote_error(error.to_string(), state))?;
+        if verify_session_access(state, session_id).is_err() {
+            let _ = state
+                .remote
+                .api_disconnect_session(&state.app, session_id)
+                .await;
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ApiError {
+                    error: format!("会话 {} 已不在 AI API 授权范围内", session_id),
+                }),
+            ));
+        }
+        let still_valid = {
+            let store = state
+                .vault
+                .lock()
+                .map_err(|_| internal_error("内部锁错误"))?;
+            crate::commands::session_matches_current_connection_config(&store, &session)
+                .unwrap_or(false)
+        };
+        if !still_valid {
+            let _ = state
+                .remote
+                .api_disconnect_session(&state.app, session_id)
+                .await;
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiError {
+                    error: "会话配置已变更，请重试".to_string(),
+                }),
+            ));
+        }
     }
     if require_sftp && (!connected || !sftp_available) {
         state
@@ -331,6 +385,8 @@ pub async fn rest_sessions(
             sftp_available,
         });
     }
+    let latest_allowed_session_ids = allowed_session_ids_snapshot(&state);
+    sessions.retain(|session| latest_allowed_session_ids.contains(&session.session_id));
     let elapsed = elapsed_ms(start);
     push_log(
         &state,
@@ -351,12 +407,13 @@ pub async fn rest_connect(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
 
-    if body.session_id.is_empty() {
+    if body.session_id.trim().is_empty() {
         return Err(bad_request("缺少 sessionId"));
     }
     verify_session_access(&state, &body.session_id)?;
 
     let start = std::time::Instant::now();
+    let _config_guard = state.connection_config_gate.read().await;
     // VaultStore 是 std Mutex，把同步读取局限在一个块里释放锁后再 await。
     let bundle = {
         let store = state
@@ -370,10 +427,42 @@ pub async fn rest_connect(
 
     match state
         .remote
-        .api_connect_session(&state.app, session, known_host)
+        .api_connect_session(&state.app, session.clone(), known_host)
         .await
     {
         Ok(info) => {
+            if verify_session_access(&state, &body.session_id).is_err() {
+                let _ = state
+                    .remote
+                    .api_disconnect_session(&state.app, &body.session_id)
+                    .await;
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ApiError {
+                        error: format!("会话 {} 已不在 AI API 授权范围内", body.session_id),
+                    }),
+                ));
+            }
+            let still_valid = {
+                let store = state
+                    .vault
+                    .lock()
+                    .map_err(|_| internal_error("内部锁错误"))?;
+                crate::commands::session_matches_current_connection_config(&store, &session)
+                    .unwrap_or(false)
+            };
+            if !still_valid {
+                let _ = state
+                    .remote
+                    .api_disconnect_session(&state.app, &body.session_id)
+                    .await;
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ApiError {
+                        error: "会话配置已变更，请重新连接".to_string(),
+                    }),
+                ));
+            }
             let elapsed = elapsed_ms(start);
             push_log(&state, "rest/connect", &body.session_id, true, elapsed).await;
             Ok(Json(serde_json::to_value(info).unwrap_or_default()))
@@ -402,7 +491,7 @@ pub async fn rest_disconnect(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
 
-    if body.session_id.is_empty() {
+    if body.session_id.trim().is_empty() {
         return Err(bad_request("缺少 sessionId"));
     }
     verify_session_access(&state, &body.session_id)?;
@@ -441,7 +530,7 @@ pub async fn rest_exec(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
 
-    if body.session_id.is_empty() || body.command.is_empty() {
+    if body.session_id.trim().is_empty() || body.command.trim().is_empty() {
         return Err(bad_request("缺少 sessionId 或 command"));
     }
     let strict = strict_safety_mode(body.safety_mode.as_deref())?;
@@ -469,6 +558,7 @@ pub async fn rest_exec(
         .await
     {
         Ok(result) => {
+            verify_session_access(&state, &body.session_id)?;
             let elapsed = elapsed_ms(start);
             let success = exec_success(&result);
             let preview = response_log_preview(&body.command, &result.stdout, 2_000);
@@ -497,7 +587,7 @@ pub async fn rest_latency(
     Json(body): Json<LatencyBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
-    if body.session_id.is_empty() {
+    if body.session_id.trim().is_empty() {
         return Err(bad_request("缺少 sessionId"));
     }
     verify_session_access(&state, &body.session_id)?;
@@ -510,6 +600,7 @@ pub async fn rest_latency(
         .await
     {
         Ok(result) => {
+            verify_session_access(&state, &body.session_id)?;
             push_log(
                 &state,
                 "rest/latency",
@@ -541,7 +632,7 @@ pub async fn rest_exec_batch(
     Json(body): Json<BatchExecBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
-    if body.session_id.is_empty() {
+    if body.session_id.trim().is_empty() {
         return Err(bad_request("缺少 sessionId"));
     }
     if body.commands.is_empty() || body.commands.len() > 32 {
@@ -589,6 +680,7 @@ pub async fn rest_exec_batch(
         results
     };
     results.sort_by_key(|item| item.index);
+    verify_session_access(&state, &session_id)?;
     let success = results.iter().all(|item| item.success);
     let duration_ms = elapsed_ms(start);
     push_log(
@@ -619,8 +711,11 @@ pub async fn rest_files(
 ) -> Result<Json<Vec<FileEntry>>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
 
-    if query.session_id.is_empty() {
+    if query.session_id.trim().is_empty() {
         return Err(bad_request("缺少 sessionId"));
+    }
+    if query.path.trim().is_empty() {
+        return Err(bad_request("缺少 path"));
     }
     verify_session_access(&state, &query.session_id)?;
     ensure_api_session_ready(&state, &query.session_id, true).await?;
@@ -632,6 +727,7 @@ pub async fn rest_files(
         .await
     {
         Ok(entries) => {
+            verify_session_access(&state, &query.session_id)?;
             let elapsed = elapsed_ms(start);
             push_log(
                 &state,
@@ -660,7 +756,7 @@ pub async fn rest_files(
 
 // ─── 文件传输（Bearer 鉴权） ──────────────────────────────────────────────────
 
-/// raw PUT 上传：流式直写 SFTP，零 temp 文件。
+/// raw PUT 上传：流式写入同目录临时文件，完成后原子替换目标。
 pub async fn upload_file_raw(
     headers: HeaderMap,
     AxumState(state): AxumState<ApiServerState>,
@@ -668,12 +764,25 @@ pub async fn upload_file_raw(
     body: Body,
 ) -> Result<Json<UploadResponse>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
+    reject_unsupported_upload_headers(&headers)?;
 
-    if query.session_id.is_empty() {
+    if query.session_id.trim().is_empty() {
         return Err(bad_request("缺少 sessionId 查询参数"));
     }
-    if query.remote_path.is_empty() {
+    if query.remote_path.trim().is_empty() || query.remote_path.trim() == "/" {
         return Err(bad_request("缺少 remotePath 查询参数"));
+    }
+    if let Some(content_length) = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        if content_length > MAX_UPLOAD_BODY {
+            return Err(payload_too_large(format!(
+                "上传文件不能超过 {} MB",
+                MAX_UPLOAD_BODY / 1024 / 1024
+            )));
+        }
     }
 
     verify_session_access(&state, &query.session_id)?;
@@ -686,10 +795,27 @@ pub async fn upload_file_raw(
 
     let bytes_written = match state
         .remote
-        .api_upload_stream(&query.session_id, &query.remote_path, &mut reader)
+        .api_upload_stream(
+            &query.session_id,
+            &query.remote_path,
+            &mut reader,
+            MAX_UPLOAD_BODY,
+        )
         .await
     {
         Ok(n) => n,
+        Err(crate::errors::AppError::InvalidInput(message)) => {
+            let elapsed = elapsed_ms(start);
+            push_log(
+                &state,
+                "upload",
+                &friendly_error_detail(&format!("{} → {}", query.remote_path, message), &state),
+                false,
+                elapsed,
+            )
+            .await;
+            return Err(payload_too_large(message));
+        }
         Err(e) => {
             let elapsed = elapsed_ms(start);
             push_log(
@@ -700,11 +826,12 @@ pub async fn upload_file_raw(
                 elapsed,
             )
             .await;
-            return Err(map_remote_error(e, &state));
+            return Err(map_remote_error(e.to_string(), &state));
         }
     };
 
     let elapsed = elapsed_ms(start);
+    verify_session_access(&state, &query.session_id)?;
     push_log(
         &state,
         "upload",
@@ -728,6 +855,13 @@ pub async fn download_file(
     Query(query): Query<DownloadQuery>,
 ) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
+
+    if query.session_id.trim().is_empty() {
+        return Err(bad_request("缺少 sessionId 查询参数"));
+    }
+    if query.path.trim().is_empty() || query.path.trim() == "/" {
+        return Err(bad_request("缺少 path 查询参数"));
+    }
 
     verify_session_access(&state, &query.session_id)?;
     ensure_api_session_ready(&state, &query.session_id, true).await?;
@@ -758,20 +892,17 @@ pub async fn download_file(
             ));
         }
     };
+    if metadata.file_type().is_dir() {
+        return Err(bad_request("path 必须指向文件，不能是目录"));
+    }
     let total_size = metadata.len();
+    verify_session_access(&state, &query.session_id)?;
 
     let range = parse_range_header(headers.get(header::RANGE), total_size);
     let (status, start_offset, end_offset) = match range {
         ParsedRange::Full => (StatusCode::OK, 0u64, total_size.saturating_sub(1)),
         ParsedRange::Satisfiable { start, end } => (StatusCode::PARTIAL_CONTENT, start, end),
-        ParsedRange::Unsatisfiable => {
-            return Err((
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                Json(ApiError {
-                    error: format!("Range 越界：文件大小 {} 字节", total_size),
-                }),
-            ));
-        }
+        ParsedRange::Unsatisfiable => return range_not_satisfiable_response(total_size),
         ParsedRange::Invalid => (StatusCode::OK, 0u64, total_size.saturating_sub(1)),
     };
     let send_len = if total_size == 0 {
@@ -814,8 +945,18 @@ pub async fn download_file(
             }
         }
     } else {
-        let mut remote_file = match sftp.open(query.path.clone()).await {
-            Ok(f) => f,
+        match state
+            .remote
+            .download_stream(
+                &query.session_id,
+                query.path.clone(),
+                start_offset,
+                send_len,
+                crate::remote::TRANSFER_BUFFER_BYTES,
+            )
+            .await
+        {
+            Ok(stream) => Body::from_stream(stream),
             Err(e) => {
                 let elapsed = elapsed_ms(start);
                 push_log(
@@ -826,37 +967,9 @@ pub async fn download_file(
                     elapsed,
                 )
                 .await;
-                return Err(internal_error(format!("打开远程文件失败: {}", e)));
-            }
-        };
-
-        if start_offset > 0 {
-            if let Err(e) = remote_file
-                .seek(std::io::SeekFrom::Start(start_offset))
-                .await
-            {
-                let elapsed = elapsed_ms(start);
-                push_log(
-                    &state,
-                    "download",
-                    &friendly_error_detail(
-                        &format!("{} → seek {}: {}", query.path, start_offset, e),
-                        &state,
-                    ),
-                    false,
-                    elapsed,
-                )
-                .await;
-                return Err(internal_error(format!("seek 远程文件失败: {}", e)));
+                return Err(internal_error(e));
             }
         }
-        if let Err(e) = remote_file.set_read_limit(send_len) {
-            return Err(internal_error(format!("设置读取范围失败: {}", e)));
-        }
-
-        let limited = remote_file.take(send_len);
-        let stream = ReaderStream::with_capacity(limited, 1024 * 1024);
-        Body::from_stream(stream)
     };
 
     let elapsed = elapsed_ms(start);
@@ -917,6 +1030,23 @@ enum ParsedRange {
     Invalid,
 }
 
+fn range_not_satisfiable_response(
+    total_size: u64,
+) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+    let body = serde_json::to_vec(&ApiError {
+        error: format!("Range 越界：文件大小 {} 字节", total_size),
+    })
+    .map_err(internal_error)?;
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_RANGE, format!("bytes */{total_size}"))
+        .header(header::CONTENT_LENGTH, body.len())
+        .body(Body::from(body))
+        .map_err(|error| internal_error(format!("构建 Range 响应失败: {error}")))
+}
+
 fn parse_range_header(header_value: Option<&HeaderValue>, total: u64) -> ParsedRange {
     let Some(raw) = header_value.and_then(|v| v.to_str().ok()) else {
         return ParsedRange::Full;
@@ -925,7 +1055,10 @@ fn parse_range_header(header_value: Option<&HeaderValue>, total: u64) -> ParsedR
     let Some(spec) = raw.strip_prefix("bytes=") else {
         return ParsedRange::Invalid;
     };
-    let first = spec.split(',').next().unwrap_or("").trim();
+    if spec.contains(',') {
+        return ParsedRange::Invalid;
+    }
+    let first = spec.trim();
     let (start_s, end_s) = match first.split_once('-') {
         Some(parts) => parts,
         None => return ParsedRange::Invalid,
@@ -967,4 +1100,76 @@ fn parse_range_header(header_value: Option<&HeaderValue>, total: u64) -> ParsedR
         return ParsedRange::Unsatisfiable;
     }
     ParsedRange::Satisfiable { start, end }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse_range_header, range_not_satisfiable_response, reject_unsupported_upload_headers,
+        ParsedRange,
+    };
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+
+    #[test]
+    fn byte_ranges_handle_full_open_and_suffix_forms() {
+        assert!(matches!(parse_range_header(None, 10), ParsedRange::Full));
+        assert!(matches!(
+            parse_range_header(Some(&HeaderValue::from_static("bytes=2-4")), 10),
+            ParsedRange::Satisfiable { start: 2, end: 4 }
+        ));
+        assert!(matches!(
+            parse_range_header(Some(&HeaderValue::from_static("bytes=7-")), 10),
+            ParsedRange::Satisfiable { start: 7, end: 9 }
+        ));
+        assert!(matches!(
+            parse_range_header(Some(&HeaderValue::from_static("bytes=-3")), 10),
+            ParsedRange::Satisfiable { start: 7, end: 9 }
+        ));
+    }
+
+    #[test]
+    fn byte_ranges_reject_unsatisfiable_and_ignore_multi_ranges() {
+        assert!(matches!(
+            parse_range_header(Some(&HeaderValue::from_static("bytes=10-")), 10),
+            ParsedRange::Unsatisfiable
+        ));
+        assert!(matches!(
+            parse_range_header(Some(&HeaderValue::from_static("bytes=0-1,4-5")), 10),
+            ParsedRange::Invalid
+        ));
+        assert!(matches!(
+            parse_range_header(Some(&HeaderValue::from_static("items=0-1")), 10),
+            ParsedRange::Invalid
+        ));
+    }
+
+    #[test]
+    fn unsatisfiable_range_response_includes_required_content_range() {
+        let response = match range_not_satisfiable_response(42) {
+            Ok(response) => response,
+            Err(_) => panic!("range response should build"),
+        };
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response.headers().get(header::CONTENT_RANGE).unwrap(),
+            "bytes */42"
+        );
+        assert_eq!(
+            response.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
+    }
+
+    #[test]
+    fn content_range_uploads_are_rejected_instead_of_overwriting_with_one_chunk() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_static("bytes 0-9/100"),
+        );
+        let (status, body) = reject_unsupported_upload_headers(&headers).unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.0.error.contains("完整文件"));
+        assert!(reject_unsupported_upload_headers(&HeaderMap::new()).is_ok());
+    }
 }

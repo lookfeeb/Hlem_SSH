@@ -1,7 +1,7 @@
 import { remoteApi } from "../api/remoteApi";
 import { getErrorCode, getErrorMessage } from "../lib/configMapping";
 import { useMountedRef } from "../lib/reactLifecycle";
-import { mergeTransferInfo } from "../lib/transferRecords";
+import { mergeTransferInfo, replaceRetriedTransfer } from "../lib/transferRecords";
 import type { MutableRefObject } from "react";
 import type { RemoteSession, TransferHistorySnapshot, TransferInfo } from "../types";
 
@@ -115,7 +115,7 @@ export function useTransferActions({
           ? await retryExistingTransfer(transfer)
           : await restartTransferOnSession(transfer, targetSession.sftpId);
       if (!mountedRef.current) return;
-      setPersistedTransfers((current) => [next, ...current.filter((transfer) => transfer.transferId !== transferId)]);
+      setPersistedTransfers((current) => replaceRetriedTransfer(current, transferId, next));
     } catch (error) {
       if (mountedRef.current) appendTerminal(targetSession.id, "error", getErrorMessage(error));
     }

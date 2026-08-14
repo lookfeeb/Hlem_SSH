@@ -89,10 +89,11 @@ impl TelemetryStream {
     async fn open(handle: &SshHandle) -> AppResult<Self> {
         let channel = open_session_channel(handle).await?;
         let (mut read_half, write_half) = channel.split();
-        write_half
-            .exec(true, TELEMETRY_LOOP_COMMAND)
-            .await
-            .map_err(remote_error)?;
+        run_ssh_channel_control(
+            "启动遥测命令",
+            write_half.exec(true, TELEMETRY_LOOP_COMMAND),
+        )
+        .await?;
 
         let (tx, rx) = mpsc::channel::<TelemetryFrame>(TELEMETRY_FRAME_CHANNEL_CAPACITY);
         let reader = tokio::spawn(async move {
@@ -169,20 +170,31 @@ impl TelemetryStream {
             Err(_) => Err(AppError::Remote(format!("遥测采样超时（{tag}）"))),
         }
     }
+
+    async fn shutdown(&mut self) {
+        if !self.closed {
+            let shutdown = async {
+                let mut writer = self.writer.make_writer();
+                writer.write_all(b"quit\n").await?;
+                writer.flush().await?;
+                self.writer.close().await
+            };
+            if timeout(CHANNEL_SHUTDOWN_TIMEOUT, shutdown).await.is_err() {
+                log::debug!("timed out shutting down telemetry stream");
+            }
+            self.closed = true;
+        }
+        self.reader.abort();
+        if let Err(error) = (&mut self.reader).await {
+            if !error.is_cancelled() {
+                log::debug!("telemetry reader failed while stopping: {error}");
+            }
+        }
+    }
 }
 
 impl Drop for TelemetryStream {
     fn drop(&mut self) {
-        let mut writer = self.writer.make_writer();
-        tokio::spawn(async move {
-            if let Err(error) = writer.write_all(b"quit\n").await {
-                log::debug!("failed to signal telemetry stream shutdown: {error}");
-                return;
-            }
-            if let Err(error) = writer.flush().await {
-                log::debug!("failed to flush telemetry stream shutdown signal: {error}");
-            }
-        });
         self.reader.abort();
     }
 }
@@ -353,9 +365,12 @@ impl RemoteRuntime {
         session_id: String,
         interval_ms: u64,
     ) -> AppResult<TelemetryJobInfo> {
+        let _lifecycle_guard = self.lifecycle_gate.read().await;
+        let connection_record = self.connection(&connection_id).await?;
         self.telemetry_stop_by_session(&session_id).await;
         let info = TelemetryJobInfo {
             job_id: Uuid::new_v4().to_string(),
+            connection_id: connection_id.clone(),
             session_id,
             interval_ms: interval_ms.max(1_000),
             status: TaskStatus::Running,
@@ -363,28 +378,42 @@ impl RemoteRuntime {
         };
         let app_handle = app.clone();
         let job_info = info.clone();
-        let connection_record = self.connection(&connection_id).await?;
         let fallback_ip = connection_record.info.host.clone();
         let ssh_handle = connection_record.handle.clone();
         let telemetry_jobs_ref = self.telemetry_jobs.clone();
+        let (start_sender, start_receiver) = oneshot::channel();
+        let (shutdown_sender, mut shutdown_receiver) = oneshot::channel();
 
         let handle = tokio::spawn(async move {
+            // Publish the record before the task can emit an error or remove
+            // itself. Otherwise a fast initialization failure can win the race
+            // and leave a finished handle registered as Running forever.
+            if start_receiver.await.is_err() {
+                return;
+            }
             // Open the long-lived telemetry stream once. If this fails the job
             // emits a single error and exits — the user can restart telemetry.
-            let mut stream = match timeout(
-                Duration::from_millis(TELEMETRY_STREAM_INIT_TIMEOUT_MS),
-                TelemetryStream::open(&ssh_handle),
-            )
-            .await
-            {
+            let open_result = tokio::select! {
+                _ = &mut shutdown_receiver => return,
+                result = timeout(
+                    Duration::from_millis(TELEMETRY_STREAM_INIT_TIMEOUT_MS),
+                    TelemetryStream::open(&ssh_handle),
+                ) => result,
+            };
+            let mut stream = match open_result {
                 Ok(Ok(stream)) => stream,
                 Ok(Err(error)) => {
-                    emit_telemetry_error(&app_handle, &job_info, error.to_string());
+                    emit_telemetry_error(&app_handle, &job_info, error.to_string(), true);
                     telemetry_jobs_ref.write().await.remove(&job_info.job_id);
                     return;
                 }
                 Err(_) => {
-                    emit_telemetry_error(&app_handle, &job_info, "遥测通道初始化超时".to_string());
+                    emit_telemetry_error(
+                        &app_handle,
+                        &job_info,
+                        "遥测通道初始化超时".to_string(),
+                        true,
+                    );
                     telemetry_jobs_ref.write().await.remove(&job_info.job_id);
                     return;
                 }
@@ -418,6 +447,10 @@ impl RemoteRuntime {
 
             loop {
                 let (tag, timeout_ms, update_latency) = tokio::select! {
+                    _ = &mut shutdown_receiver => {
+                        stream.shutdown().await;
+                        return;
+                    }
                     _ = base_interval.tick() => ("base", TELEMETRY_FAST_TIMEOUT_MS, true),
                     _ = process_interval.tick() => ("process", TELEMETRY_FAST_TIMEOUT_MS, false),
                     _ = disk_interval.tick() => ("disk", TELEMETRY_FAST_TIMEOUT_MS, false),
@@ -431,8 +464,15 @@ impl RemoteRuntime {
                         None
                     }
                 };
-                let (sample_result, measured_latency) =
-                    tokio::join!(stream.sample(tag, timeout_ms), latency_future);
+                let (sample_result, measured_latency) = tokio::select! {
+                    _ = &mut shutdown_receiver => {
+                        stream.shutdown().await;
+                        return;
+                    }
+                    result = async {
+                        tokio::join!(stream.sample(tag, timeout_ms), latency_future)
+                    } => result,
+                };
                 match sample_result {
                     Ok(body) => {
                         consecutive_failures = 0;
@@ -451,7 +491,12 @@ impl RemoteRuntime {
                     }
                     Err(error) => {
                         consecutive_failures = consecutive_failures.saturating_add(1);
-                        emit_telemetry_error(&app_handle, &job_info, error.to_string());
+                        emit_telemetry_error(
+                            &app_handle,
+                            &job_info,
+                            error.to_string(),
+                            stream.closed,
+                        );
                         // Stop on either: (a) the underlying channel is unrecoverable, or
                         // (b) we've hit the consecutive-failure ceiling. Continuing past
                         // (b) just produces a flood of error events without any chance of
@@ -465,8 +510,10 @@ impl RemoteRuntime {
                                         "遥测连续 {} 次采样失败，已自动停止",
                                         consecutive_failures
                                     ),
+                                    true,
                                 );
                             }
+                            stream.shutdown().await;
                             telemetry_jobs_ref.write().await.remove(&job_info.job_id);
                             return;
                         }
@@ -474,13 +521,32 @@ impl RemoteRuntime {
                 }
             }
         });
-        self.telemetry_jobs.write().await.insert(
-            info.job_id.clone(),
-            TelemetryJobRecord {
-                info: info.clone(),
-                handle,
-            },
-        );
+        let record = TelemetryJobRecord {
+            connection_id: connection_id.clone(),
+            info: info.clone(),
+            shutdown: Some(shutdown_sender),
+            handle,
+        };
+        let connections = self.connections.read().await;
+        if !connections.contains_key(&connection_id) {
+            drop(connections);
+            // The task is still blocked on its unpublished start gate here, so a graceful
+            // shutdown signal cannot be observed. Abort it directly instead of waiting for
+            // the normal telemetry shutdown timeout.
+            abort_and_join_task(Some(record.handle), "telemetry startup").await;
+            return Err(AppError::missing_connection(&connection_id));
+        }
+        self.telemetry_jobs
+            .write()
+            .await
+            .insert(info.job_id.clone(), record);
+        drop(connections);
+        if start_sender.send(()).is_err() {
+            if let Some(record) = self.telemetry_jobs.write().await.remove(&info.job_id) {
+                shutdown_telemetry_record(record, "telemetry startup").await;
+            }
+            return Err(AppError::Remote("遥测任务启动失败".to_string()));
+        }
         Ok(info)
     }
 
@@ -491,7 +557,7 @@ impl RemoteRuntime {
             .await
             .remove(job_id)
             .ok_or_else(|| AppError::missing_telemetry_job(job_id))?;
-        record.handle.abort();
+        shutdown_telemetry_record(record, "telemetry job").await;
         Ok(())
     }
     pub(super) async fn telemetry_stop_by_session(&self, session_id: &str) -> usize {
@@ -504,19 +570,44 @@ impl RemoteRuntime {
             .map(|(id, _)| id.clone())
             .collect();
         let mut jobs = self.telemetry_jobs.write().await;
-        let mut stopped = 0usize;
-        for id in job_ids {
-            if let Some(record) = jobs.remove(&id) {
-                record.handle.abort();
-                stopped += 1;
-            }
+        let records = job_ids
+            .into_iter()
+            .filter_map(|id| jobs.remove(&id))
+            .collect::<Vec<_>>();
+        drop(jobs);
+        let stopped = records.len();
+        for record in records {
+            shutdown_telemetry_record(record, "telemetry job").await;
         }
         stopped
     }
-    pub(super) async fn cancel_telemetry_for_session(
+
+    pub(super) async fn telemetry_stop_by_connection(&self, connection_id: &str) -> usize {
+        let job_ids: Vec<String> = self
+            .telemetry_jobs
+            .read()
+            .await
+            .iter()
+            .filter(|(_, record)| record.connection_id == connection_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut jobs = self.telemetry_jobs.write().await;
+        let records = job_ids
+            .into_iter()
+            .filter_map(|id| jobs.remove(&id))
+            .collect::<Vec<_>>();
+        drop(jobs);
+        let stopped = records.len();
+        for record in records {
+            shutdown_telemetry_record(record, "telemetry job").await;
+        }
+        stopped
+    }
+
+    pub(super) async fn cancel_telemetry_for_connection(
         &self,
         app: &AppHandle,
-        session_id: &str,
+        connection_id: &str,
         reason: &str,
     ) {
         let job_ids: Vec<String> = self
@@ -524,14 +615,17 @@ impl RemoteRuntime {
             .read()
             .await
             .iter()
-            .filter(|(_, record)| record.info.session_id == session_id)
+            .filter(|(_, record)| record.connection_id == connection_id)
             .map(|(id, _)| id.clone())
             .collect();
         let mut jobs = self.telemetry_jobs.write().await;
-        for id in job_ids {
-            if let Some(record) = jobs.remove(&id) {
-                cancel_telemetry_record(app, record, reason);
-            }
+        let records = job_ids
+            .into_iter()
+            .filter_map(|id| jobs.remove(&id))
+            .collect::<Vec<_>>();
+        drop(jobs);
+        for record in records {
+            cancel_telemetry_record(app, record, reason).await;
         }
     }
 }

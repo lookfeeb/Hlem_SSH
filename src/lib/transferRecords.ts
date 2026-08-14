@@ -26,6 +26,10 @@ export function isActiveTransfer(transfer: TransferInfo) {
   return transfer.status === "queued" || transfer.status === "running" || transfer.status === "paused";
 }
 
+export function canRemoveTransfer(transfer: TransferInfo) {
+  return !isActiveTransfer(transfer);
+}
+
 export function isTransferDone(transfer: TransferInfo) {
   return transfer.bytesTotal > 0 && transfer.bytesDone >= transfer.bytesTotal;
 }
@@ -48,6 +52,26 @@ export function mergeTransferInfo(current: TransferInfo, incoming: TransferInfo)
   }
 
   return incoming;
+}
+
+export function mergeClearedTransferSnapshot(
+  current: TransferInfo[],
+  retained: TransferInfo[],
+): TransferInfo[] {
+  const retainedIds = new Set(retained.map((transfer) => transfer.transferId));
+  return current.filter((transfer) => retainedIds.has(transfer.transferId) || isActiveTransfer(transfer));
+}
+
+export function replaceRetriedTransfer(
+  current: TransferInfo[],
+  previousTransferId: string,
+  next: TransferInfo,
+): TransferInfo[] {
+  const existing = current.find((transfer) => transfer.transferId === next.transferId);
+  const merged = existing ? mergeTransferInfo(existing, next) : next;
+  return [merged, ...current.filter((transfer) => (
+    transfer.transferId !== previousTransferId && transfer.transferId !== next.transferId
+  ))];
 }
 
 function isTerminalTransferStatus(status: TransferInfo["status"]) {
@@ -112,4 +136,41 @@ export function backupKindText(kind: BackupRecord["targetKind"]) {
   if (kind === "s3") return "S3";
   if (kind === "cloud") return "云端";
   return kind;
+}
+
+export function clearFinishedFileSaveRecords(records: FileSaveRecord[]) {
+  return records.filter((record) => record.status === "saving");
+}
+
+export function applyFileSaveResult(
+  records: FileSaveRecord[],
+  recordId: string,
+  attempt: number,
+  patch: Partial<FileSaveRecord>,
+) {
+  return records.map((record) => (
+    record.id === recordId && record.attempt === attempt
+      ? { ...record, ...patch }
+      : record
+  ));
+}
+
+export function beginFileSaveRetry(
+  records: FileSaveRecord[],
+  recordId: string,
+  savedAt: string,
+): { records: FileSaveRecord[]; retry: FileSaveRecord | null } {
+  const index = records.findIndex((record) => record.id === recordId);
+  const current = index >= 0 ? records[index] : undefined;
+  if (!current || current.status === "saving") return { records, retry: null };
+  const retry: FileSaveRecord = {
+    ...current,
+    attempt: current.attempt + 1,
+    status: "saving",
+    error: null,
+    savedAt,
+  };
+  const next = [...records];
+  next[index] = retry;
+  return { records: next, retry };
 }

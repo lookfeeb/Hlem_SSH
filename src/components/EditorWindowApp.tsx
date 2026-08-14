@@ -21,6 +21,7 @@ import { EDITOR_CHANNEL_NAME, type EditorChannelMessage } from "../lib/editorCha
 import { detectFileLanguage } from "../lib/fileLanguage";
 import { getErrorMessage } from "../lib/configMapping";
 import { getAnyPathBaseName } from "../lib/path";
+import { useTimeoutRegistry } from "../lib/reactLifecycle";
 import { detectLineEnding, detectTextEncoding } from "../lib/textFileMetadata";
 import { CodeEditor } from "./CodeEditor";
 
@@ -124,6 +125,7 @@ export function EditorWindowApp() {
   const dirtyTabsRef = useRef<EditorTab[]>([]);
   const closeApprovedRef = useRef(false);
   const closeAfterSaveRef = useRef<Map<string, string>>(new Map());
+  const setSafeTimeout = useTimeoutRegistry();
 
   tabsRef.current = tabs;
   dirtyTabsRef.current = tabs.filter(isTabDirty);
@@ -233,9 +235,16 @@ export function EditorWindowApp() {
     };
     postEditorMessage(channel, { type: "ready" });
     const notifyClose = () => postEditorMessage(channel, { type: "close" });
-    window.addEventListener("beforeunload", notifyClose);
+    const guardBrowserClose = (event: BeforeUnloadEvent) => {
+      if (isTauriRuntime() || closeApprovedRef.current || dirtyTabsRef.current.length === 0) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", guardBrowserClose);
+    window.addEventListener("pagehide", notifyClose);
     return () => {
-      window.removeEventListener("beforeunload", notifyClose);
+      window.removeEventListener("beforeunload", guardBrowserClose);
+      window.removeEventListener("pagehide", notifyClose);
       if (channelRef.current === channel) channelRef.current = null;
       channel.close();
     };
@@ -379,7 +388,7 @@ export function EditorWindowApp() {
         await getCurrentWindow().destroy();
       } else {
         window.close();
-        window.setTimeout(() => {
+        setSafeTimeout(() => {
           if (window.closed) return;
           closeApprovedRef.current = false;
           setWindowClosing(false);

@@ -13,8 +13,10 @@ import {
   SwapOutlined,
 } from "@ant-design/icons";
 import type { DataNode } from "antd/es/tree";
+import { useEffect, useRef, useState } from "react";
 import type { RemoteFileEntry } from "../../types";
 import { getBaseName } from "../../lib/path";
+import { getDirectoryParentPaths, uniqueKeys } from "./directoryViewState";
 
 export type FileDialogState =
   | { kind: "create"; entryType: "file" | "directory"; name: string }
@@ -30,7 +32,6 @@ export interface FileDialogsProps {
   onDialogChange: (dialog: FileDialogState | null) => void;
   onSubmit: () => void;
   onLoadDirectory: (path: string) => void;
-  onExpandChange: (keys: string[]) => void;
   onTreeSelect: (path: string) => void;
 }
 
@@ -42,11 +43,24 @@ export function FileDialogs({
   onDialogChange,
   onSubmit,
   onLoadDirectory,
-  onExpandChange,
   onTreeSelect,
 }: FileDialogsProps) {
+  const [dialogExpandedKeys, setDialogExpandedKeys] = useState<string[]>([]);
+  const dialogOpenRef = useRef(false);
   const createDialog = dialog?.kind === "create" ? dialog : null;
   const createLabel = createDialog?.entryType === "directory" ? "新建目录" : "新建文件";
+
+  useEffect(() => {
+    const open = Boolean(dialog);
+    if (open && !dialogOpenRef.current && (dialog?.kind === "copy" || dialog?.kind === "move")) {
+      setDialogExpandedKeys(uniqueKeys([
+        ...directoryExpandedKeys,
+        ...getDirectoryParentPaths(dialog.value),
+      ]));
+    }
+    if (!open) setDialogExpandedKeys([]);
+    dialogOpenRef.current = open;
+  }, [dialog, directoryExpandedKeys]);
 
   return (
     <Modal
@@ -171,16 +185,13 @@ export function FileDialogs({
               blockNode
               virtual
               expandAction={false}
+              autoExpandParent={false}
               selectedKeys={[dialog.value]}
-              expandedKeys={directoryExpandedKeys}
+              expandedKeys={dialogExpandedKeys}
               treeData={treeData}
               switcherIcon={({ isLeaf }) => (isLeaf ? null : <span className="pathTreeChevron" />)}
-              loadData={(node) => {
-                onLoadDirectory(String(node.key));
-                return Promise.resolve();
-              }}
               onExpand={(keys, info) => {
-                onExpandChange(keys.map(String));
+                setDialogExpandedKeys(keys.map(String));
                 if (info.expanded) onLoadDirectory(String(info.node.key));
               }}
               onClick={(event, node) => {

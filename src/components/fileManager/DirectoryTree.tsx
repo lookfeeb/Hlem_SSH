@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { comparePathName } from "../../lib/fileClassify";
 import { getParentPath, getPathSegments, joinPath, normalizePath } from "../../lib/path";
 import type { RemoteFileEntry } from "../../types";
-import { getDirectoryParentPaths, uniqueKeys } from "./directoryViewState";
+import { uniqueKeys } from "./directoryViewState";
 
 export interface DirectoryTreeProps {
   canUseFiles: boolean;
@@ -33,7 +33,12 @@ export function DirectoryTree({
   const treeRef = useRef<RcTree | null>(null);
   const normalizedPath = normalizePath(path);
   const treeData = useMemo(
-    () => buildTreeData(directoryEntries, normalizedPath, new Set(directoryLoadingKeys)),
+    () => {
+      const nodes = buildTreeData(directoryEntries, normalizedPath, new Set(directoryLoadingKeys));
+      // 主目录树已经用独立按钮表示根目录。空根目录时 buildTreeData 会为
+      // 复制/移动弹窗保留一个 `/` 回退节点，这里过滤掉以免显示两个根目录。
+      return nodes.length === 1 && String(nodes[0]?.key) === "/" ? [] : nodes;
+    },
     [directoryEntries, normalizedPath, directoryLoadingKeys],
   );
   const visibleTreeKeys = useMemo(
@@ -41,9 +46,12 @@ export function DirectoryTree({
     [treeData, directoryExpandedKeys],
   );
   const currentTreeIndex = visibleTreeKeys.indexOf(normalizedPath);
+  const currentTreePathVisible = currentTreeIndex >= 0;
 
+  // 展开或折叠其他目录时不要把滚动位置强制拉回当前路径；仅在选中路径
+  // 改变，或选中路径从不可见恢复为可见时重新定位。
   useEffect(() => {
-    if (!canUseFiles || normalizedPath === "/" || currentTreeIndex < 0) return;
+    if (!canUseFiles || normalizedPath === "/" || !currentTreePathVisible) return;
     const scrollToCurrentPath = () => {
       treeRef.current?.scrollTo({ index: currentTreeIndex, align: "top" });
       scrollSelectedDirectoryIntoView(treeRootRef.current);
@@ -59,7 +67,7 @@ export function DirectoryTree({
       if (secondFrame) window.cancelAnimationFrame(secondFrame);
       window.clearTimeout(retry);
     };
-  }, [canUseFiles, currentTreeIndex, normalizedPath, treeData, directoryExpandedKeys]);
+  }, [canUseFiles, normalizedPath, currentTreePathVisible]);
 
   if (!canUseFiles) {
     return (
@@ -93,6 +101,7 @@ export function DirectoryTree({
         blockNode
         virtual
         expandAction={false}
+        autoExpandParent={false}
         selectedKeys={normalizedPath === "/" ? [] : [normalizedPath]}
         expandedKeys={directoryExpandedKeys}
         treeData={treeData}
@@ -110,10 +119,7 @@ export function DirectoryTree({
   );
 }
 
-/** Also used by FileDialogs for the copy/move tree */
-export { buildTreeData, getDirectoryParentPaths, uniqueKeys };
-
-function buildTreeData(
+export function buildTreeData(
   entriesByPath: Record<string, RemoteFileEntry[]>,
   currentPath: string,
   loadingKeys: Set<string>,

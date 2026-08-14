@@ -1,6 +1,12 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { getErrorMessage } from "../lib/configMapping";
 import { getBaseName as getRemoteBaseName, getParentPath as getRemoteParentPath } from "../lib/path";
+import {
+  applyFileSaveResult,
+  beginFileSaveRetry,
+  clearFinishedFileSaveRecords,
+} from "../lib/transferRecords";
+import { commitRefState } from "../lib/stateRef";
 import type { FileSaveRecord } from "../types";
 
 type UseFileSaveRecordsOptions = {
@@ -10,11 +16,17 @@ type UseFileSaveRecordsOptions = {
 
 export function useFileSaveRecords({ writeRemoteTextRaw, onSaveFailed }: UseFileSaveRecordsOptions) {
   const [fileSaveRecords, setFileSaveRecords] = useState<FileSaveRecord[]>([]);
+  const fileSaveRecordsRef = useRef<FileSaveRecord[]>([]);
+
+  function setRecords(action: React.SetStateAction<FileSaveRecord[]>) {
+    return commitRefState(fileSaveRecordsRef, setFileSaveRecords, action);
+  }
 
   async function writeRemoteText(path: string, content: string, sessionId?: string) {
     const recordId = crypto.randomUUID();
     upsertFileSaveRecord({
       id: recordId,
+      attempt: 1,
       sessionId: sessionId ?? null,
       path,
       directory: getRemoteParentPath(path),
@@ -26,40 +38,46 @@ export function useFileSaveRecords({ writeRemoteTextRaw, onSaveFailed }: UseFile
     });
     try {
       await writeRemoteTextRaw(path, content, sessionId);
-      updateFileSaveRecord(recordId, { status: "success", error: null, savedAt: new Date().toISOString() });
+      applySaveResult(recordId, 1, { status: "success", error: null, savedAt: new Date().toISOString() });
     } catch (error) {
-      updateFileSaveRecord(recordId, { status: "failed", error: getErrorMessage(error), savedAt: new Date().toISOString() });
+      applySaveResult(recordId, 1, { status: "failed", error: getErrorMessage(error), savedAt: new Date().toISOString() });
       onSaveFailed();
       throw error;
     }
   }
 
   async function retryFileSaveRecord(recordId: string) {
-    const record = fileSaveRecords.find((item) => item.id === recordId);
-    if (!record) return;
-    updateFileSaveRecord(recordId, { status: "saving", error: null, savedAt: new Date().toISOString() });
+    const { records, retry } = beginFileSaveRetry(
+      fileSaveRecordsRef.current,
+      recordId,
+      new Date().toISOString(),
+    );
+    if (!retry) return;
+    setRecords(records);
     try {
-      await writeRemoteTextRaw(record.path, record.content, record.sessionId ?? undefined);
-      updateFileSaveRecord(recordId, { status: "success", error: null, savedAt: new Date().toISOString() });
+      await writeRemoteTextRaw(retry.path, retry.content, retry.sessionId ?? undefined);
+      applySaveResult(recordId, retry.attempt, { status: "success", error: null, savedAt: new Date().toISOString() });
     } catch (error) {
-      updateFileSaveRecord(recordId, { status: "failed", error: getErrorMessage(error), savedAt: new Date().toISOString() });
+      applySaveResult(recordId, retry.attempt, { status: "failed", error: getErrorMessage(error), savedAt: new Date().toISOString() });
     }
   }
 
   function removeFileSaveRecord(recordId: string) {
-    setFileSaveRecords((current) => current.filter((record) => record.id !== recordId));
+    setRecords((current) => current.filter((record) => (
+      record.id !== recordId || record.status === "saving"
+    )));
   }
 
   function clearFileSaveRecords() {
-    setFileSaveRecords([]);
+    setRecords(clearFinishedFileSaveRecords);
   }
 
   function upsertFileSaveRecord(record: FileSaveRecord) {
-    setFileSaveRecords((current) => [record, ...current.filter((item) => item.id !== record.id)].slice(0, 30));
+    setRecords((current) => [record, ...current.filter((item) => item.id !== record.id)].slice(0, 30));
   }
 
-  function updateFileSaveRecord(recordId: string, patch: Partial<FileSaveRecord>) {
-    setFileSaveRecords((current) => current.map((record) => (record.id === recordId ? { ...record, ...patch } : record)));
+  function applySaveResult(recordId: string, attempt: number, patch: Partial<FileSaveRecord>) {
+    setRecords((current) => applyFileSaveResult(current, recordId, attempt, patch));
   }
 
   return {

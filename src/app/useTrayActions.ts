@@ -11,10 +11,7 @@ type UseTrayActionsOptions = {
 
 export function useTrayActions(options: UseTrayActionsOptions) {
   const optionsRef = useRef(options);
-
-  useEffect(() => {
-    optionsRef.current = options;
-  }, [options]);
+  optionsRef.current = options;
 
   useEffect(() => {
     if (!options.appReady) return;

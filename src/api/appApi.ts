@@ -14,6 +14,11 @@ export type ApiServerInfo = {
   apiKey: string;
 };
 
+type ApiServerConfigureResult = {
+  info: ApiServerInfo;
+  snapshot: import("../types").ConfigSnapshot;
+};
+
 export type ApiLogEntry = {
   timestamp: string;
   action: string;
@@ -39,28 +44,10 @@ export const appApi = {
   createLocalDirectories: (paths: string[]) => call<void>("local_create_directories", { paths }),
   openExternalUrl: (url: string) => call<void>("open_external_url", { url }),
   expandLocalPaths: (paths: string[]) => call<LocalExpandedEntry[]>("local_expand_paths", { paths }, { timeoutMs: 5 * 60_000 }),
-  apiServerStart: (port: number, allowedSessionIds?: string[] | string | null) => {
-    const ids = normalizeSessionIds(allowedSessionIds);
-    return call<ApiServerInfo>("api_server_start", {
-      port,
-      allowedSessionId: ids[0] ?? null,
-      allowedSessionIds: ids,
-    });
-  },
+  apiServerConfigureAndStart: (port: number, allowedSessionIds: string[], autoStart: boolean) =>
+    call<ApiServerConfigureResult>("api_server_configure_and_start", { port, allowedSessionIds, autoStart }),
   apiServerStop: () => call<void>("api_server_stop"),
-  apiServerUpdateSessions: (allowedSessionIds?: string[] | string | null) => {
-    const ids = normalizeSessionIds(allowedSessionIds);
-    return call<ApiServerInfo>("api_server_update_sessions", {
-      allowedSessionId: ids[0] ?? null,
-      allowedSessionIds: ids,
-    });
-  },
   apiServerStatus: () => call<ApiServerInfo>("api_server_status", undefined, { retries: 1 }),
   apiServerRegenerateKey: () => call<ApiServerInfo>("api_server_regenerate_key"),
   apiServerLogs: () => call<ApiLogEntry[]>("api_server_logs", undefined, { retries: 1 }),
 };
-
-function normalizeSessionIds(value?: string[] | string | null) {
-  if (Array.isArray(value)) return value.filter((id): id is string => typeof id === "string" && id.length > 0);
-  return value ? [value] : [];
-}

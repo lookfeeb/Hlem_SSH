@@ -29,6 +29,7 @@ export function configToRemoteSession(config: SessionConfig, index: number): Rem
     telemetryJobId: null,
     terminal: [],
     telemetry: createEmptyTelemetry(config.host),
+    filesPath: null,
     files: [],
   };
 }

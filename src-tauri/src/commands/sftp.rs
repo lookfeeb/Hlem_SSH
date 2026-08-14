@@ -26,9 +26,13 @@ pub async fn sftp_open(state: State<'_, AppState>, connection_id: String) -> App
 }
 
 #[tauri::command]
-pub async fn sftp_close(state: State<'_, AppState>, sftp_id: String) -> AppResult<()> {
+pub async fn sftp_close(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    sftp_id: String,
+) -> AppResult<()> {
     ensure_vault_unlocked(&state)?;
-    state.remote.close_sftp(&sftp_id).await
+    state.remote.close_sftp(&app, &sftp_id).await
 }
 
 #[tauri::command]

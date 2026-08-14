@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { appApi } from "../api/appApi";
 import { call } from "../api/bridge";
 import { isTauriRuntime } from "../api/runtime";
@@ -8,11 +8,12 @@ import { useAnimationFrameRegistry, useMountedRef } from "../lib/reactLifecycle"
 import type { AppInfo, ConfigSnapshot } from "../types";
 
 type UseAppBootstrapOptions = {
+  enabled: boolean;
   applySnapshot: (snapshot: ConfigSnapshot, preferredSessionId?: string, preserveRuntime?: boolean) => void;
-  initializeApiServerRuntime: () => Promise<void>;
+  onFrontendReady: () => Promise<void> | void;
 };
 
-export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: UseAppBootstrapOptions) {
+export function useAppBootstrap({ enabled, applySnapshot, onFrontendReady }: UseAppBootstrapOptions) {
   const [appReady, setAppReady] = useState(false);
   const [migrationNeeded, setMigrationNeeded] = useState(false);
   const [migrationBusy, setMigrationBusy] = useState(false);
@@ -20,11 +21,14 @@ export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: U
   const [bootstrapError, setBootstrapError] = useState<string>();
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const mountedRef = useMountedRef();
+  const initializationStartedRef = useRef(false);
   const requestSafeAnimationFrame = useAnimationFrameRegistry();
 
   useEffect(() => {
+    if (!enabled || initializationStartedRef.current) return;
+    initializationStartedRef.current = true;
     void initializeApp();
-  }, []);
+  }, [enabled]);
 
   async function initializeApp() {
     try {
@@ -81,7 +85,6 @@ export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: U
     } catch (error) {
       console.warn("[helm] failed to load app info:", getErrorMessage(error));
     }
-    if (mountedRef.current) await initializeApiServerRuntime();
   }
 
   function signalFrontendReady() {
@@ -89,9 +92,11 @@ export function useAppBootstrap({ applySnapshot, initializeApiServerRuntime }: U
     requestSafeAnimationFrame(() => {
       requestSafeAnimationFrame(() => {
         if (!mountedRef.current) return;
-        void call<void>("frontend_ready").catch((error) => {
-          console.warn("[helm] failed to signal frontend ready:", getErrorMessage(error));
-        });
+        void call<void>("frontend_ready")
+          .then(() => onFrontendReady())
+          .catch((error) => {
+            console.warn("[helm] failed to finish frontend ready handshake:", getErrorMessage(error));
+          });
       });
     });
   }

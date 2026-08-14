@@ -8,18 +8,26 @@ use chrono::{DateTime, Duration, Utc};
 use zeroize::Zeroize;
 
 use crate::{
-    backup::extract_backup_payload,
+    atomic_file::write_atomic,
+    backup::{backup_cleanup_target, extract_backup_payload, BackupCleanupTarget},
     config::{
         migrate_vault_data, validate_group_input, validate_session_input, validate_settings,
-        validate_tunnel_input, AppSettings, BackupRecord, ConfigSnapshot, GroupInput,
-        KnownHostEntry, SessionConfig, SessionGroup, SessionInput, TunnelConfig, TunnelInput,
-        VaultData,
+        validate_tunnel_input, AppProxyOptions, BackupRecord, BackupSettings, ConfigSnapshot,
+        GroupInput, KnownHostEntry, QuickCommand, SessionConfig, SessionGroup, SessionInput,
+        TunnelConfig, TunnelInput, VaultData,
     },
     crypto::{self, CryptoSession, EncryptedVault},
     errors::{AppError, AppResult},
 };
 
 pub const VAULT_FILE_NAME: &str = "vault.rpvault";
+
+#[derive(Debug, Clone)]
+pub struct AiApiSettingsUpdate {
+    pub session_ids: Vec<String>,
+    pub port: Option<u16>,
+    pub auto_start: bool,
+}
 
 #[cfg(test)]
 pub struct VaultStatus {
@@ -30,6 +38,7 @@ pub struct VaultStatus {
 pub struct VaultStore {
     path: PathBuf,
     unlocked: Option<UnlockedVault>,
+    revision: u64,
 }
 
 struct UnlockedVault {
@@ -62,6 +71,7 @@ impl VaultStore {
         Self {
             path,
             unlocked: None,
+            revision: 0,
         }
     }
 
@@ -117,7 +127,7 @@ impl VaultStore {
             data: data.clone(),
             crypto,
         });
-        Ok(ConfigSnapshot { data })
+        Ok(self.snapshot_for(data))
     }
 
     pub fn vault_file_path(&self) -> PathBuf {
@@ -148,7 +158,7 @@ impl VaultStore {
             data: data.clone(),
             crypto,
         });
-        Ok(ConfigSnapshot { data })
+        Ok(self.snapshot_for(data))
     }
 
     pub fn unlock(&mut self, master_password: &str) -> AppResult<ConfigSnapshot> {
@@ -162,7 +172,7 @@ impl VaultStore {
             data: data.clone(),
             crypto,
         });
-        Ok(ConfigSnapshot { data })
+        Ok(self.snapshot_for(data))
     }
 
     #[cfg(test)]
@@ -176,16 +186,136 @@ impl VaultStore {
     }
 
     pub fn snapshot(&self) -> AppResult<ConfigSnapshot> {
-        Ok(ConfigSnapshot {
-            data: self.unlocked()?.data.clone(),
+        Ok(self.snapshot_for(self.unlocked()?.data.clone()))
+    }
+
+    pub fn settings_proxy_update(
+        &mut self,
+        proxy: Option<AppProxyOptions>,
+    ) -> AppResult<ConfigSnapshot> {
+        self.mutate(|data| {
+            data.settings.proxy = proxy;
+            validate_settings(&data.settings)
         })
     }
 
-    pub fn settings_update(&mut self, settings: AppSettings) -> AppResult<ConfigSnapshot> {
-        self.mutate(|data| {
-            validate_settings(&settings)?;
-            data.settings = settings;
+    pub fn settings_backup_update(
+        &mut self,
+        backup: BackupSettings,
+    ) -> AppResult<(ConfigSnapshot, Vec<BackupCleanupTarget>)> {
+        let mut cleanup_targets = Vec::new();
+        let snapshot = self.mutate(|data| {
+            let previous = data.settings.backup.clone();
+            data.settings.backup = backup;
+            validate_settings(&data.settings)?;
+            cleanup_targets = prune_backup_records(data, Some(&previous));
             Ok(())
+        })?;
+        Ok((snapshot, cleanup_targets))
+    }
+
+    pub fn quick_command_upsert(&mut self, mut command: QuickCommand) -> AppResult<ConfigSnapshot> {
+        command.id = command.id.trim().to_string();
+        command.name = command.name.trim().to_string();
+        command.command = command.command.trim().to_string();
+        if command.id.is_empty() {
+            return Err(AppError::InvalidInput("常用命令 ID 不能为空".to_string()));
+        }
+        self.mutate(|data| {
+            if let Some(existing) = data
+                .settings
+                .quick_commands
+                .iter_mut()
+                .find(|existing| existing.id == command.id)
+            {
+                *existing = command;
+            } else {
+                data.settings.quick_commands.push(command);
+                if data.settings.quick_commands.len() > 100 {
+                    let remove_count = data.settings.quick_commands.len() - 100;
+                    data.settings.quick_commands.drain(0..remove_count);
+                }
+            }
+            validate_settings(&data.settings)
+        })
+    }
+
+    pub fn quick_command_delete(&mut self, command_id: &str) -> AppResult<ConfigSnapshot> {
+        let command_id = command_id.trim();
+        if command_id.is_empty() {
+            return Err(AppError::InvalidInput("常用命令 ID 不能为空".to_string()));
+        }
+        self.mutate(|data| {
+            let before_len = data.settings.quick_commands.len();
+            data.settings
+                .quick_commands
+                .retain(|command| command.id != command_id);
+            if data.settings.quick_commands.len() == before_len {
+                return Err(AppError::NotFound(format!("常用命令 {command_id}")));
+            }
+            validate_settings(&data.settings)
+        })
+    }
+
+    pub fn settings_ai_api_update(
+        &mut self,
+        settings: AiApiSettingsUpdate,
+    ) -> AppResult<ConfigSnapshot> {
+        self.mutate(|data| {
+            if matches!(settings.port, Some(port) if port < 1024) {
+                return Err(AppError::InvalidInput(
+                    "AI API 端口必须在 1024-65535 之间".to_string(),
+                ));
+            }
+            let mut session_ids: Vec<String> = Vec::new();
+            for session_id in settings.session_ids {
+                let session_id = session_id.trim();
+                if session_id.is_empty() || session_ids.iter().any(|id| id.as_str() == session_id) {
+                    continue;
+                }
+                if session_ids.len() >= 20 {
+                    return Err(AppError::InvalidInput(
+                        "AI API 最多允许 20 个会话".to_string(),
+                    ));
+                }
+                if !data.sessions.iter().any(|session| session.id == session_id) {
+                    return Err(AppError::NotFound(format!("会话 {session_id}")));
+                }
+                session_ids.push(session_id.to_string());
+            }
+            if settings.auto_start && (session_ids.is_empty() || settings.port.is_none()) {
+                return Err(AppError::InvalidInput(
+                    "AI API 自动启动需要端口和至少一个授权会话".to_string(),
+                ));
+            }
+            data.settings.ai_api_session_id = session_ids.first().cloned();
+            data.settings.ai_api_session_ids = session_ids;
+            data.settings.ai_api_port = settings.port;
+            data.settings.ai_api_auto_start = settings.auto_start;
+            validate_settings(&data.settings)
+        })
+    }
+
+    pub fn settings_ai_api_key_update(
+        &mut self,
+        api_key: Option<String>,
+    ) -> AppResult<ConfigSnapshot> {
+        self.mutate(|data| {
+            data.settings.ai_api_key = api_key;
+            validate_settings(&data.settings)
+        })
+    }
+
+    pub fn settings_ignore_update_version(&mut self, version: String) -> AppResult<ConfigSnapshot> {
+        let version = version.trim().trim_start_matches(['v', 'V']).to_string();
+        if version.is_empty() {
+            return Err(AppError::InvalidInput("忽略版本不能为空".to_string()));
+        }
+        self.mutate(|data| {
+            if !data.settings.ignored_update_versions.contains(&version) {
+                data.settings.ignored_update_versions.push(version);
+            }
+            validate_settings(&data.settings)
         })
     }
 
@@ -220,6 +350,14 @@ impl VaultStore {
 
     pub fn tunnels(&self) -> AppResult<Vec<TunnelConfig>> {
         Ok(self.unlocked()?.data.tunnels.clone())
+    }
+
+    pub fn validate_tunnel_update(&self, tunnel_id: &str, input: &TunnelInput) -> AppResult<()> {
+        let data = &self.unlocked()?.data;
+        if !data.tunnels.iter().any(|tunnel| tunnel.id == tunnel_id) {
+            return Err(AppError::NotFound(format!("隧道 {}", tunnel_id)));
+        }
+        validate_tunnel_input(data, input)
     }
 
     pub fn update_tunnel(
@@ -262,7 +400,7 @@ impl VaultStore {
         let mut data = crypto::decrypt_with_key(&unlocked.crypto.key, &encrypted)
             .map_err(backup_decrypt_error)?;
         migrate_vault_data(&mut data);
-        Ok(ConfigSnapshot { data })
+        Ok(self.snapshot_for(data))
     }
 
     pub fn backup_import(&mut self, path: &Path) -> AppResult<ConfigSnapshot> {
@@ -281,45 +419,46 @@ impl VaultStore {
         let encrypted = crypto::encrypt_with_session(&unlocked.crypto, &data)?;
         write_encrypted(&vault_path, &encrypted)?;
         unlocked.data = data.clone();
-        Ok(ConfigSnapshot { data })
+        self.revision = self.revision.saturating_add(1);
+        Ok(self.snapshot_for(data))
     }
 
     #[cfg(test)]
     pub fn add_backup_records(
         &mut self,
         records: Vec<BackupRecord>,
-    ) -> AppResult<(ConfigSnapshot, Vec<PathBuf>)> {
+    ) -> AppResult<(ConfigSnapshot, Vec<BackupCleanupTarget>)> {
         if records.is_empty() {
             return Ok((self.snapshot()?, Vec::new()));
         }
-        let mut removed_local_paths = Vec::new();
+        let mut cleanup_targets = Vec::new();
         let snapshot = self.mutate(|data| {
             data.backup_records.extend(records);
-            removed_local_paths = prune_backup_records(data);
+            cleanup_targets = prune_backup_records(data, None);
             Ok(())
         })?;
-        Ok((snapshot, removed_local_paths))
+        Ok((snapshot, cleanup_targets))
     }
 
     pub fn replace_backup_records(
         &mut self,
         records: Vec<BackupRecord>,
-    ) -> AppResult<(ConfigSnapshot, Vec<PathBuf>)> {
-        let mut removed_local_paths = Vec::new();
+    ) -> AppResult<(ConfigSnapshot, Vec<BackupCleanupTarget>)> {
+        let mut cleanup_targets = Vec::new();
         let snapshot = self.mutate(|data| {
             data.backup_records = records;
-            removed_local_paths = prune_backup_records(data);
+            cleanup_targets = prune_backup_records(data, None);
             Ok(())
         })?;
-        Ok((snapshot, removed_local_paths))
+        Ok((snapshot, cleanup_targets))
     }
 
     pub fn delete_backup_record(
         &mut self,
         record_id: &str,
         delete_file: bool,
-    ) -> AppResult<(ConfigSnapshot, Option<PathBuf>)> {
-        let mut delete_path = None;
+    ) -> AppResult<(ConfigSnapshot, Option<BackupCleanupTarget>)> {
+        let mut cleanup_target = None;
         let snapshot = self.mutate(|data| {
             let index = data
                 .backup_records
@@ -327,12 +466,12 @@ impl VaultStore {
                 .position(|record| record.id == record_id)
                 .ok_or_else(|| AppError::NotFound(format!("备份记录 {}", record_id)))?;
             let record = data.backup_records.remove(index);
-            if delete_file && record.target_kind == "local" && record.status == "success" {
-                delete_path = Some(PathBuf::from(record.target_path));
+            if delete_file {
+                cleanup_target = backup_cleanup_target(&data.settings.backup, &record);
             }
             Ok(())
         })?;
-        Ok((snapshot, delete_path))
+        Ok((snapshot, cleanup_target))
     }
 
     pub fn session(&self, session_id: &str) -> AppResult<SessionConfig> {
@@ -358,6 +497,8 @@ impl VaultStore {
     pub fn trust_host_key(
         &mut self,
         session_id: &str,
+        host: &str,
+        port: u16,
         algorithm: String,
         fingerprint: String,
     ) -> AppResult<ConfigSnapshot> {
@@ -367,8 +508,12 @@ impl VaultStore {
                 .iter_mut()
                 .find(|session| session.id == session_id)
                 .ok_or_else(|| AppError::NotFound(format!("会话 {}", session_id)))?;
+            if session.host != host || session.port != port {
+                return Err(AppError::InvalidInput(
+                    "会话地址已变化，请重新连接并确认主机密钥".to_string(),
+                ));
+            }
             let host = session.host.clone();
-            let port = session.port;
             session.ssh.host_key_fingerprint = Some(fingerprint.clone());
 
             let entry = KnownHostEntry {
@@ -518,6 +663,22 @@ impl VaultStore {
             }
             data.tunnels
                 .retain(|tunnel| tunnel.session_id != session_id);
+            data.settings
+                .ai_api_session_ids
+                .retain(|id| id != session_id);
+            if data.settings.ai_api_session_ids.is_empty()
+                && data.settings.ai_api_session_id.as_deref() != Some(session_id)
+            {
+                if let Some(legacy_id) = data.settings.ai_api_session_id.take() {
+                    if data.sessions.iter().any(|session| session.id == legacy_id) {
+                        data.settings.ai_api_session_ids.push(legacy_id);
+                    }
+                }
+            }
+            data.settings.ai_api_session_id = data.settings.ai_api_session_ids.first().cloned();
+            if data.settings.ai_api_session_ids.is_empty() {
+                data.settings.ai_api_auto_start = false;
+            }
             Ok(())
         })
     }
@@ -526,13 +687,22 @@ impl VaultStore {
         &mut self,
         update: impl FnOnce(&mut VaultData) -> AppResult<()>,
     ) -> AppResult<ConfigSnapshot> {
-        let unlocked = self.unlocked_mut()?;
-        update(&mut unlocked.data)?;
-        unlocked.data.touch();
-        let snapshot = unlocked.data.clone();
-        let encrypted = crypto::encrypt_with_session(&unlocked.crypto, &snapshot)?;
+        let unlocked = self.unlocked()?;
+        let mut next_data = unlocked.data.clone();
+        update(&mut next_data)?;
+        next_data.touch();
+        let encrypted = crypto::encrypt_with_session(&unlocked.crypto, &next_data)?;
         write_encrypted(&self.path, &encrypted)?;
-        Ok(ConfigSnapshot { data: snapshot })
+        self.unlocked_mut()?.data = next_data.clone();
+        self.revision = self.revision.saturating_add(1);
+        Ok(self.snapshot_for(next_data))
+    }
+
+    fn snapshot_for(&self, data: VaultData) -> ConfigSnapshot {
+        ConfigSnapshot {
+            data,
+            revision: self.revision,
+        }
     }
 
     fn unlocked(&self) -> AppResult<&UnlockedVault> {
@@ -565,14 +735,8 @@ fn read_encrypted_bytes(bytes: &[u8]) -> AppResult<EncryptedVault> {
 }
 
 fn write_encrypted(path: &Path, encrypted: &EncryptedVault) -> AppResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp_path = path.with_extension("rpvault.tmp");
     let content = serde_json::to_string_pretty(encrypted)?;
-    fs::write(&tmp_path, content)?;
-    fs::rename(tmp_path, path)?;
-    Ok(())
+    write_atomic(path, content.as_bytes())
 }
 
 fn backup_decrypt_error(error: AppError) -> AppError {
@@ -584,7 +748,10 @@ fn backup_decrypt_error(error: AppError) -> AppError {
     }
 }
 
-fn prune_backup_records(data: &mut VaultData) -> Vec<PathBuf> {
+fn prune_backup_records(
+    data: &mut VaultData,
+    previous_settings: Option<&BackupSettings>,
+) -> Vec<BackupCleanupTarget> {
     let retention_count = usize::from(data.settings.backup.retention_count.max(1));
     let retention_days = i64::from(data.settings.backup.retention_days);
     let cutoff = if retention_days > 0 {
@@ -596,11 +763,17 @@ fn prune_backup_records(data: &mut VaultData) -> Vec<PathBuf> {
     data.backup_records
         .sort_by(|left, right| right.created_at.cmp(&left.created_at));
 
-    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut success_counts: HashMap<String, usize> = HashMap::new();
+    let mut failure_counts: HashMap<String, usize> = HashMap::new();
     let mut remove_ids = HashSet::new();
-    let mut delete_paths = Vec::new();
+    let mut cleanup_targets = Vec::new();
 
     for record in &data.backup_records {
+        let counts = if record.status == "success" {
+            &mut success_counts
+        } else {
+            &mut failure_counts
+        };
         let count = counts.entry(record.target_kind.clone()).or_insert(0);
         *count += 1;
         let too_many = *count > retention_count;
@@ -614,15 +787,19 @@ fn prune_backup_records(data: &mut VaultData) -> Vec<PathBuf> {
             .unwrap_or(false);
         if too_many || too_old {
             remove_ids.insert(record.id.clone());
-            if record.target_kind == "local" && record.status == "success" {
-                delete_paths.push(PathBuf::from(&record.target_path));
+            if let Some(target) =
+                backup_cleanup_target(&data.settings.backup, record).or_else(|| {
+                    previous_settings.and_then(|settings| backup_cleanup_target(settings, record))
+                })
+            {
+                cleanup_targets.push(target);
             }
         }
     }
 
     data.backup_records
         .retain(|record| !remove_ids.contains(&record.id));
-    delete_paths
+    cleanup_targets
 }
 
 #[cfg(test)]
@@ -630,6 +807,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::config::AppSettings;
     use crate::config::{AuthConfig, TerminalOptions};
 
     fn store_path() -> PathBuf {
@@ -742,30 +920,356 @@ mod tests {
     }
 
     #[test]
+    fn field_level_settings_updates_preserve_other_domains_and_advance_revision() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        let initial = store.create("pass-123456").unwrap();
+        let proxy = AppProxyOptions {
+            enabled: true,
+            kind: "socks5".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 1080,
+        };
+        let proxy_snapshot = store.settings_proxy_update(Some(proxy.clone())).unwrap();
+        let backup = BackupSettings {
+            retention_count: 3,
+            ..BackupSettings::default()
+        };
+        let (backup_snapshot, delete_paths) = store.settings_backup_update(backup.clone()).unwrap();
+
+        assert_eq!(proxy_snapshot.revision, initial.revision + 1);
+        assert_eq!(backup_snapshot.revision, proxy_snapshot.revision + 1);
+        assert_eq!(backup_snapshot.data.settings.proxy, Some(proxy));
+        assert_eq!(backup_snapshot.data.settings.backup, backup);
+        assert!(delete_paths.is_empty());
+    }
+
+    #[test]
+    fn host_key_trust_rejects_a_stale_session_address() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+        let snapshot = store.create_session(session_input("节点A", None)).unwrap();
+        let session_id = snapshot.data.sessions[0].id.clone();
+        let revision = snapshot.revision;
+
+        assert!(store
+            .trust_host_key(
+                &session_id,
+                "changed.example.com",
+                22,
+                "ssh-ed25519".to_string(),
+                "SHA256:stale".to_string(),
+            )
+            .is_err());
+        let unchanged = store.snapshot().unwrap();
+        assert_eq!(unchanged.revision, revision);
+        assert!(unchanged.data.known_hosts.is_empty());
+
+        let trusted = store
+            .trust_host_key(
+                &session_id,
+                "127.0.0.1",
+                22,
+                "ssh-ed25519".to_string(),
+                "SHA256:current".to_string(),
+            )
+            .unwrap();
+        assert_eq!(trusted.data.known_hosts.len(), 1);
+        assert_eq!(trusted.data.known_hosts[0].fingerprint, "SHA256:current");
+    }
+
+    #[test]
+    fn quick_command_upsert_and_delete_are_atomic_and_validated() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+        let command = QuickCommand {
+            id: " command-a ".to_string(),
+            name: " 查看状态 ".to_string(),
+            command: " systemctl status sshd ".to_string(),
+            created_at: Some("2026-01-01T00:00:00Z".to_string()),
+            updated_at: None,
+        };
+
+        let snapshot = store.quick_command_upsert(command).unwrap();
+        assert_eq!(snapshot.data.settings.quick_commands.len(), 1);
+        assert_eq!(snapshot.data.settings.quick_commands[0].id, "command-a");
+        assert_eq!(snapshot.data.settings.quick_commands[0].name, "查看状态");
+
+        let mut updated = snapshot.data.settings.quick_commands[0].clone();
+        updated.command = "systemctl restart sshd".to_string();
+        let snapshot = store.quick_command_upsert(updated).unwrap();
+        assert_eq!(snapshot.data.settings.quick_commands.len(), 1);
+        assert_eq!(
+            snapshot.data.settings.quick_commands[0].command,
+            "systemctl restart sshd"
+        );
+
+        let before_invalid = store.snapshot().unwrap();
+        assert!(store
+            .quick_command_upsert(QuickCommand {
+                id: "command-b".to_string(),
+                name: " ".to_string(),
+                command: "echo bad".to_string(),
+                created_at: None,
+                updated_at: None,
+            })
+            .is_err());
+        let after_invalid = store.snapshot().unwrap();
+        assert_eq!(after_invalid.revision, before_invalid.revision);
+        assert_eq!(after_invalid.data, before_invalid.data);
+
+        let snapshot = store.quick_command_delete(" command-a ").unwrap();
+        assert!(snapshot.data.settings.quick_commands.is_empty());
+        assert!(store.quick_command_delete("command-a").is_err());
+    }
+
+    #[test]
+    fn ai_api_settings_are_normalized_and_validated_against_sessions() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+        let snapshot = store.create_session(session_input("节点A", None)).unwrap();
+        let session_id = snapshot.data.sessions[0].id.clone();
+
+        let snapshot = store
+            .settings_ai_api_update(AiApiSettingsUpdate {
+                session_ids: vec![session_id.clone(), session_id.clone(), " ".to_string()],
+                port: Some(19880),
+                auto_start: true,
+            })
+            .unwrap();
+        assert_eq!(
+            snapshot.data.settings.ai_api_session_id,
+            Some(session_id.clone())
+        );
+        assert_eq!(snapshot.data.settings.ai_api_session_ids, vec![session_id]);
+        assert!(snapshot.data.settings.ai_api_auto_start);
+
+        assert!(store
+            .settings_ai_api_update(AiApiSettingsUpdate {
+                session_ids: vec!["missing".to_string()],
+                port: Some(19880),
+                auto_start: false,
+            })
+            .is_err());
+        assert!(store
+            .settings_ai_api_update(AiApiSettingsUpdate {
+                session_ids: Vec::new(),
+                port: Some(19880),
+                auto_start: true,
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn deleting_session_prunes_ai_api_authorization_and_disables_empty_autostart() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+        let first = store.create_session(session_input("节点A", None)).unwrap();
+        let first_id = first.data.sessions[0].id.clone();
+        let second = store.create_session(session_input("节点B", None)).unwrap();
+        let second_id = second.data.sessions[1].id.clone();
+        store
+            .settings_ai_api_update(AiApiSettingsUpdate {
+                session_ids: vec![first_id.clone(), second_id.clone()],
+                port: Some(19880),
+                auto_start: true,
+            })
+            .unwrap();
+
+        let snapshot = store.delete_session(&first_id).unwrap();
+        assert_eq!(
+            snapshot.data.settings.ai_api_session_ids,
+            vec![second_id.clone()]
+        );
+        assert_eq!(
+            snapshot.data.settings.ai_api_session_id,
+            Some(second_id.clone())
+        );
+        assert!(snapshot.data.settings.ai_api_auto_start);
+
+        let snapshot = store.delete_session(&second_id).unwrap();
+        assert!(snapshot.data.settings.ai_api_session_ids.is_empty());
+        assert_eq!(snapshot.data.settings.ai_api_session_id, None);
+        assert!(!snapshot.data.settings.ai_api_auto_start);
+    }
+
+    #[test]
+    fn ignored_update_version_append_is_normalized_and_idempotent() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+
+        store
+            .settings_ignore_update_version(" v1.2.3 ".to_string())
+            .unwrap();
+        let snapshot = store
+            .settings_ignore_update_version("1.2.3".to_string())
+            .unwrap();
+
+        assert_eq!(
+            snapshot.data.settings.ignored_update_versions,
+            vec!["1.2.3".to_string()]
+        );
+    }
+
+    #[test]
     fn backup_records_are_pruned_by_retention_count() {
         let path = store_path();
         let mut store = VaultStore::new(path);
         store.create("pass-123456").unwrap();
         let mut settings = AppSettings::default();
         settings.backup.retention_count = 1;
-        store.settings_update(settings).unwrap();
+        settings.backup.local_directory = Some("C:\\backup".to_string());
+        store.settings_backup_update(settings.backup).unwrap();
 
         let first = BackupRecord::success(
-            "a.rpvault".to_string(),
+            "HelM-backup-a.rpvault".to_string(),
             "local",
-            "C:\\backup\\a.rpvault".to_string(),
+            "C:\\backup\\HelM-backup-a.rpvault".to_string(),
             10,
         );
         let second = BackupRecord::success(
-            "b.rpvault".to_string(),
+            "HelM-backup-b.rpvault".to_string(),
             "local",
-            "C:\\backup\\b.rpvault".to_string(),
+            "C:\\backup\\HelM-backup-b.rpvault".to_string(),
             10,
         );
 
         let (_snapshot, delete_paths) = store.add_backup_records(vec![first, second]).unwrap();
         assert_eq!(store.snapshot().unwrap().data.backup_records.len(), 1);
         assert_eq!(delete_paths.len(), 1);
+    }
+
+    #[test]
+    fn lowering_backup_retention_prunes_existing_records_and_uses_previous_directory() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+        let old_directory = PathBuf::from("C:\\backup-old");
+        let initial = BackupSettings {
+            local_directory: Some(old_directory.to_string_lossy().to_string()),
+            retention_count: 10,
+            retention_days: 3650,
+            ..BackupSettings::default()
+        };
+        store.settings_backup_update(initial).unwrap();
+
+        let older = BackupRecord {
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            ..BackupRecord::success(
+                "HelM-backup-old.zip".to_string(),
+                "local",
+                old_directory
+                    .join("HelM-backup-old.zip")
+                    .to_string_lossy()
+                    .to_string(),
+                10,
+            )
+        };
+        let newer = BackupRecord {
+            created_at: "2026-01-02T00:00:00Z".to_string(),
+            ..BackupRecord::success(
+                "HelM-backup-new.zip".to_string(),
+                "local",
+                old_directory
+                    .join("HelM-backup-new.zip")
+                    .to_string_lossy()
+                    .to_string(),
+                10,
+            )
+        };
+        store.add_backup_records(vec![older, newer]).unwrap();
+
+        let updated = BackupSettings {
+            local_directory: Some("C:\\backup-new".to_string()),
+            retention_count: 1,
+            retention_days: 3650,
+            ..BackupSettings::default()
+        };
+        let (snapshot, delete_paths) = store.settings_backup_update(updated).unwrap();
+
+        assert_eq!(snapshot.data.backup_records.len(), 1);
+        assert_eq!(
+            snapshot.data.backup_records[0].file_name,
+            "HelM-backup-new.zip"
+        );
+        assert_eq!(
+            delete_paths,
+            vec![BackupCleanupTarget::Local(
+                old_directory.join("HelM-backup-old.zip")
+            )]
+        );
+    }
+
+    #[test]
+    fn failed_backups_do_not_displace_the_latest_successful_restore_point() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+        let settings = BackupSettings {
+            retention_count: 1,
+            retention_days: 3650,
+            ..BackupSettings::default()
+        };
+        store.settings_backup_update(settings).unwrap();
+        let success = BackupRecord {
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            ..BackupRecord::success(
+                "HelM-backup-success.zip".to_string(),
+                "webdav",
+                "https://dav.example/HelM-backup-success.zip".to_string(),
+                10,
+            )
+        };
+        let failure = BackupRecord {
+            created_at: "2026-01-02T00:00:00Z".to_string(),
+            ..BackupRecord::failed(
+                "HelM-backup-failed.zip".to_string(),
+                "webdav",
+                "https://dav.example".to_string(),
+                "network error".to_string(),
+            )
+        };
+
+        let (snapshot, _) = store.add_backup_records(vec![success, failure]).unwrap();
+
+        assert_eq!(snapshot.data.backup_records.len(), 2);
+        assert!(snapshot
+            .data
+            .backup_records
+            .iter()
+            .any(|record| record.status == "success"));
+        assert!(snapshot
+            .data
+            .backup_records
+            .iter()
+            .any(|record| record.status == "failed"));
+    }
+
+    #[test]
+    fn deleting_a_tampered_backup_record_never_authorizes_an_external_file() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+        let mut settings = AppSettings::default();
+        settings.backup.local_directory = Some("C:\\backup".to_string());
+        store.settings_backup_update(settings.backup).unwrap();
+        let record = BackupRecord::success(
+            "HelM-backup-safe.zip".to_string(),
+            "local",
+            "C:\\outside\\HelM-backup-safe.zip".to_string(),
+            10,
+        );
+        let record_id = record.id.clone();
+        store.add_backup_records(vec![record]).unwrap();
+
+        let (snapshot, delete_path) = store.delete_backup_record(&record_id, true).unwrap();
+        assert!(snapshot.data.backup_records.is_empty());
+        assert!(delete_path.is_none());
     }
 
     #[test]
@@ -872,5 +1376,49 @@ mod tests {
         assert!(store
             .create_tunnel(tunnel_input("缺失会话", "missing".to_string()))
             .is_err());
+    }
+
+    #[test]
+    fn tunnel_update_validation_does_not_mutate_existing_template() {
+        let path = store_path();
+        let mut store = VaultStore::new(path);
+        store.create("pass-123456").unwrap();
+        let snapshot = store.create_session(session_input("节点A", None)).unwrap();
+        let session_id = snapshot.data.sessions[0].id.clone();
+        let snapshot = store
+            .create_tunnel(tunnel_input("数据库", session_id))
+            .unwrap();
+        let tunnel_id = snapshot.data.tunnels[0].id.clone();
+        let before = store.snapshot().unwrap();
+
+        let invalid = tunnel_input(" ", before.data.sessions[0].id.clone());
+        assert!(store.validate_tunnel_update(&tunnel_id, &invalid).is_err());
+        assert!(store
+            .validate_tunnel_update(
+                "missing",
+                &tunnel_input("有效", before.data.sessions[0].id.clone())
+            )
+            .is_err());
+        let after = store.snapshot().unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.data, before.data);
+    }
+
+    #[test]
+    fn failed_persistence_does_not_mutate_in_memory_snapshot() {
+        let path = store_path();
+        let mut store = VaultStore::new(path.clone());
+        store.create("pass-123456").unwrap();
+        let before = store.snapshot().unwrap();
+
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let result = store.create_group(GroupInput {
+            name: "不应保留".to_string(),
+            parent_id: None,
+        });
+
+        assert!(result.is_err());
+        assert_eq!(store.snapshot().unwrap().data, before.data);
     }
 }

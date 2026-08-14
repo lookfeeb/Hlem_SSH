@@ -2,7 +2,7 @@ use serde_json::Value;
 
 const API_FIELD_CATALOG_JSON: &str = r###"
 {
-  "version": 2,
+  "version": 3,
   "title": "HelM AI API 字段库",
   "description": "本地 SSH/SFTP 网关，仅提供 HTTP REST。",
   "auth": {
@@ -85,7 +85,7 @@ const API_FIELD_CATALOG_JSON: &str = r###"
       "category": "文件",
       "method": "PUT",
       "path": "/api/upload",
-      "summary": "上传文件原始字节到远端路径",
+      "summary": "原子上传文件原始字节到远端路径，最大 512MB",
       "querySchema": "UploadQuery",
       "bodyRaw": "文件原始字节流",
       "responseSchema": "UploadResponse"
@@ -344,6 +344,21 @@ const API_FIELD_CATALOG_JSON: &str = r###"
       { "name": "webdav", "type": "WebdavBackupConfig", "description": "WebDAV 配置" },
       { "name": "s3", "type": "S3BackupConfig", "description": "S3 配置" }
     ],
+    "WebdavBackupConfig": [
+      { "name": "endpoint", "type": "string", "description": "WebDAV 服务地址" },
+      { "name": "username", "type": "string", "description": "用户名" },
+      { "name": "password", "type": "string", "required": false, "description": "密码；仅写入，读取响应固定为空；更新时为空会保留原值" },
+      { "name": "remotePath", "type": "string", "description": "远端备份目录" }
+    ],
+    "S3BackupConfig": [
+      { "name": "endpoint", "type": "string", "description": "S3 兼容服务地址" },
+      { "name": "region", "type": "string", "description": "区域" },
+      { "name": "bucket", "type": "string", "description": "存储桶" },
+      { "name": "accessKeyId", "type": "string", "description": "访问密钥 ID" },
+      { "name": "secretAccessKey", "type": "string", "required": false, "description": "访问密钥；仅写入，读取响应固定为空；更新时为空会保留原值" },
+      { "name": "prefix", "type": "string", "description": "对象键前缀" },
+      { "name": "pathStyle", "type": "boolean", "description": "是否使用路径风格地址" }
+    ],
     "BackupRecord": [
       { "name": "id", "type": "string", "description": "备份记录 ID" },
       { "name": "fileName", "type": "string", "description": "备份文件名" },
@@ -363,7 +378,7 @@ const API_FIELD_CATALOG_JSON: &str = r###"
   },
   "rules": [
     "所有端点都需要 Authorization: Bearer <api_key>。",
-    "POST/PUT/PATCH 请求默认使用 Content-Type: application/json；/api/upload 例外，body 是原始字节流。",
+    "POST/PUT/PATCH 请求默认使用 Content-Type: application/json；/api/upload 例外，body 是最大 512MB 的原始字节流，写入完成后才原子替换目标文件。",
     "exec、exec/batch、latency、files、upload、download 会自动建立并复用 SSH/SFTP 连接；无需先调用 connect。",
     "授权会话为空时 API 不会启动；运行中清空授权会话会立即停止服务。",
     "未知主机密钥不会自动信任，需用户在 HelM 主窗口确认指纹。",
@@ -381,16 +396,45 @@ pub fn catalog_json() -> Result<Value, serde_json::Error> {
 #[cfg(test)]
 mod tests {
     use super::catalog_json;
+    use std::collections::HashSet;
 
     #[test]
     fn catalog_json_is_valid() {
         let catalog = catalog_json().expect("api field catalog should be valid json");
-        assert_eq!(catalog["version"].as_u64(), Some(2));
+        assert_eq!(catalog["version"].as_u64(), Some(3));
         assert!(catalog["endpoints"]
             .as_array()
             .is_some_and(|items| !items.is_empty()));
         assert!(catalog["schemas"]
             .as_object()
             .is_some_and(|items| !items.is_empty()));
+    }
+
+    #[test]
+    fn every_endpoint_schema_reference_exists() {
+        let catalog = catalog_json().unwrap();
+        let schema_names = catalog["schemas"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        for endpoint in catalog["endpoints"].as_array().unwrap() {
+            for field in ["responseSchema", "bodySchema", "querySchema", "pathSchema"] {
+                let Some(reference) = endpoint[field].as_str() else {
+                    continue;
+                };
+                let reference = reference.strip_suffix("[]").unwrap_or(reference);
+                if reference == "binary" {
+                    continue;
+                }
+                assert!(
+                    schema_names.contains(reference),
+                    "missing schema {reference} for {} {}",
+                    endpoint["method"].as_str().unwrap_or("?"),
+                    endpoint["path"].as_str().unwrap_or("?")
+                );
+            }
+        }
     }
 }

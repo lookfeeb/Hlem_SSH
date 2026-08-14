@@ -33,17 +33,21 @@ import { EDITOR_CHANNEL_NAME, type EditorChannelMessage } from "../lib/editorCha
 import { getBaseName, getParentPath, joinPath, normalizePath } from "../lib/path";
 import { isTauriRuntime } from "../api/runtime";
 import { useMountedRef } from "../lib/reactLifecycle";
+import { onSftpDirectoryInvalidation } from "../lib/sftpDirectoryEvents";
+import { createLatestRequestTracker } from "../lib/keyedInFlight";
 import { sortRemoteEntries, compareEntryGroup, compareEntryName, formatBeijingModifiedTime } from "../lib/fileClassify";
 import { fileCategoryMeta } from "./fileManager/fileIcons";
 import { QuickCommandDock, QuickCommandTopArea } from "./fileManager/QuickCommandPanel";
 import { FileDialogs, operationLabel, type FileDialogState } from "./fileManager/FileDialogs";
-import { DirectoryTree, buildTreeData, getDirectoryParentPaths, uniqueKeys } from "./fileManager/DirectoryTree";
+import { DirectoryTree, buildTreeData } from "./fileManager/DirectoryTree";
 import { contextMenuPositionInContainer } from "./fileManager/contextMenuPosition";
 import type { RemoteDownloadSelection } from "../app/remoteDownloadPlan";
 import {
-  filesBelongToDirectory,
+  expandDirectoryParentsForPathChange,
   loadDirectoryViewState,
+  sameDirectorySession,
   saveDirectoryViewState,
+  uniqueKeys,
 } from "./fileManager/directoryViewState";
 import type { QuickCommand, RemoteFileEntry, RemoteSession } from "../types";
 
@@ -52,16 +56,17 @@ interface FileManagerProps {
   active: boolean;
   onPathChange: (path: string) => void;
   onRefresh: () => Promise<void>;
-  onRemoteSearch: (query: string) => Promise<string | null>;
-  onListDirectory: (path: string) => Promise<RemoteFileEntry[]>;
-  onFileOperation: (operation: FileOperation) => Promise<void>;
+  onRemoteSearch: (query: string, signal?: AbortSignal) => Promise<string | null>;
+  onListDirectory: (path: string, force?: boolean) => Promise<RemoteFileEntry[]>;
+  onFileOperation: (operation: FileOperation) => Promise<string[]>;
   onUploadFiles: (localPaths: string[], targetDirectory: string) => Promise<void>;
   onDownloadFiles: (files: RemoteDownloadSelection[]) => Promise<void>;
   onReadText: (path: string, sessionId?: string) => Promise<string>;
   onWriteText: (path: string, content: string, sessionId?: string) => Promise<void>;
   onSendCommand: (command: string) => Promise<void>;
   quickCommands: QuickCommand[];
-  onQuickCommandsChange: (commands: QuickCommand[]) => Promise<void>;
+  onQuickCommandUpsert: (command: QuickCommand) => Promise<void>;
+  onQuickCommandDelete: (commandId: string) => Promise<void>;
   filesLoading?: boolean;
 }
 
@@ -244,6 +249,26 @@ type EditorWriteText = (path: string, content: string, sessionId?: string) => Pr
 let sharedDetachedEditorChannel: BroadcastChannel | null = null;
 let sharedDetachedEditorWindow: Window | null = null;
 let sharedEditorWriteText: EditorWriteText | null = null;
+let sharedDetachedEditorReady = false;
+const pendingDetachedEditorTabs = new Map<string, DetachedEditorTabPayload>();
+
+function detachedEditorTabKey(tab: DetachedEditorTabPayload) {
+  return `${tab.sessionId}\u0000${tab.path}`;
+}
+
+function flushPendingDetachedEditorTabs(channel: BroadcastChannel) {
+  const tabs = Array.from(pendingDetachedEditorTabs.values());
+  if (tabs.length === 0) return;
+  tabs.forEach((tab, index) => {
+    const sent = postEditorMessage(channel, { type: index === 0 ? "init" : "addTab", ...tab });
+    if (sent) pendingDetachedEditorTabs.delete(detachedEditorTabKey(tab));
+  });
+}
+
+function queueDetachedEditorTab(channel: BroadcastChannel, tab: DetachedEditorTabPayload) {
+  if (sharedDetachedEditorReady && postEditorMessage(channel, { type: "addTab", ...tab })) return;
+  pendingDetachedEditorTabs.set(detachedEditorTabKey(tab), tab);
+}
 
 function closeDetachedEditorChannel(channel?: BroadcastChannel) {
   if (channel && sharedDetachedEditorChannel !== channel) return;
@@ -253,16 +278,25 @@ function closeDetachedEditorChannel(channel?: BroadcastChannel) {
   if (sharedDetachedEditorChannel === target) sharedDetachedEditorChannel = null;
   sharedDetachedEditorWindow = null;
   sharedEditorWriteText = null;
+  sharedDetachedEditorReady = false;
+  pendingDetachedEditorTabs.clear();
+}
+
+export function closeSharedDetachedEditorChannel() {
+  closeDetachedEditorChannel();
 }
 
 function createDetachedEditorChannel(initialTab: DetachedEditorTabPayload, writeText: EditorWriteText) {
   const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
   sharedDetachedEditorChannel = channel;
   sharedEditorWriteText = writeText;
+  sharedDetachedEditorReady = false;
+  pendingDetachedEditorTabs.set(detachedEditorTabKey(initialTab), initialTab);
   channel.onmessage = (event: MessageEvent<EditorChannelMessage>) => {
     const payload = event.data;
     if (payload.type === "ready") {
-      postEditorMessage(channel, { type: "init", ...initialTab });
+      sharedDetachedEditorReady = true;
+      flushPendingDetachedEditorTabs(channel);
     }
     if (payload.type === "save") {
       const save = sharedEditorWriteText;
@@ -314,7 +348,8 @@ function FileManagerView({
   onWriteText,
   onSendCommand,
   quickCommands,
-  onQuickCommandsChange,
+  onQuickCommandUpsert,
+  onQuickCommandDelete,
   filesLoading = false,
 }: FileManagerProps) {
   const { message, modal } = AntdApp.useApp();
@@ -337,11 +372,14 @@ function FileManagerView({
     () => loadDirectoryViewState(session).expandedKeys,
   );
   const [dragging, setDragging] = useState(false);
-  const [openingEditorPath, setOpeningEditorPath] = useState<string | null>(null);
+  const openingEditorRequestRef = useRef<string | null>(null);
+  const refreshRequestRef = useRef<string | null>(null);
   const [commandDialogOpen, setCommandDialogOpen] = useState(false);
   const [commandEditingId, setCommandEditingId] = useState<string | null>(null);
   const [commandName, setCommandName] = useState("");
   const [commandValue, setCommandValue] = useState("");
+  const [commandSaving, setCommandSaving] = useState(false);
+  const commandDialogRequestRef = useRef(0);
   const [quickCommandsOpen, setQuickCommandsOpen] = useState(false);
   const [quickCommandDockWidth, setQuickCommandDockWidth] = useState(loadQuickCommandDockWidth);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => ({ ...inMemoryColumnWidths }));
@@ -350,12 +388,32 @@ function FileManagerView({
   const effectiveColumnWidthsRef = useRef(columnWidths);
   const mountedRef = useMountedRef();
   const sessionIdRef = useRef(session.id);
-  const directoryRequestSeqRef = useRef<Map<string, number>>(new Map());
+  const sessionConnectionIdRef = useRef(session.connectionId ?? null);
+  const sessionTerminalIdRef = useRef(session.terminalId ?? null);
+  const activeRef = useRef(active);
+  const directoryRequestTrackerRef = useRef(createLatestRequestTracker<string>());
   const directoryStateSessionIdRef = useRef(session.id);
   const directoryStateSftpIdRef = useRef(session.sftpId ?? null);
   const directoryEntriesRef = useRef(directoryEntries);
   const directoryExpandedKeysRef = useRef(directoryExpandedKeys);
+  const directoryPathRef = useRef(normalizePath(session.currentPath));
+  const pathRef = useRef(normalizePath(session.currentPath));
   sessionIdRef.current = session.id;
+  sessionConnectionIdRef.current = session.connectionId ?? null;
+  sessionTerminalIdRef.current = session.terminalId ?? null;
+  activeRef.current = active;
+  pathRef.current = normalizePath(session.currentPath);
+
+  function invalidateOpeningEditorRequest() {
+    const requestId = openingEditorRequestRef.current;
+    openingEditorRequestRef.current = null;
+    if (requestId) message.destroy(`editor-open-${requestId}`);
+  }
+
+  function invalidateRefreshRequest() {
+    refreshRequestRef.current = null;
+    setRefreshing(false);
+  }
   useEffect(() => {
     const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
     const publishMetadata = () => postEditorMessage(channel, {
@@ -394,6 +452,7 @@ function FileManagerView({
     saveDirectoryViewState(
       directoryStateSessionIdRef.current,
       directoryStateSftpIdRef.current,
+      directoryPathRef.current,
       entries,
       expandedKeys,
     );
@@ -414,10 +473,22 @@ function FileManagerView({
   }
 
   function directoryViewMatchesRender() {
-    return directoryStateSessionIdRef.current === session.id
-      && directoryStateSftpIdRef.current === (session.sftpId ?? null)
+    return directorySessionMatchesRender()
       && directoryEntriesRef.current === directoryEntries
       && directoryExpandedKeysRef.current === directoryExpandedKeys;
+  }
+
+  function directorySessionMatchesRender() {
+    return sameDirectorySession(
+      {
+        sessionId: directoryStateSessionIdRef.current,
+        sftpId: directoryStateSftpIdRef.current,
+      },
+      {
+        sessionId: session.id,
+        sftpId: session.sftpId ?? null,
+      },
+    );
   }
 
   useLayoutEffect(() => {
@@ -432,23 +503,27 @@ function FileManagerView({
     directoryStateSftpIdRef.current = nextSftpId;
     directoryEntriesRef.current = nextDirectoryView.entries;
     directoryExpandedKeysRef.current = nextDirectoryView.expandedKeys;
+    directoryPathRef.current = normalizePath(session.currentPath);
     setDirectoryEntries(nextDirectoryView.entries);
     setDirectoryExpandedKeys(nextDirectoryView.expandedKeys);
     setDirectoryLoadingKeys([]);
-    directoryRequestSeqRef.current.clear();
+    directoryRequestTrackerRef.current.clear();
 
-    if (!sessionChanged) return;
     searchSeq.current += 1;
-    setSearchText("");
     setSearching(false);
+    invalidateOpeningEditorRequest();
+    invalidateRefreshRequest();
+    setSearchText("");
     setFocusedPath(null);
     setSelectedRowKeys([]);
     setContextMenu(null);
     setDialog(null);
     setDragging(false);
-    setOpeningEditorPath(null);
+    if (!sessionChanged) return;
     setCommandDialogOpen(false);
     setCommandEditingId(null);
+    setCommandSaving(false);
+    commandDialogRequestRef.current += 1;
   }, [session.id, session.sftpId]);
 
   const path = normalizePath(session.currentPath);
@@ -470,7 +545,9 @@ function FileManagerView({
   useEffect(() => {
     effectiveColumnWidthsRef.current = effectiveColumnWidths;
   }, [effectiveColumnWidths]);
-  const filesMatchCurrentPath = filesBelongToDirectory(allFiles, path);
+  const filesMatchCurrentPath = Boolean(
+    session.filesPath && normalizePath(session.filesPath) === path,
+  );
   const directoryChanging = canUseFiles && (filesLoading || !filesMatchCurrentPath);
   const tableLoading = searching || refreshing || directoryChanging;
   const treeData = useMemo(() => buildTreeData(directoryEntries, path, new Set(directoryLoadingKeys)), [directoryEntries, path, directoryLoadingKeys]);
@@ -634,33 +711,42 @@ function FileManagerView({
         current[path] === allFiles ? current : { ...current, [path]: allFiles },
       );
     }
-    updateDirectoryExpandedKeys((current) => {
-      const next = uniqueKeys([...current, ...getDirectoryParentPaths(path)]);
-      return sameStringArray(current, next) ? current : next;
-    });
+    const previousPath = directoryPathRef.current;
+    directoryPathRef.current = path;
+    if (normalizePath(previousPath) !== path) persistDirectoryViewState();
+    const nextExpandedKeys = expandDirectoryParentsForPathChange(
+      directoryExpandedKeysRef.current,
+      previousPath,
+      path,
+    );
+    if (nextExpandedKeys !== directoryExpandedKeysRef.current) {
+      updateDirectoryExpandedKeys(nextExpandedKeys);
+    }
     if (path !== "/" && !directoryEntries["/"]) void loadDirectory("/");
-  }, [allFiles, canUseFiles, path, directoryEntries, directoryExpandedKeys]);
+  }, [allFiles, canUseFiles, path, directoryEntries]);
 
   async function loadDirectory(directoryPath: string, force = false) {
-    if (!canUseFiles || !directoryViewMatchesRender()) return;
+    // 展开事件会先同步更新 expandedKeys 的 ref，再触发目录加载；此时 React
+    // 还没提交新一轮渲染，完整的 view identity 必然暂时不一致。目录请求只需
+    // 绑定当前会话/SFTP，结果落地时下方的请求身份检查仍会拦截真正的旧请求。
+    if (!canUseFiles || !directorySessionMatchesRender()) return;
     const targetPath = normalizePath(directoryPath);
-    if (!force && directoryEntries[targetPath]) return;
+    if (!force && directoryEntriesRef.current[targetPath]) return;
     const requestSessionId = session.id;
     const requestSftpId = session.sftpId ?? null;
     const requestKey = `${requestSessionId}:${targetPath}`;
-    const requestSeq = (directoryRequestSeqRef.current.get(requestKey) ?? 0) + 1;
-    directoryRequestSeqRef.current.set(requestKey, requestSeq);
+    const requestSeq = directoryRequestTrackerRef.current.begin(requestKey);
     setDirectoryLoadingKeys((current) => uniqueKeys([...current, targetPath]));
     try {
-      const entries = targetPath === path && filesBelongToDirectory(allFiles, targetPath)
+      const entries = !force && targetPath === path && filesMatchCurrentPath
         ? allFiles
-        : await onListDirectory(targetPath);
+        : await onListDirectory(targetPath, force);
       if (
         !mountedRef.current ||
         sessionIdRef.current !== requestSessionId ||
         directoryStateSessionIdRef.current !== requestSessionId ||
         directoryStateSftpIdRef.current !== requestSftpId ||
-        directoryRequestSeqRef.current.get(requestKey) !== requestSeq
+        !directoryRequestTrackerRef.current.isCurrent(requestKey, requestSeq)
       ) return;
       updateDirectoryEntries((current) => ({ ...current, [targetPath]: sortRemoteEntries(entries) }));
     } catch (error) {
@@ -669,7 +755,7 @@ function FileManagerView({
         sessionIdRef.current === requestSessionId &&
         directoryStateSessionIdRef.current === requestSessionId &&
         directoryStateSftpIdRef.current === requestSftpId &&
-        directoryRequestSeqRef.current.get(requestKey) === requestSeq
+        directoryRequestTrackerRef.current.isCurrent(requestKey, requestSeq)
       ) {
         message.error(getErrorMessage(error));
       }
@@ -679,21 +765,11 @@ function FileManagerView({
         sessionIdRef.current === requestSessionId &&
         directoryStateSessionIdRef.current === requestSessionId &&
         directoryStateSftpIdRef.current === requestSftpId &&
-        directoryRequestSeqRef.current.get(requestKey) === requestSeq
+        directoryRequestTrackerRef.current.complete(requestKey, requestSeq)
       ) {
-        directoryRequestSeqRef.current.delete(requestKey);
         setDirectoryLoadingKeys((current) => current.filter((key) => key !== targetPath));
       }
     }
-  }
-
-  function toggleDirectory(directoryPath: string) {
-    const targetPath = normalizePath(directoryPath);
-    const isExpanded = directoryExpandedKeysRef.current.includes(targetPath);
-    updateDirectoryExpandedKeys((current) =>
-      current.includes(targetPath) ? current.filter((key) => key !== targetPath) : uniqueKeys([...current, targetPath]),
-    );
-    if (!isExpanded) void loadDirectory(targetPath);
   }
 
   useEffect(() => {
@@ -705,6 +781,7 @@ function FileManagerView({
     const query = searchText.trim();
     const seq = searchSeq.current + 1;
     searchSeq.current = seq;
+    const controller = new AbortController();
     if (!query) {
       setSearching(false);
       setFocusedPath(null);
@@ -712,7 +789,7 @@ function FileManagerView({
     }
     const timer = window.setTimeout(() => {
       setSearching(true);
-      void onRemoteSearch(query)
+      void onRemoteSearch(query, controller.signal)
         .then((targetPath) => {
           if (!mountedRef.current || searchSeq.current !== seq) return;
           setFocusedPath(targetPath);
@@ -726,8 +803,11 @@ function FileManagerView({
           if (mountedRef.current && searchSeq.current === seq) setSearching(false);
         });
     }, 450);
-    return () => window.clearTimeout(timer);
-  }, [active, canUseFiles, searchText, session.id]);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [active, canUseFiles, path, searchText, session.id]);
 
   useEffect(() => {
     if (!active || !canUseFiles) return;
@@ -770,9 +850,12 @@ function FileManagerView({
     setContextMenu(null);
     setDialog(null);
     setDragging(false);
-    setOpeningEditorPath(null);
+    invalidateOpeningEditorRequest();
+    invalidateRefreshRequest();
     setCommandDialogOpen(false);
     setCommandEditingId(null);
+    setCommandSaving(false);
+    commandDialogRequestRef.current += 1;
   }, [active]);
 
   function openDirectory(entry: RemoteFileEntry) {
@@ -790,36 +873,43 @@ function FileManagerView({
   async function openEditor(entry: RemoteFileEntry) {
     if (!canUseFiles) return;
     const targetPath = entry.path || joinPath(path, entry.name);
-    if (openingEditorPath) return;
+    if (openingEditorRequestRef.current) return;
 
     const sessionId = session.id;
+    const requestSftpId = session.sftpId;
     const sessionName = sessionEditorName;
     const sessionHost = sessionEditorHost;
+    const requestId = crypto.randomUUID();
 
-    setOpeningEditorPath(targetPath);
-    const messageKey = `editor-open-${targetPath}`;
+    openingEditorRequestRef.current = requestId;
+    const messageKey = `editor-open-${requestId}`;
     let createdChannel: BroadcastChannel | null = null;
     message.open({ key: messageKey, type: "loading", content: "正在读取文件...", duration: 0 });
     try {
       const content = await onReadText(targetPath, sessionId);
-      if (!mountedRef.current) return;
+      if (
+        !mountedRef.current
+        || openingEditorRequestRef.current !== requestId
+        || sessionIdRef.current !== sessionId
+        || directoryStateSftpIdRef.current !== requestSftpId
+      ) return;
 
       const initialTab = { path: targetPath, content, sessionId, sessionName, sessionHost };
 
       if (isTauriRuntime()) {
         const { WebviewWindow } = await import("@tauri-apps/api/webviewWindow");
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || openingEditorRequestRef.current !== requestId) return;
         const existingWindow = await WebviewWindow.getByLabel(DETACHED_EDITOR_WINDOW_LABEL);
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || openingEditorRequestRef.current !== requestId) return;
         if (existingWindow) {
           const channel = getOrCreateDetachedEditorChannel(initialTab, onWriteText);
-          postEditorMessage(channel, { type: "addTab", ...initialTab });
+          queueDetachedEditorTab(channel, initialTab);
           try {
             await existingWindow.setFocus();
           } catch (error) {
             console.warn("[helm] failed to focus editor window:", getErrorMessage(error));
           }
-          if (mountedRef.current) message.destroy(messageKey);
+          if (mountedRef.current && openingEditorRequestRef.current === requestId) message.destroy(messageKey);
           return;
         }
 
@@ -846,7 +936,9 @@ function FileManagerView({
         await Promise.all([
           webview.once("tauri://error", (event) => {
             closeDetachedEditorChannel(channel);
-            if (mountedRef.current) message.error(getErrorMessage(event.payload));
+            if (mountedRef.current && openingEditorRequestRef.current === requestId) {
+              message.error(getErrorMessage(event.payload));
+            }
           }),
           webview.once("tauri://destroyed", () => {
             closeDetachedEditorChannel(channel);
@@ -858,13 +950,13 @@ function FileManagerView({
           closeDetachedEditorChannel();
         } else if (existingWindow) {
           const channel = getOrCreateDetachedEditorChannel(initialTab, onWriteText);
-          postEditorMessage(channel, { type: "addTab", ...initialTab });
+          queueDetachedEditorTab(channel, initialTab);
           try {
             existingWindow.focus();
           } catch (error) {
             console.warn("[helm] failed to focus editor window:", getErrorMessage(error));
           }
-          if (mountedRef.current) message.destroy(messageKey);
+          if (mountedRef.current && openingEditorRequestRef.current === requestId) message.destroy(messageKey);
           return;
         }
 
@@ -877,27 +969,44 @@ function FileManagerView({
         }
         sharedDetachedEditorWindow = editorWindow;
       }
-      if (mountedRef.current) message.destroy(messageKey);
+      if (mountedRef.current && openingEditorRequestRef.current === requestId) message.destroy(messageKey);
     } catch (error) {
       if (createdChannel && sharedDetachedEditorChannel === createdChannel) {
         closeDetachedEditorChannel(createdChannel);
       }
-      if (mountedRef.current) {
+      if (mountedRef.current && openingEditorRequestRef.current === requestId) {
         message.open({ key: messageKey, type: "error", content: getErrorMessage(error), duration: 3 });
       }
     } finally {
-      if (mountedRef.current) setOpeningEditorPath(null);
+      if (mountedRef.current && openingEditorRequestRef.current === requestId) {
+        openingEditorRequestRef.current = null;
+      }
     }
   }
 
   async function uploadPaths(localPaths: string[]) {
     if (!canUseFiles) return;
     if (localPaths.length === 0) return;
+    const requestSessionId = session.id;
+    const requestSftpId = session.sftpId ?? null;
+    const targetDirectory = path;
     try {
-      await onUploadFiles(localPaths, path);
-      if (mountedRef.current) message.success(`已开始上传 ${localPaths.length} 个文件`);
+      await onUploadFiles(localPaths, targetDirectory);
+      if (
+        mountedRef.current
+        && sessionIdRef.current === requestSessionId
+        && directoryStateSftpIdRef.current === requestSftpId
+      ) {
+        message.success(`已开始上传 ${localPaths.length} 个文件`);
+      }
     } catch (error) {
-      if (mountedRef.current) message.error(getErrorMessage(error));
+      if (
+        mountedRef.current
+        && sessionIdRef.current === requestSessionId
+        && directoryStateSftpIdRef.current === requestSftpId
+      ) {
+        message.error(getErrorMessage(error));
+      }
     }
   }
 
@@ -934,26 +1043,118 @@ function FileManagerView({
 
   async function refresh() {
     if (!canRefreshFiles) return;
+    if (refreshRequestRef.current) return;
+    const requestId = crypto.randomUUID();
+    const requestSessionId = session.id;
+    const requestConnectionId = session.connectionId ?? null;
+    const requestSftpId = session.sftpId ?? null;
+    refreshRequestRef.current = requestId;
     setRefreshing(true);
     try {
       await onRefresh();
+    } catch (error) {
+      if (
+        mountedRef.current
+        && refreshRequestRef.current === requestId
+        && activeRef.current
+        && sessionIdRef.current === requestSessionId
+        && sessionConnectionIdRef.current === requestConnectionId
+        && (requestSftpId === null || directoryStateSftpIdRef.current === requestSftpId)
+      ) {
+        message.error(`刷新失败：${getErrorMessage(error)}`);
+      }
     } finally {
-      if (mountedRef.current) setRefreshing(false);
+      if (mountedRef.current && refreshRequestRef.current === requestId) {
+        refreshRequestRef.current = null;
+        setRefreshing(false);
+      }
     }
   }
 
+  useEffect(() => onSftpDirectoryInvalidation((event) => {
+    if (
+      !mountedRef.current
+      || !canUseFiles
+      || directoryStateSftpIdRef.current !== event.sftpId
+      || !directorySessionMatchesRender()
+    ) return;
+    const changedDirectories = event.directories.map(normalizePath);
+    const changedDirectorySet = new Set(changedDirectories);
+    for (const directory of changedDirectories) {
+      // 先让已在途的旧目录请求失效；随后对展开目录发起的强制加载会取得
+      // 新的全局版本号，因此旧响应无论何时到达都不能重新写入缓存。
+      directoryRequestTrackerRef.current.invalidate(`${session.id}:${directory}`);
+    }
+    setDirectoryLoadingKeys((current) => current.filter((directory) => !changedDirectorySet.has(directory)));
+    updateDirectoryEntries((current) => {
+      let next = current;
+      for (const directory of changedDirectories) {
+        if (!(directory in next)) continue;
+        if (next === current) next = { ...current };
+        delete next[directory];
+      }
+      return next;
+    });
+    for (const directory of changedDirectories) {
+      if (directory !== path && directoryExpandedKeysRef.current.includes(directory)) {
+        void loadDirectory(directory, true);
+      }
+    }
+  }), [canUseFiles, path, session.id, session.sftpId]);
+
   function startBackgroundOperation(operation: FileOperation) {
-    if (!canUseFiles) return;
+    const requestSessionId = session.id;
+    const requestSftpId = session.sftpId ?? null;
+    if (
+      !canUseFiles
+      || !requestSftpId
+      || directoryStateSessionIdRef.current !== requestSessionId
+      || directoryStateSftpIdRef.current !== requestSftpId
+    ) return;
     const key = `file-operation-${crypto.randomUUID()}`;
     const label = operationLabel(operation);
     message.open({ key, type: "loading", content: `已开始${label}...`, duration: 0 });
     void onFileOperation(operation)
-      .then(() => {
-        if (mountedRef.current) message.open({ key, type: "success", content: `${label}完成`, duration: 2.5 });
+      .then(async (affectedDirectories) => {
+        if (
+          !mountedRef.current
+          || sessionIdRef.current !== requestSessionId
+          || directoryStateSftpIdRef.current !== requestSftpId
+        ) {
+          message.destroy(key);
+          return;
+        }
+        const refreshResults = await Promise.allSettled(
+          affectedDirectories.map((directory) => {
+            const normalizedDirectory = normalizePath(directory);
+            return normalizedDirectory === pathRef.current
+              ? onRefresh()
+              : loadDirectory(normalizedDirectory, true);
+          }),
+        );
+        if (
+          !mountedRef.current
+          || sessionIdRef.current !== requestSessionId
+          || directoryStateSftpIdRef.current !== requestSftpId
+        ) {
+          message.destroy(key);
+          return;
+        }
+        message.open({ key, type: "success", content: `${label}完成`, duration: 2.5 });
+        const refreshFailure = refreshResults.find((result) => result.status === "rejected");
+        if (refreshFailure?.status === "rejected") {
+          message.warning(`${label}已完成，但目录刷新失败：${getErrorMessage(refreshFailure.reason)}`);
+        }
       })
       .catch((error) => {
-        if (mountedRef.current) {
+        if (
+          mountedRef.current
+          && sessionIdRef.current === requestSessionId
+          && directoryStateSftpIdRef.current === requestSftpId
+        ) {
           message.open({ key, type: "error", content: `${label}失败：${getErrorMessage(error)}`, duration: 4 });
+        } else {
+          message.destroy(key);
         }
       });
   }
@@ -968,15 +1169,32 @@ function FileManagerView({
       message.error("当前终端不可用");
       return;
     }
+    const requestSessionId = session.id;
+    const requestTerminalId = session.terminalId;
     try {
       await onSendCommand(command.command);
-      message.open({ key: `quick-command-${command.id}`, type: "success", content: `已发送：${command.name}`, duration: 1.8 });
+      if (
+        mountedRef.current
+        && activeRef.current
+        && sessionIdRef.current === requestSessionId
+        && sessionTerminalIdRef.current === requestTerminalId
+      ) {
+        message.open({ key: `quick-command-${command.id}`, type: "success", content: `已发送：${command.name}`, duration: 1.8 });
+      }
     } catch (error) {
-      message.error(getErrorMessage(error));
+      if (
+        mountedRef.current
+        && activeRef.current
+        && sessionIdRef.current === requestSessionId
+        && sessionTerminalIdRef.current === requestTerminalId
+      ) {
+        message.error(getErrorMessage(error));
+      }
     }
   }
 
   function openCommandDialog(command?: QuickCommand) {
+    commandDialogRequestRef.current += 1;
     setCommandEditingId(command?.id ?? null);
     setCommandName(command?.name ?? "");
     setCommandValue(command?.command ?? "");
@@ -984,29 +1202,42 @@ function FileManagerView({
   }
 
   function closeCommandDialog() {
+    if (commandSaving) return;
+    commandDialogRequestRef.current += 1;
     setCommandDialogOpen(false);
     setCommandEditingId(null);
   }
 
-  function addQuickCommand() {
+  async function addQuickCommand() {
+    if (commandSaving) return;
     const name = commandName.trim();
     const command = commandValue.trim();
     if (!name || !command) return;
-    if (commandEditingId) {
-      void onQuickCommandsChange(
-        quickCommands.map((item) =>
-          item.id === commandEditingId ? { ...item, name, command, updatedAt: new Date().toISOString() } : item,
-        ),
-      );
-    } else {
-      const now = new Date().toISOString();
-      const id = crypto.randomUUID();
-      void onQuickCommandsChange([...quickCommands, { id, name, command, createdAt: now, updatedAt: now }].slice(-100));
+    const requestId = commandDialogRequestRef.current;
+    setCommandSaving(true);
+    try {
+      if (commandEditingId) {
+        const existing = quickCommands.find((item) => item.id === commandEditingId);
+        if (!existing) throw new Error("要编辑的常用命令已不存在");
+        await onQuickCommandUpsert({ ...existing, name, command, updatedAt: new Date().toISOString() });
+      } else {
+        const now = new Date().toISOString();
+        const id = crypto.randomUUID();
+        await onQuickCommandUpsert({ id, name, command, createdAt: now, updatedAt: now });
+      }
+      if (!mountedRef.current || commandDialogRequestRef.current !== requestId) return;
+      setCommandName("");
+      setCommandValue("");
+      setCommandEditingId(null);
+      setCommandDialogOpen(false);
+      message.success(commandEditingId ? "常用命令已更新" : "常用命令已添加");
+    } catch (error) {
+      if (mountedRef.current && commandDialogRequestRef.current === requestId) {
+        message.error(`保存常用命令失败：${getErrorMessage(error)}`);
+      }
+    } finally {
+      if (mountedRef.current && commandDialogRequestRef.current === requestId) setCommandSaving(false);
     }
-    setCommandName("");
-    setCommandValue("");
-    setCommandEditingId(null);
-    setCommandDialogOpen(false);
   }
 
   function deleteQuickCommand(command: QuickCommand) {
@@ -1016,8 +1247,14 @@ function FileManagerView({
       okText: "删除",
       okButtonProps: { danger: true },
       cancelText: "取消",
-      onOk: () => {
-        void onQuickCommandsChange(quickCommands.filter((item) => item.id !== command.id));
+      onOk: async () => {
+        try {
+          await onQuickCommandDelete(command.id);
+          if (mountedRef.current) message.success("常用命令已删除");
+        } catch (error) {
+          if (mountedRef.current) message.error(`删除常用命令失败：${getErrorMessage(error)}`);
+          throw error;
+        }
       },
     });
   }
@@ -1092,6 +1329,8 @@ function FileManagerView({
       });
     }
     if (key === "download") {
+      const requestSessionId = session.id;
+      const requestSftpId = session.sftpId ?? null;
       const messageKey = `prepare-download-${Date.now()}`;
       message.open({
         key: messageKey,
@@ -1106,12 +1345,21 @@ function FileManagerView({
       }))).then(() => {
         message.destroy(messageKey);
       }).catch((error) => {
-        message.open({
-          key: messageKey,
-          type: "error",
-          content: `下载准备失败：${getErrorMessage(error)}`,
-          duration: 6,
-        });
+        if (
+          mountedRef.current
+          && activeRef.current
+          && sessionIdRef.current === requestSessionId
+          && directoryStateSftpIdRef.current === requestSftpId
+        ) {
+          message.open({
+            key: messageKey,
+            type: "error",
+            content: `下载准备失败：${getErrorMessage(error)}`,
+            duration: 6,
+          });
+        } else {
+          message.destroy(messageKey);
+        }
       });
     }
     if (key === "copy" && entries.length === 1) {
@@ -1380,7 +1628,7 @@ function FileManagerView({
           <span className="commandDialogModeBadge">{commandEditingId ? "编辑模式" : "新建模式"}</span>
         </div>
         <div className="commandDialogContent">
-          <Form layout="vertical" className="commandDialogForm" onFinish={addQuickCommand}>
+          <Form layout="vertical" className="commandDialogForm" onFinish={() => void addQuickCommand()}>
             <Form.Item
               className="commandDialogNameItem"
               label={(
@@ -1405,7 +1653,7 @@ function FileManagerView({
                 onKeyDown={(event) => {
                   if (event.key !== "Enter") return;
                   event.preventDefault();
-                  addQuickCommand();
+                  void addQuickCommand();
                 }}
               />
             </Form.Item>
@@ -1436,7 +1684,7 @@ function FileManagerView({
                   onKeyDown={(event) => {
                     if (!(event.ctrlKey || event.metaKey) || event.key !== "Enter") return;
                     event.preventDefault();
-                    addQuickCommand();
+                    void addQuickCommand();
                   }}
                 />
               </div>
@@ -1458,7 +1706,8 @@ function FileManagerView({
               type="primary"
               icon={commandEditingId ? <SaveOutlined /> : <PlusOutlined />}
               disabled={!commandReady}
-              onClick={addQuickCommand}
+              loading={commandSaving}
+              onClick={() => void addQuickCommand()}
             >
               {commandEditingId ? "保存修改" : "添加命令"}
             </Button>
@@ -1473,11 +1722,9 @@ function FileManagerView({
         onDialogChange={setDialog}
         onSubmit={submitDialog}
         onLoadDirectory={(p) => void loadDirectory(p)}
-        onExpandChange={updateDirectoryExpandedKeys}
         onTreeSelect={(selectedPath) => {
           const np = normalizePath(selectedPath);
           setDialog((d) => d && (d.kind === "copy" || d.kind === "move") ? { ...d, value: np } : d);
-          toggleDirectory(np);
         }}
       />
     </section>
@@ -1496,15 +1743,10 @@ export const FileManager = memo(FileManagerView, (previous, next) => (
   && previous.session.terminalId === next.session.terminalId
   && previous.session.sftpId === next.session.sftpId
   && previous.session.currentPath === next.session.currentPath
+  && previous.session.filesPath === next.session.filesPath
   && previous.session.files === next.session.files
 ));
 
 function resolveStateAction<T>(action: SetStateAction<T>, current: T): T {
   return typeof action === "function" ? (action as (value: T) => T)(current) : action;
 }
-
-function sameStringArray(left: string[], right: string[]) {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-

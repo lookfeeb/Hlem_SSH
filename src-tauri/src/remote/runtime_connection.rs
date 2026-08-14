@@ -1,6 +1,18 @@
 use super::*;
 
 impl RemoteRuntime {
+    pub async fn connection_list(&self) -> Vec<ConnectionInfo> {
+        self.connections
+            .read()
+            .await
+            .values()
+            .filter(|record| {
+                record.origin == ConnectionOrigin::Desktop && !connection_record_is_closed(record)
+            })
+            .map(|record| record.info.clone())
+            .collect()
+    }
+
     pub fn connect(
         &self,
         app: &AppHandle,
@@ -10,7 +22,10 @@ impl RemoteRuntime {
     {
         let app = app.clone();
         let this = self.clone();
-        Box::pin(async move { this.connect_inner(&app, session, trusted, true, true).await })
+        Box::pin(async move {
+            this.connect_inner(&app, session, trusted, true, ConnectionOrigin::Desktop)
+                .await
+        })
     }
 
     pub fn connect_new(
@@ -23,7 +38,7 @@ impl RemoteRuntime {
         let app = app.clone();
         let this = self.clone();
         Box::pin(async move {
-            this.connect_inner(&app, session, trusted, false, true)
+            this.connect_inner(&app, session, trusted, false, ConnectionOrigin::Desktop)
                 .await
         })
     }
@@ -38,7 +53,7 @@ impl RemoteRuntime {
         let app = app.clone();
         let this = self.clone();
         Box::pin(async move {
-            this.connect_inner(&app, session, trusted, true, false)
+            this.connect_inner(&app, session, trusted, true, ConnectionOrigin::Automation)
                 .await
         })
     }
@@ -49,22 +64,38 @@ impl RemoteRuntime {
         session: SessionConfig,
         trusted: Option<KnownHostEntry>,
         reuse_existing: bool,
-        notify_ui: bool,
+        origin: ConnectionOrigin,
     ) -> AppResult<ConnectionInfo> {
+        let _lifecycle_guard = self.lifecycle_gate.read().await;
         let connection_started = Instant::now();
-        let session_lock = self.connection_lock(&session.id).await;
+        let session_lock = self.connection_lock(&session.id, origin).await;
         let _session_guard = session_lock.lock().await;
         let lock_wait_ms = connection_started.elapsed().as_millis();
         if reuse_existing {
-            if let Some(existing) = self.find_connection_by_session(&session.id).await {
-                log::info!(
-                    "SSH connection reused: session={} host={} lock_wait_ms={} total_ms={}",
-                    session.name,
-                    session.host,
-                    lock_wait_ms,
-                    connection_started.elapsed().as_millis()
-                );
-                return Ok(existing.info);
+            if let Some(existing) = self.find_connection_by_session(&session.id, origin).await {
+                if connection_record_is_closed(&existing) {
+                    log::warn!(
+                        "stale SSH connection found before reuse: session={} connection={} origin={origin:?}",
+                        session.name,
+                        existing.info.connection_id
+                    );
+                    let _ = self
+                        .shutdown_connection_with_reason(
+                            app,
+                            &existing.info.connection_id,
+                            Some("SSH 连接已失效，正在重新连接".to_string()),
+                        )
+                        .await;
+                } else {
+                    log::info!(
+                        "SSH connection reused: session={} host={} lock_wait_ms={} total_ms={}",
+                        session.name,
+                        session.host,
+                        lock_wait_ms,
+                        connection_started.elapsed().as_millis()
+                    );
+                    return Ok(existing.info);
+                }
             }
         }
 
@@ -116,7 +147,7 @@ impl RemoteRuntime {
             session.username,
             connection_route
         );
-        if notify_ui {
+        if origin.notifies_desktop() {
             events::emit(
                 app,
                 events::SSH_STATUS,
@@ -245,10 +276,12 @@ impl RemoteRuntime {
                     connection_route,
                     error
                 );
-                if let AppError::HostKeyUntrusted(payload) | AppError::HostKeyChanged(payload) =
-                    &error
-                {
-                    events::emit(app, events::HOST_KEY_VERIFY, payload.clone());
+                if origin.notifies_desktop() {
+                    if let AppError::HostKeyUntrusted(payload)
+                    | AppError::HostKeyChanged(payload) = &error
+                    {
+                        events::emit(app, events::HOST_KEY_VERIFY, payload.clone());
+                    }
                 }
                 return Err(error);
             }
@@ -271,7 +304,14 @@ impl RemoteRuntime {
         };
 
         let authentication_started = Instant::now();
-        if let Err(error) = authenticate(&mut handle, &session).await {
+        let authentication = timeout(connect_timeout, authenticate(&mut handle, &session)).await;
+        if let Err(error) = match authentication {
+            Ok(result) => result,
+            Err(_) => Err(AppError::Remote(format!(
+                "SSH 认证超时：服务器未在 {} 毫秒内完成认证",
+                session.ssh.connect_timeout_ms.max(1_000)
+            ))),
+        } {
             let diagnostic = observed_disconnect_reason_from_diagnostics(&diagnostics).await;
             let error = match diagnostic {
                 Some(reason) => AppError::Remote(format!("SSH 认证阶段失败：{reason}")),
@@ -310,12 +350,13 @@ impl RemoteRuntime {
             connection_id.clone(),
             ConnectionRecord {
                 info: info.clone(),
+                origin,
                 handle: handle.clone(),
                 remote_forwards,
                 diagnostics,
             },
         );
-        if notify_ui {
+        if origin.notifies_desktop() {
             events::emit(app, events::SSH_STATUS, info.clone());
         }
         log::info!(
@@ -337,6 +378,12 @@ impl RemoteRuntime {
     }
 
     pub async fn disconnect(&self, app: &AppHandle, connection_id: &str) -> AppResult<()> {
+        let record = self.connection(connection_id).await?;
+        if record.origin != ConnectionOrigin::Desktop {
+            return Err(AppError::InvalidInput(
+                "桌面界面不能断开 AI API 连接".to_string(),
+            ));
+        }
         self.shutdown_connection(app, connection_id).await
     }
 
@@ -345,17 +392,75 @@ impl RemoteRuntime {
         app: &AppHandle,
         connection_id: &str,
     ) -> AppResult<()> {
-        self.shutdown_connection_with_reason(
-            app,
-            connection_id,
-            Some("AI API 主动断开".to_string()),
-        )
-        .await
+        let record = self.connection(connection_id).await?;
+        if record.origin != ConnectionOrigin::Automation {
+            return Err(AppError::InvalidInput(
+                "AI API 不能断开桌面连接".to_string(),
+            ));
+        }
+        self.shutdown_connection_with_reason(app, connection_id, None)
+            .await
     }
 
     pub async fn shutdown_connection(&self, app: &AppHandle, connection_id: &str) -> AppResult<()> {
         self.shutdown_connection_with_reason(app, connection_id, None)
             .await
+    }
+
+    pub async fn shutdown_session_connections(&self, app: &AppHandle, session_id: &str) {
+        let desktop_lock = self
+            .connection_lock(session_id, ConnectionOrigin::Desktop)
+            .await;
+        let automation_lock = self
+            .connection_lock(session_id, ConnectionOrigin::Automation)
+            .await;
+        let _desktop_guard = desktop_lock.lock().await;
+        let _automation_guard = automation_lock.lock().await;
+        let connection_ids: Vec<String> = self
+            .connections
+            .read()
+            .await
+            .values()
+            .filter(|record| record.info.session_id == session_id)
+            .map(|record| record.info.connection_id.clone())
+            .collect();
+        for connection_id in connection_ids {
+            if let Err(error) = self.shutdown_connection(app, &connection_id).await {
+                if !matches!(error, AppError::NotFound(_)) {
+                    eprintln!(
+                        "[helm] failed to shutdown deleted session connection: {connection_id}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
+    pub async fn shutdown_automation_connections(
+        &self,
+        app: &AppHandle,
+        allowed_session_ids: Option<&[String]>,
+    ) {
+        let connection_ids: Vec<String> = self
+            .connections
+            .read()
+            .await
+            .values()
+            .filter(|record| {
+                should_shutdown_automation_connection(
+                    record.origin,
+                    &record.info.session_id,
+                    allowed_session_ids,
+                )
+            })
+            .map(|record| record.info.connection_id.clone())
+            .collect();
+        for connection_id in connection_ids {
+            if let Err(error) = self.disconnect_automation(app, &connection_id).await {
+                if !matches!(error, AppError::NotFound(_)) {
+                    log::warn!("failed to shutdown automation connection {connection_id}: {error}");
+                }
+            }
+        }
     }
 
     async fn shutdown_connection_with_reason(
@@ -371,31 +476,52 @@ impl RemoteRuntime {
             .remove(connection_id)
             .ok_or_else(|| AppError::missing_connection(connection_id))?;
 
-        self.close_children_for_connection(app, &record, None).await;
-        let disconnect_result = record
-            .handle
-            .lock()
-            .await
-            .disconnect(Disconnect::ByApplication, "HelM disconnect", "zh-CN")
-            .await
-            .map_err(remote_error);
+        self.close_children_for_connection(app, &record, disconnect_reason.as_deref())
+            .await;
+        let disconnect_result =
+            disconnect_connection_handle(&record.handle, "HelM disconnect").await;
 
-        let mut info = record.info;
-        info.status = RuntimeStatus::Disconnected;
-        info.disconnect_reason = disconnect_reason;
-        events::emit(app, events::SSH_STATUS, info);
+        if record.origin.notifies_desktop() {
+            let mut info = record.info;
+            info.status = RuntimeStatus::Disconnected;
+            info.disconnect_reason = disconnect_reason;
+            events::emit(app, events::SSH_STATUS, info);
+        }
         crate::errors::forget_resource_label(connection_id);
         disconnect_result
     }
 
     pub async fn shutdown_all(&self, app: &AppHandle) {
+        self.shutdown_all_with_reason(app, None, "工作区已锁定")
+            .await;
+    }
+
+    pub async fn shutdown_all_for_exit(&self, app: &AppHandle) {
+        self.shutdown_all_with_reason(app, Some("程序已关闭"), "程序已关闭，传输已停止")
+            .await;
+    }
+
+    async fn shutdown_all_with_reason(
+        &self,
+        app: &AppHandle,
+        disconnect_reason: Option<&str>,
+        orphan_cleanup_reason: &str,
+    ) {
+        let _lifecycle_guard = self.lifecycle_gate.write().await;
         let connection_ids: Vec<String> = self.connections.read().await.keys().cloned().collect();
         for connection_id in connection_ids {
-            if let Err(error) = self.shutdown_connection(app, &connection_id).await {
+            if let Err(error) = self
+                .shutdown_connection_with_reason(
+                    app,
+                    &connection_id,
+                    disconnect_reason.map(str::to_owned),
+                )
+                .await
+            {
                 eprintln!("[helm] failed to shutdown connection: {connection_id}: {error}");
             }
         }
-        self.close_all_orphans(app).await;
+        self.close_all_orphans(app, orphan_cleanup_reason).await;
     }
 
     /// 启动死连接巡检后台任务。每 30s 扫描一次 `connections`，对每个 Connected 状态的
@@ -404,17 +530,36 @@ impl RemoteRuntime {
     /// 事件，让前端的"重新连接"按钮能正常出现。
     ///
     /// 覆盖只使用 API、不打开终端的场景，确保 keepalive 标记关闭后的连接能被统一清理。
-    pub fn spawn_dead_connection_reaper(&self, app: AppHandle) {
+    pub fn spawn_dead_connection_reaper(
+        &self,
+        app: AppHandle,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
+        if self
+            .dead_connection_reaper_started
+            .swap(true, Ordering::AcqRel)
+        {
+            log::debug!("dead connection reaper already started");
+            return;
+        }
         let runtime = self.clone();
+        let started = self.dead_connection_reaper_started.clone();
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(Duration::from_secs(30));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             // 跳过启动时立即触发的第一次 tick。
             ticker.tick().await;
             loop {
-                ticker.tick().await;
-                runtime.reap_dead_connections(&app).await;
+                tokio::select! {
+                    _ = ticker.tick() => runtime.reap_dead_connections(&app).await,
+                    result = shutdown.changed() => {
+                        if result.is_err() || *shutdown.borrow_and_update() {
+                            break;
+                        }
+                    }
+                }
             }
+            started.store(false, Ordering::Release);
         });
     }
 
@@ -448,14 +593,19 @@ impl RemoteRuntime {
             if let Some(record) = removed {
                 let label =
                     crate::errors::resource_label(&id).unwrap_or_else(|| record.info.host.clone());
-                log::warn!("连接已断开，正在清理: {label} ({})", record.info.host);
                 let disconnect_reason = observed_disconnect_reason(&record).await;
+                log::warn!(
+                    "连接已断开，正在清理: {label} ({})，原因: {disconnect_reason}",
+                    record.info.host
+                );
                 self.close_children_for_connection(app, &record, Some(&disconnect_reason))
                     .await;
-                let mut info = record.info;
-                info.status = RuntimeStatus::Disconnected;
-                info.disconnect_reason = Some(disconnect_reason);
-                events::emit(app, events::SSH_STATUS, info);
+                if record.origin.notifies_desktop() {
+                    let mut info = record.info;
+                    info.status = RuntimeStatus::Disconnected;
+                    info.disconnect_reason = Some(disconnect_reason);
+                    events::emit(app, events::SSH_STATUS, info);
+                }
                 crate::errors::forget_resource_label(&id);
             }
         }
@@ -469,5 +619,57 @@ impl RemoteRuntime {
             && self.transfers.read().await.is_empty()
             && self.telemetry_jobs.read().await.is_empty()
             && self.forwards.read().await.is_empty()
+    }
+}
+
+pub(super) fn connection_record_is_closed(record: &ConnectionRecord) -> bool {
+    record
+        .handle
+        .try_lock()
+        .map(|handle| handle.is_closed())
+        .unwrap_or(false)
+}
+
+fn should_shutdown_automation_connection(
+    origin: ConnectionOrigin,
+    session_id: &str,
+    allowed_session_ids: Option<&[String]>,
+) -> bool {
+    origin == ConnectionOrigin::Automation
+        && allowed_session_ids
+            .is_none_or(|allowed| !allowed.iter().any(|allowed_id| allowed_id == session_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_shutdown_automation_connection, ConnectionOrigin};
+
+    #[test]
+    fn automation_cleanup_never_selects_desktop_connections() {
+        assert!(!should_shutdown_automation_connection(
+            ConnectionOrigin::Desktop,
+            "session-a",
+            None,
+        ));
+        assert!(should_shutdown_automation_connection(
+            ConnectionOrigin::Automation,
+            "session-a",
+            None,
+        ));
+    }
+
+    #[test]
+    fn authorization_reconcile_only_closes_removed_automation_sessions() {
+        let allowed = vec!["session-a".to_string()];
+        assert!(!should_shutdown_automation_connection(
+            ConnectionOrigin::Automation,
+            "session-a",
+            Some(&allowed),
+        ));
+        assert!(should_shutdown_automation_connection(
+            ConnectionOrigin::Automation,
+            "session-b",
+            Some(&allowed),
+        ));
     }
 }

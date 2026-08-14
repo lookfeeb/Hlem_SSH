@@ -70,10 +70,13 @@ export function TopBar({
             console.warn("[helm] failed to read main window state:", error);
           }
         };
-        await syncMaximizedState();
         const cleanup = await currentWindow.onResized(() => void syncMaximizedState());
-        if (disposed) cleanup();
-        else unlisten = cleanup;
+        if (disposed) {
+          cleanup();
+          return;
+        }
+        unlisten = cleanup;
+        await syncMaximizedState();
       })
       .catch((error) => console.warn("[helm] failed to observe main window state:", error));
     return () => {

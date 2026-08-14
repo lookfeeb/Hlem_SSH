@@ -11,8 +11,10 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
-use super::auth::{verify_auth, verify_session_access};
+use super::auth::{verify_auth, verify_session_access, verify_session_access_and_exists};
 use super::{allowed_session_ids_snapshot, push_log, ApiError, ApiServerState};
+use crate::errors::AppError;
+use crate::{config::ConfigSnapshot, events};
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -29,6 +31,20 @@ fn map_err_500(e: impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ApiError {
             error: e.to_string(),
+        }),
+    )
+}
+
+fn map_config_mutation_error(error: AppError) -> (StatusCode, Json<ApiError>) {
+    let status = if matches!(error, AppError::ConfigConflict(_)) {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (
+        status,
+        Json(ApiError {
+            error: error.to_string(),
         }),
     )
 }
@@ -50,11 +66,45 @@ fn elapsed_ms(start: std::time::Instant) -> u64 {
     start.elapsed().as_millis() as u64
 }
 
+fn emit_config_changed(state: &ApiServerState, snapshot: &ConfigSnapshot) {
+    events::emit(&state.app, events::CONFIG_CHANGED, snapshot.clone());
+}
+
 fn tunnel_allowed(allowed_session_ids: &[String], tunnel: &crate::config::TunnelConfig) -> bool {
-    allowed_session_ids.is_empty()
-        || allowed_session_ids
-            .iter()
-            .any(|session_id| session_id == &tunnel.session_id)
+    allowed_session_ids
+        .iter()
+        .any(|session_id| session_id == &tunnel.session_id)
+}
+
+fn allowed_tunnels(
+    allowed_session_ids: &[String],
+    tunnels: Vec<crate::config::TunnelConfig>,
+) -> Vec<crate::config::TunnelConfig> {
+    tunnels
+        .into_iter()
+        .filter(|tunnel| tunnel_allowed(allowed_session_ids, tunnel))
+        .collect()
+}
+
+fn redact_backup_settings(
+    mut settings: crate::config::BackupSettings,
+) -> crate::config::BackupSettings {
+    settings.cloud.webdav.password.clear();
+    settings.cloud.s3.secret_access_key.clear();
+    settings
+}
+
+fn preserve_blank_backup_secrets(
+    mut incoming: crate::config::BackupSettings,
+    current: &crate::config::BackupSettings,
+) -> crate::config::BackupSettings {
+    if incoming.cloud.webdav.password.is_empty() {
+        incoming.cloud.webdav.password = current.cloud.webdav.password.clone();
+    }
+    if incoming.cloud.s3.secret_access_key.is_empty() {
+        incoming.cloud.s3.secret_access_key = current.cloud.s3.secret_access_key.clone();
+    }
+    incoming
 }
 
 // ─── Tunnels ───────────────────────────────────────────────────────────────────
@@ -66,14 +116,11 @@ pub async fn rest_tunnels_list(
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
     let start = std::time::Instant::now();
-    let mut tunnels = {
+    let tunnels = {
         let store = state.vault.lock().map_err(|_| lock_poisoned())?;
         store.tunnels().map_err(map_err_500)?
     };
-    let allowed_session_ids = allowed_session_ids_snapshot(&state);
-    if !allowed_session_ids.is_empty() {
-        tunnels.retain(|tunnel| tunnel_allowed(&allowed_session_ids, tunnel));
-    }
+    let tunnels = allowed_tunnels(&allowed_session_ids_snapshot(&state), tunnels);
     let count = tunnels.len();
     push_log(
         &state,
@@ -93,14 +140,26 @@ pub async fn rest_tunnels_create(
     Json(input): Json<crate::config::TunnelInput>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
-    verify_session_access(&state, &input.session_id)?;
+    let ticket = state.config_mutations.ticket();
+    let _operation_guard = state.tunnel_operation.lock().await;
+    let _mutation_guard = state
+        .config_mutations
+        .lock(ticket)
+        .await
+        .map_err(map_config_mutation_error)?;
+    let allowed_session_ids = allowed_session_ids_snapshot(&state);
+    verify_session_access_in_snapshot(&allowed_session_ids, &input.session_id)?;
     let start = std::time::Instant::now();
     let snapshot = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
         store.create_tunnel(input).map_err(map_err_500)?
     };
+    emit_config_changed(&state, &snapshot);
     push_log(&state, "rest/tunnels.create", "OK", true, elapsed_ms(start)).await;
-    Ok(json_value(snapshot.data.tunnels))
+    Ok(json_value(allowed_tunnels(
+        &allowed_session_ids_snapshot(&state),
+        snapshot.data.tunnels,
+    )))
 }
 
 /// `PATCH /api/tunnels/:tunnelId` body: TunnelInput → 更新后返回隧道数组。
@@ -111,14 +170,49 @@ pub async fn rest_tunnels_update(
     Json(input): Json<crate::config::TunnelInput>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
-    verify_session_access(&state, &input.session_id)?;
+    let ticket = state.config_mutations.ticket();
+    let _operation_guard = state.tunnel_operation.lock().await;
+    let _mutation_guard = state
+        .config_mutations
+        .lock(ticket)
+        .await
+        .map_err(map_config_mutation_error)?;
+    let allowed_session_ids = allowed_session_ids_snapshot(&state);
+    verify_session_access_in_snapshot(&allowed_session_ids, &input.session_id)?;
     let start = std::time::Instant::now();
+    {
+        let store = state.vault.lock().map_err(|_| lock_poisoned())?;
+        let tunnels = store.tunnels().map_err(map_err_500)?;
+        let tunnel = tunnels
+            .iter()
+            .find(|tunnel| tunnel.id == tunnel_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: format!("隧道 {} 不存在", tunnel_id),
+                    }),
+                )
+            })?;
+        // 更新既需要访问目标会话，也需要访问隧道原所属会话。否则只要知道
+        // tunnel id，授权客户端就能把未授权会话的隧道迁移到自己的会话下。
+        verify_session_access_in_snapshot(&allowed_session_ids, &tunnel.session_id)?;
+        store
+            .validate_tunnel_update(&tunnel_id, &input)
+            .map_err(map_err_500)?;
+    }
+    state
+        .remote
+        .stop_forwards_for_tunnel(&state.app, &tunnel_id)
+        .await
+        .map_err(map_err_500)?;
     let snapshot = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
         store
             .update_tunnel(&tunnel_id, input)
             .map_err(map_err_500)?
     };
+    emit_config_changed(&state, &snapshot);
     push_log(
         &state,
         "rest/tunnels.update",
@@ -127,7 +221,31 @@ pub async fn rest_tunnels_update(
         elapsed_ms(start),
     )
     .await;
-    Ok(json_value(snapshot.data.tunnels))
+    Ok(json_value(allowed_tunnels(
+        &allowed_session_ids_snapshot(&state),
+        snapshot.data.tunnels,
+    )))
+}
+
+fn verify_session_access_in_snapshot(
+    allowed_session_ids: &[String],
+    session_id: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if tunnel_session_allowed(allowed_session_ids, session_id) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(ApiError {
+            error: format!("无权访问会话 {}，仅允许访问指定会话", session_id),
+        }),
+    ))
+}
+
+fn tunnel_session_allowed(allowed_session_ids: &[String], session_id: &str) -> bool {
+    allowed_session_ids
+        .iter()
+        .any(|allowed_session_id| allowed_session_id == session_id)
 }
 
 /// `DELETE /api/tunnels/:tunnelId` → 删除后返回隧道数组。
@@ -137,7 +255,15 @@ pub async fn rest_tunnels_delete(
     Path(tunnel_id): Path<String>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
+    let ticket = state.config_mutations.ticket();
+    let _operation_guard = state.tunnel_operation.lock().await;
+    let _mutation_guard = state
+        .config_mutations
+        .lock(ticket)
+        .await
+        .map_err(map_config_mutation_error)?;
     let start = std::time::Instant::now();
+    let allowed_session_ids = allowed_session_ids_snapshot(&state);
     {
         let store = state.vault.lock().map_err(|_| lock_poisoned())?;
         let tunnels = store.tunnels().map_err(map_err_500)?;
@@ -149,12 +275,18 @@ pub async fn rest_tunnels_delete(
                 }),
             )
         })?;
-        verify_session_access(&state, &tunnel.session_id)?;
+        verify_session_access_in_snapshot(&allowed_session_ids, &tunnel.session_id)?;
     }
+    state
+        .remote
+        .stop_forwards_for_tunnel(&state.app, &tunnel_id)
+        .await
+        .map_err(map_err_500)?;
     let snapshot = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
         store.delete_tunnel(&tunnel_id).map_err(map_err_500)?
     };
+    emit_config_changed(&state, &snapshot);
     push_log(
         &state,
         "rest/tunnels.delete",
@@ -163,7 +295,10 @@ pub async fn rest_tunnels_delete(
         elapsed_ms(start),
     )
     .await;
-    Ok(json_value(snapshot.data.tunnels))
+    Ok(json_value(allowed_tunnels(
+        &allowed_session_ids_snapshot(&state),
+        snapshot.data.tunnels,
+    )))
 }
 
 /// `POST /api/tunnels/:tunnelId/start` → `{forwardId, bindHost, bindPort}`。
@@ -173,6 +308,7 @@ pub async fn rest_tunnels_start(
     Path(tunnel_id): Path<String>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
+    let _operation_guard = state.tunnel_operation.lock().await;
     let start = std::time::Instant::now();
     let tunnel = {
         let store = state.vault.lock().map_err(|_| lock_poisoned())?;
@@ -189,12 +325,76 @@ pub async fn rest_tunnels_start(
                 )
             })?
     };
-    verify_session_access(&state, &tunnel.session_id)?;
-    let (bind_host, bind_port, forward_id) = state
+    verify_session_access_and_exists(&state, &tunnel.session_id)?;
+    let _config_guard = state.connection_config_gate.read().await;
+    let (session, known_host) = {
+        let store = state.vault.lock().map_err(|_| lock_poisoned())?;
+        crate::commands::build_session_for_connect(&store, &tunnel.session_id)
+            .map_err(map_err_500)?
+    };
+    state
         .remote
-        .api_start_tunnel(&tunnel)
+        .api_connect_session(&state.app, session.clone(), known_host)
         .await
         .map_err(map_err_500)?;
+    if verify_session_access(&state, &tunnel.session_id).is_err() {
+        let _ = state
+            .remote
+            .api_disconnect_session(&state.app, &tunnel.session_id)
+            .await;
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: format!("会话 {} 已不在 AI API 授权范围内", tunnel.session_id),
+            }),
+        ));
+    }
+    let still_valid = {
+        let store = state.vault.lock().map_err(|_| lock_poisoned())?;
+        crate::commands::session_matches_current_connection_config(&store, &session)
+            .unwrap_or(false)
+    };
+    if !still_valid {
+        let _ = state
+            .remote
+            .api_disconnect_session(&state.app, &tunnel.session_id)
+            .await;
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "会话配置已变更，请重试".to_string(),
+            }),
+        ));
+    }
+    let info = state
+        .remote
+        .forward_start_for_tunnel(
+            &state.app,
+            &tunnel,
+            crate::remote::ConnectionOrigin::Automation,
+        )
+        .await
+        .map_err(map_err_500)?;
+    if verify_session_access(&state, &tunnel.session_id).is_err() {
+        let _ = state
+            .remote
+            .stop_forwards_for_tunnel_origin(
+                &state.app,
+                &tunnel.id,
+                crate::remote::ConnectionOrigin::Automation,
+            )
+            .await;
+        let _ = state
+            .remote
+            .api_disconnect_session(&state.app, &tunnel.session_id)
+            .await;
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: format!("会话 {} 已不在 AI API 授权范围内", tunnel.session_id),
+            }),
+        ));
+    }
     push_log(
         &state,
         "rest/tunnels.start",
@@ -204,9 +404,9 @@ pub async fn rest_tunnels_start(
     )
     .await;
     Ok(Json(serde_json::json!({
-        "forwardId": forward_id,
-        "bindHost": bind_host,
-        "bindPort": bind_port,
+        "forwardId": info.forward_id,
+        "bindHost": info.bind_host,
+        "bindPort": info.bind_port,
     })))
 }
 
@@ -217,25 +417,33 @@ pub async fn rest_tunnels_stop(
     Path(tunnel_id): Path<String>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
+    let _operation_guard = state.tunnel_operation.lock().await;
     let start = std::time::Instant::now();
-    let forward = state
-        .remote
-        .forward_list()
-        .await
-        .into_iter()
-        .find(|forward| forward.forward_id == tunnel_id)
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ApiError {
-                    error: format!("转发 {} 不存在或已停止", tunnel_id),
-                }),
-            )
-        })?;
-    verify_session_access(&state, &forward.session_id)?;
+    let (session_id, forward_id) = {
+        let store = state.vault.lock().map_err(|_| lock_poisoned())?;
+        let tunnel = store
+            .tunnels()
+            .map_err(map_err_500)?
+            .into_iter()
+            .find(|tunnel| tunnel.id == tunnel_id)
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: format!("隧道 {} 不存在", tunnel_id),
+                    }),
+                )
+            })?;
+        (tunnel.session_id, tunnel.id)
+    };
+    verify_session_access(&state, &session_id)?;
     state
         .remote
-        .api_stop_tunnel(&tunnel_id)
+        .stop_forwards_for_tunnel_origin(
+            &state.app,
+            &forward_id,
+            crate::remote::ConnectionOrigin::Automation,
+        )
         .await
         .map_err(map_err_500)?;
     push_log(
@@ -259,7 +467,9 @@ pub async fn rest_backup_settings_get(
     require_auth(&state, &headers).await?;
     let store = state.vault.lock().map_err(|_| lock_poisoned())?;
     let snap = store.snapshot().map_err(map_err_500)?;
-    Ok(json_value(snap.data.settings.backup))
+    Ok(json_value(redact_backup_settings(
+        snap.data.settings.backup,
+    )))
 }
 
 /// `PUT /api/backup/settings` body: BackupSettings → 写入后返回备份设置。
@@ -269,14 +479,32 @@ pub async fn rest_backup_settings_update(
     Json(backup): Json<crate::config::BackupSettings>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
+    let ticket = state.config_mutations.ticket();
+    let _operation_guard = state.backup_operation.lock().await;
+    let _mutation_guard = state
+        .config_mutations
+        .lock(ticket)
+        .await
+        .map_err(map_config_mutation_error)?;
     let start = std::time::Instant::now();
-    {
+    let (snapshot, response, delete_paths) = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
-        let snap = store.snapshot().map_err(map_err_500)?;
-        let mut settings = snap.data.settings.clone();
-        settings.backup = backup.clone();
-        store.settings_update(settings).map_err(map_err_500)?;
+        let current = store.snapshot().map_err(map_err_500)?.data.settings.backup;
+        let backup = preserve_blank_backup_secrets(backup, &current);
+        let (snapshot, delete_paths) = store
+            .settings_backup_update(backup.clone())
+            .map_err(map_err_500)?;
+        (snapshot, redact_backup_settings(backup), delete_paths)
+    };
+    drop(_mutation_guard);
+    for target in delete_paths {
+        crate::backup::remove_backup_target_best_effort(
+            target,
+            "REST backup retention settings update",
+        )
+        .await;
     }
+    emit_config_changed(&state, &snapshot);
     push_log(
         &state,
         "rest/backup.settings.update",
@@ -285,7 +513,7 @@ pub async fn rest_backup_settings_update(
         elapsed_ms(start),
     )
     .await;
-    Ok(json_value(backup))
+    Ok(json_value(response))
 }
 
 /// `GET /api/backup/records` → 备份记录数组。
@@ -307,24 +535,38 @@ pub async fn rest_backup_run(
     AxumState(state): AxumState<ApiServerState>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
+    let ticket = state.config_mutations.ticket();
+    let _operation_guard = state.backup_operation.lock().await;
     let start = std::time::Instant::now();
+    let validation_guard = state
+        .config_mutations
+        .lock(ticket)
+        .await
+        .map_err(map_config_mutation_error)?;
 
     let plan = {
         let store = state.vault.lock().map_err(|_| lock_poisoned())?;
         crate::backup::prepare_backup_run(&store).map_err(map_err_500)?
     };
+    drop(validation_guard);
     let outcomes = crate::backup::run_configured_backup(&plan)
         .await
         .map_err(map_err_500)?;
-    let records =
-        crate::backup::merge_configured_backup_records(&plan.settings, outcomes.clone()).await;
-    let delete_paths = {
+    let records = crate::backup::merge_configured_backup_records(&plan, outcomes.clone()).await;
+    let mutation_guard = state
+        .config_mutations
+        .lock(ticket)
+        .await
+        .map_err(map_config_mutation_error)?;
+    let (snapshot, delete_paths) = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
-        let (_, delete_paths) = store.replace_backup_records(records).map_err(map_err_500)?;
-        delete_paths
+        store.replace_backup_records(records).map_err(map_err_500)?
     };
-    for path in delete_paths {
-        crate::backup::remove_backup_file_best_effort(path, "REST backup record replacement").await;
+    drop(mutation_guard);
+    emit_config_changed(&state, &snapshot);
+    for target in delete_paths {
+        crate::backup::remove_backup_target_best_effort(target, "REST backup record replacement")
+            .await;
     }
     push_log(&state, "rest/backup.run", "OK", true, elapsed_ms(start)).await;
     Ok(json_value(outcomes))
@@ -345,6 +587,13 @@ pub async fn rest_backup_record_delete(
     Query(query): Query<DeleteRecordQuery>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
+    let ticket = state.config_mutations.ticket();
+    let _operation_guard = state.backup_operation.lock().await;
+    let mutation_guard = state
+        .config_mutations
+        .lock(ticket)
+        .await
+        .map_err(map_config_mutation_error)?;
     let start = std::time::Instant::now();
     let (snap, delete_path) = {
         let mut store = state.vault.lock().map_err(|_| lock_poisoned())?;
@@ -352,9 +601,12 @@ pub async fn rest_backup_record_delete(
             .delete_backup_record(&record_id, query.delete_file)
             .map_err(map_err_500)?
     };
-    if let Some(path) = delete_path {
-        crate::backup::remove_backup_file_best_effort(path, "REST backup record deletion").await;
+    drop(mutation_guard);
+    if let Some(target) = delete_path {
+        crate::backup::remove_backup_target_best_effort(target, "REST backup record deletion")
+            .await;
     }
+    emit_config_changed(&state, &snap);
     push_log(
         &state,
         "rest/backup.record.delete",
@@ -364,4 +616,85 @@ pub async fn rest_backup_record_delete(
     )
     .await;
     Ok(json_value(snap.data.backup_records))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        allowed_tunnels, map_config_mutation_error, preserve_blank_backup_secrets,
+        redact_backup_settings, tunnel_allowed, tunnel_session_allowed,
+    };
+    use crate::config::{BackupSettings, TunnelConfig, TunnelInput};
+    use crate::errors::AppError;
+    use axum::http::StatusCode;
+
+    fn tunnel(session_id: &str) -> TunnelConfig {
+        let mut tunnel = TunnelConfig::new(TunnelInput {
+            name: "测试".to_string(),
+            session_id: session_id.to_string(),
+            forward_type: "local".to_string(),
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 0,
+            target_host: "127.0.0.1".to_string(),
+            target_port: 22,
+        });
+        tunnel.id = "tunnel-a".to_string();
+        tunnel
+    }
+
+    #[test]
+    fn empty_api_allowlist_exposes_no_tunnels() {
+        let tunnel = tunnel("session-a");
+        assert!(!tunnel_allowed(&[], &tunnel));
+        assert!(tunnel_allowed(&["session-a".to_string()], &tunnel));
+        assert!(!tunnel_allowed(&["session-b".to_string()], &tunnel));
+    }
+
+    #[test]
+    fn tunnel_update_requires_old_and_new_sessions_in_the_same_allowlist_snapshot() {
+        let allowed = vec!["session-new".to_string()];
+        assert!(!tunnel_session_allowed(&allowed, "session-old"));
+        assert!(tunnel_session_allowed(&allowed, "session-new"));
+
+        let allowed = vec!["session-old".to_string(), "session-new".to_string()];
+        assert!(tunnel_session_allowed(&allowed, "session-old"));
+        assert!(tunnel_session_allowed(&allowed, "session-new"));
+    }
+
+    #[test]
+    fn tunnel_mutation_responses_only_include_authorized_sessions() {
+        let visible = tunnel("session-a");
+        let hidden = tunnel("session-b");
+        let filtered = allowed_tunnels(&["session-a".to_string()], vec![visible, hidden]);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].session_id, "session-a");
+    }
+
+    #[test]
+    fn backup_settings_responses_hide_cloud_secrets_and_blank_updates_preserve_them() {
+        let mut current = BackupSettings::default();
+        current.cloud.webdav.password = "webdav-secret".to_string();
+        current.cloud.s3.secret_access_key = "s3-secret".to_string();
+
+        let redacted = redact_backup_settings(current.clone());
+        assert!(redacted.cloud.webdav.password.is_empty());
+        assert!(redacted.cloud.s3.secret_access_key.is_empty());
+
+        let mut incoming = current.clone();
+        incoming.frequency = "weekly".to_string();
+        incoming.cloud.webdav.password.clear();
+        incoming.cloud.s3.secret_access_key.clear();
+        let merged = preserve_blank_backup_secrets(incoming, &current);
+        assert_eq!(merged.cloud.webdav.password, "webdav-secret");
+        assert_eq!(merged.cloud.s3.secret_access_key, "s3-secret");
+        assert_eq!(merged.frequency, "weekly");
+    }
+
+    #[test]
+    fn stale_config_mutations_are_reported_as_http_conflicts() {
+        let (status, body) =
+            map_config_mutation_error(AppError::ConfigConflict("配置已被替换".to_string()));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.0.error.contains("配置冲突"));
+    }
 }

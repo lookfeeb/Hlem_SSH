@@ -21,7 +21,7 @@ import {
   WarningOutlined,
 } from "@ant-design/icons";
 import { App as AntdApp, Button, Form, Input, InputNumber, Modal, Segmented, Select, Tooltip } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { writeClipboardText } from "../lib/clipboard";
 import { getErrorMessage } from "../lib/configMapping";
 import { formatElapsedSince } from "../lib/duration";
@@ -42,8 +42,8 @@ interface TunnelDrawerProps {
 }
 
 type TunnelModalState =
-  | { mode: "create"; initialType?: TunnelInput["forwardType"] }
-  | { mode: "edit"; value: TunnelConfig };
+  | { requestId: string; mode: "create"; initialType?: TunnelInput["forwardType"] }
+  | { requestId: string; mode: "edit"; value: TunnelConfig };
 type TunnelView = "templates" | "running";
 type TunnelTypeFilter = "all" | TunnelInput["forwardType"];
 
@@ -65,8 +65,17 @@ export function TunnelDrawer({
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<TunnelTypeFilter>("all");
   const [operationKey, setOperationKey] = useState<string | null>(null);
+  const operationKeyRef = useRef<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const mountedRef = useMountedRef();
+  const editingRef = useRef<TunnelModalState | null>(null);
+  const openCycleRef = useRef(0);
+  const openRef = useRef(open);
+  if (openRef.current !== open) {
+    openRef.current = open;
+    openCycleRef.current += 1;
+  }
+  editingRef.current = editing;
   const sessionNameById = useMemo(() => new Map(sessions.map((session) => [session.id, session.name])), [sessions]);
   const activeForwards = useMemo(
     () => forwards.filter((forward) => isForwardActive(forward)),
@@ -77,12 +86,16 @@ export function TunnelDrawer({
     [forwards],
   );
   const forwardByTunnelId = useMemo(() => {
+    const byTunnelId = new Map<string, ForwardInfo>();
     const exactForwards = new Map<string, ForwardInfo>();
     const autoPortForwards = new Map<string, ForwardInfo>();
     const prioritizedForwards = [...forwards].sort(
       (left, right) => forwardStatusRank(left.status) - forwardStatusRank(right.status),
     );
     for (const forward of prioritizedForwards) {
+      if (forward.tunnelId && !byTunnelId.has(forward.tunnelId)) {
+        byTunnelId.set(forward.tunnelId, forward);
+      }
       const exactKey = forwardExactKey(forward);
       const autoPortKey = forwardAutoPortKey(forward);
       if (!exactForwards.has(exactKey)) exactForwards.set(exactKey, forward);
@@ -90,9 +103,9 @@ export function TunnelDrawer({
     }
     const map = new Map<string, ForwardInfo>();
     for (const tunnel of tunnels) {
-      const running = tunnel.bindPort === 0
+      const running = byTunnelId.get(tunnel.id) ?? (tunnel.bindPort === 0
         ? autoPortForwards.get(tunnelAutoPortKey(tunnel))
-        : exactForwards.get(tunnelExactKey(tunnel));
+        : exactForwards.get(tunnelExactKey(tunnel)));
       if (running) map.set(tunnel.id, running);
     }
     return map;
@@ -106,7 +119,7 @@ export function TunnelDrawer({
     setActiveView("templates");
     setQuery("");
     setTypeFilter("all");
-    setOperationKey(null);
+    setOperationKey(operationKeyRef.current);
     setNow(Date.now());
   }, [open]);
 
@@ -177,45 +190,67 @@ export function TunnelDrawer({
 
   async function startTunnel(tunnel: TunnelConfig) {
     const key = `start:${tunnel.id}`;
-    if (operationKey) return;
+    if (operationKeyRef.current) return;
+    const openCycle = openCycleRef.current;
+    operationKeyRef.current = key;
     setOperationKey(key);
     try {
       await onStart(tunnel);
-      if (mountedRef.current) message.success("隧道已启动");
+      if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
+        message.success("隧道已启动");
+      }
     } catch (error) {
-      if (mountedRef.current) message.error(getErrorMessage(error));
+      if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
+        message.error(getErrorMessage(error));
+      }
     } finally {
-      if (mountedRef.current) setOperationKey(null);
+      if (operationKeyRef.current === key) {
+        operationKeyRef.current = null;
+        if (mountedRef.current) setOperationKey(null);
+      }
     }
   }
 
   async function stopForward(forward: ForwardInfo) {
     const key = `stop:${forward.forwardId}`;
-    if (operationKey) return;
+    if (operationKeyRef.current) return;
+    const openCycle = openCycleRef.current;
+    operationKeyRef.current = key;
     setOperationKey(key);
     try {
       await onStop(forward.forwardId);
-      if (mountedRef.current) message.success("隧道已停止");
+      if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
+        message.success("隧道已停止");
+      }
     } catch (error) {
-      if (mountedRef.current) message.error(getErrorMessage(error));
+      if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
+        message.error(getErrorMessage(error));
+      }
     } finally {
-      if (mountedRef.current) setOperationKey(null);
+      if (operationKeyRef.current === key) {
+        operationKeyRef.current = null;
+        if (mountedRef.current) setOperationKey(null);
+      }
     }
   }
 
   function confirmDelete(tunnel: TunnelConfig) {
     const forward = forwardByTunnelId.get(tunnel.id);
+    const openCycle = openCycleRef.current;
     modal.confirm({
       title: "删除隧道模板",
       content: forward
-        ? `${tunnel.name} 当前存在运行实例。删除模板不会自动停止该实例。`
+        ? `${tunnel.name} 当前存在运行实例，删除模板会同时停止该实例。`
         : `确定删除“${tunnel.name}”吗？`,
       okText: "删除",
       cancelText: "取消",
       okButtonProps: { danger: true },
       onOk: async () => {
+        if (!openRef.current || openCycleRef.current !== openCycle) return;
         await onDelete(tunnel.id);
-        if (mountedRef.current) message.success("隧道模板已删除");
+        if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
+          message.success("隧道模板已删除");
+        }
       },
     });
   }
@@ -229,7 +264,7 @@ export function TunnelDrawer({
   }
 
   function openCreate(initialType?: TunnelInput["forwardType"]) {
-    setEditing({ mode: "create", initialType });
+    setEditing({ requestId: crypto.randomUUID(), mode: "create", initialType });
   }
 
   function renderTemplateRows() {
@@ -305,9 +340,9 @@ export function TunnelDrawer({
                   </Tooltip>
                   <div className="tunnelRowActions" onDoubleClick={(event) => event.stopPropagation()}>
                     {forward ? (
-                      <Tooltip title={forward.status === "failed" ? "移除异常实例" : "停止隧道"}>
+                      <Tooltip title={forward.status === "failed" ? "重试停止异常实例" : "停止隧道"}>
                         <Button
-                          aria-label={forward.status === "failed" ? "移除异常实例" : "停止隧道"}
+                          aria-label={forward.status === "failed" ? "重试停止异常实例" : "停止隧道"}
                           size="small"
                           className="tunnelRowActionButton is-primary"
                           icon={<StopOutlined />}
@@ -336,7 +371,7 @@ export function TunnelDrawer({
                         className="tunnelRowActionButton"
                         icon={<EditOutlined />}
                         disabled={operationKey !== null}
-                        onClick={() => setEditing({ mode: "edit", value: tunnel })}
+                        onClick={() => setEditing({ requestId: crypto.randomUUID(), mode: "edit", value: tunnel })}
                       />
                     </Tooltip>
                     <Tooltip title="删除模板">
@@ -415,9 +450,9 @@ export function TunnelDrawer({
                       onClick={() => void copyBindAddress(forward)}
                     />
                   </Tooltip>
-                  <Tooltip title={forward.status === "failed" ? "移除异常实例" : "停止隧道"}>
+                  <Tooltip title={forward.status === "failed" ? "重试停止异常实例" : "停止隧道"}>
                     <Button
-                      aria-label={forward.status === "failed" ? "移除异常实例" : "停止隧道"}
+                      aria-label={forward.status === "failed" ? "重试停止异常实例" : "停止隧道"}
                       size="small"
                       danger
                       className="tunnelRowActionButton is-danger"
@@ -614,13 +649,14 @@ export function TunnelDrawer({
         sessions={sessions}
         onCancel={() => setEditing(null)}
         onSubmit={async (input) => {
-          if (!editing) return;
-          if (editing.mode === "edit") {
-            await onUpdate(editing.value.id, input);
+          const request = editingRef.current;
+          if (!request) return;
+          if (request.mode === "edit") {
+            await onUpdate(request.value.id, input);
           } else {
             await onCreate(input);
           }
-          if (mountedRef.current) setEditing(null);
+          if (mountedRef.current && editingRef.current?.requestId === request.requestId) setEditing(null);
         }}
       />
     </>
@@ -641,6 +677,10 @@ function TunnelConfigModal({
   const { message } = AntdApp.useApp();
   const [form] = Form.useForm<TunnelInput>();
   const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const mountedRef = useMountedRef();
+  const stateRequestIdRef = useRef(state?.requestId);
+  stateRequestIdRef.current = state?.requestId;
   const watchedName = Form.useWatch("name", form);
   const watchedSessionId = Form.useWatch("sessionId", form);
   const watchedForwardType = Form.useWatch("forwardType", form);
@@ -680,10 +720,10 @@ function TunnelConfigModal({
   useEffect(() => {
     if (!state) {
       form.resetFields();
-      setSubmitting(false);
+      setSubmitting(submittingRef.current);
       return;
     }
-    setSubmitting(false);
+    setSubmitting(submittingRef.current);
     form.resetFields();
     if (state.mode === "edit") {
       form.setFieldsValue(state.value);
@@ -707,7 +747,10 @@ function TunnelConfigModal({
   }, [form, sessions, state]);
 
   async function submit(values: TunnelInput) {
-    if (submitting) return;
+    if (submittingRef.current) return;
+    const requestId = state?.requestId;
+    if (!requestId) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       await onSubmit({
@@ -715,11 +758,14 @@ function TunnelConfigModal({
         targetHost: values.forwardType === "dynamic" ? "SOCKS5" : values.targetHost,
         targetPort: values.forwardType === "dynamic" ? 0 : values.targetPort,
       });
-      message.success(state?.mode === "edit" ? "隧道配置已更新" : "隧道模板已创建");
+      if (mountedRef.current && stateRequestIdRef.current === requestId) {
+        message.success(state?.mode === "edit" ? "隧道配置已更新" : "隧道模板已创建");
+      }
     } catch (error) {
-      message.error(getErrorMessage(error));
+      if (mountedRef.current && stateRequestIdRef.current === requestId) message.error(getErrorMessage(error));
     } finally {
-      setSubmitting(false);
+      submittingRef.current = false;
+      if (mountedRef.current) setSubmitting(false);
     }
   }
 

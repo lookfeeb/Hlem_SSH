@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   addConnectingSessionId,
+  activeSessionIdAfterClose,
   connectingSessionIdsFor,
   formatReconnectCountdownNotice,
   normalizeDisconnectReason,
   ReconnectCountdown,
+  remainingOpenSessionIds,
   removeConnectingSessionIds,
   type ReconnectCountdownScheduler,
 } from "../src/app/sessionConnectionState";
@@ -56,6 +58,15 @@ test("different sessions can connect and reconnect independently", () => {
 
   const remaining = removeConnectingSessionIds(second, ["session-a"]);
   assert.deepEqual(remaining, new Set(["session-b"]));
+});
+
+test("closing tabs preserves a newer active selection made while cleanup is pending", () => {
+  const closing = new Set(["session-a"]);
+  const remaining = remainingOpenSessionIds(["session-a", "session-b", "session-c"], closing);
+
+  assert.deepEqual(remaining, ["session-b", "session-c"]);
+  assert.equal(activeSessionIdAfterClose("session-a", remaining, closing), "session-b");
+  assert.equal(activeSessionIdAfterClose("session-c", remaining, closing), "session-c");
 });
 
 test("a config-level cancel resolves every connecting runtime instance", () => {

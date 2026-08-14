@@ -11,18 +11,19 @@ use std::{
     env,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc, Mutex,
     },
 };
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{watch, Mutex as TokioMutex, RwLock as TokioRwLock};
 
 use crate::{
     api_server::ApiServerHandle,
     config::{AppSettings, KnownHostEntry, SessionConfig, SshProxyOptions},
+    config_mutation::ConfigMutationCoordinator,
     errors::{AppError, AppResult},
     remote::{ConnectionInfo, RemoteRuntime},
     vault::{VaultStore, VAULT_FILE_NAME},
@@ -31,8 +32,8 @@ use crate::{
 // ─── Re-exports (used by lib.rs invoke_handler) ────────────────────────────────
 
 pub use api_server_cmd::{
-    api_server_logs, api_server_regenerate_key, api_server_start, api_server_status,
-    api_server_stop, api_server_update_sessions, spawn_api_server_autostart,
+    api_server_configure_and_start, api_server_logs, api_server_regenerate_key, api_server_status,
+    api_server_stop, spawn_api_server_autostart,
 };
 pub use backup::{
     backup_record_delete, backup_record_restore, backup_records_clear, backup_run_now,
@@ -43,8 +44,9 @@ pub use desktop::{
     local_path_exists, open_database_dir, open_external_url, open_path_dir,
 };
 pub use remote::{
-    forward_list, forward_start_dynamic, forward_start_local, forward_start_remote, forward_stop,
-    latency_probe, telemetry_snapshot, telemetry_start, telemetry_stop,
+    connection_list, forward_list, forward_start_dynamic, forward_start_local,
+    forward_start_remote, forward_stop, latency_probe, telemetry_snapshot, telemetry_start,
+    telemetry_stop,
 };
 pub use sessions::{
     group_create, group_delete, group_update, session_clear_recent, session_create, session_delete,
@@ -62,9 +64,10 @@ pub use terminal::{
     terminal_start, terminal_write,
 };
 pub use vault::{
-    config_snapshot, connection_section_state_update, settings_update, tunnel_create,
-    tunnel_delete, tunnel_update, vault_backup_export, vault_backup_import, vault_migrate,
-    vault_needs_migration, vault_skip_migration,
+    config_snapshot, connection_section_state_update, quick_command_delete, quick_command_upsert,
+    settings_ai_api_update, settings_backup_update, settings_ignore_update_version,
+    settings_proxy_update, tunnel_create, tunnel_delete, tunnel_update, vault_backup_export,
+    vault_backup_import, vault_migrate, vault_needs_migration, vault_skip_migration,
 };
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
@@ -72,6 +75,9 @@ pub use vault::{
 const VAULT_PATH_ENV: &str = "HELM_VAULT_PATH";
 const PROXY_KIND_DIRECT: &str = "direct";
 const TRANSFER_HISTORY_FILE_NAME: &str = "transfer-history.json";
+const SHUTDOWN_NOT_STARTED: u8 = 0;
+const SHUTDOWN_IN_PROGRESS: u8 = 1;
+const SHUTDOWN_COMPLETE: u8 = 2;
 
 // ─── Public types ──────────────────────────────────────────────────────────────
 
@@ -88,8 +94,17 @@ pub struct AppState {
     pub(super) vault: Arc<Mutex<VaultStore>>,
     pub(super) remote: RemoteRuntime,
     pub(super) api_server: TokioMutex<Option<ApiServerHandle>>,
+    pub(super) api_server_operation: TokioMutex<()>,
+    pub(super) backup_operation: Arc<TokioMutex<()>>,
+    pub(super) tunnel_operation: Arc<TokioMutex<()>>,
+    pub(super) connection_config_gate: Arc<TokioRwLock<()>>,
+    pub(super) config_mutations: ConfigMutationCoordinator,
+    pub(super) frontend_ready: AtomicBool,
     pub(super) data_dir: PathBuf,
     pub(super) needs_migration: AtomicBool,
+    pub(super) auto_backup_scheduler_started: Arc<AtomicBool>,
+    pub(super) shutdown_tx: watch::Sender<bool>,
+    shutdown_phase: AtomicU8,
 }
 
 impl AppState {
@@ -108,12 +123,22 @@ impl AppState {
         };
         let remote =
             RemoteRuntime::with_transfer_history_path(data_dir.join(TRANSFER_HISTORY_FILE_NAME));
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             vault,
             remote,
             api_server: TokioMutex::new(None),
+            api_server_operation: TokioMutex::new(()),
+            backup_operation: Arc::new(TokioMutex::new(())),
+            tunnel_operation: Arc::new(TokioMutex::new(())),
+            connection_config_gate: Arc::new(TokioRwLock::new(())),
+            config_mutations: ConfigMutationCoordinator::default(),
+            frontend_ready: AtomicBool::new(false),
             data_dir,
             needs_migration: AtomicBool::new(needs_migration),
+            auto_backup_scheduler_started: Arc::new(AtomicBool::new(false)),
+            shutdown_tx,
+            shutdown_phase: AtomicU8::new(SHUTDOWN_NOT_STARTED),
         }
     }
 
@@ -132,6 +157,58 @@ impl AppState {
 
     pub(super) fn clear_migration_needed(&self) {
         self.needs_migration.store(false, Ordering::Relaxed);
+    }
+
+    pub(super) fn shutdown_receiver(&self) -> watch::Receiver<bool> {
+        self.shutdown_tx.subscribe()
+    }
+
+    pub(super) fn request_shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+
+    pub(super) fn begin_shutdown(&self) -> bool {
+        self.shutdown_phase
+            .compare_exchange(
+                SHUTDOWN_NOT_STARTED,
+                SHUTDOWN_IN_PROGRESS,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(super) fn shutdown_complete(&self) -> bool {
+        self.shutdown_phase.load(Ordering::Acquire) == SHUTDOWN_COMPLETE
+    }
+
+    pub(super) fn is_shutting_down(&self) -> bool {
+        self.shutdown_phase.load(Ordering::Acquire) != SHUTDOWN_NOT_STARTED
+    }
+
+    pub(super) fn finish_shutdown(&self) {
+        self.shutdown_phase
+            .store(SHUTDOWN_COMPLETE, Ordering::Release);
+    }
+
+    pub(super) async fn shutdown_runtime(&self, app: &AppHandle) {
+        self.request_shutdown();
+
+        // Stop accepting API work before draining shared operations and remote
+        // resources. Keep the operation guard so a queued start cannot race the
+        // final cleanup pass.
+        let _api_guard = self.api_server_operation.lock().await;
+        let api_server = self.api_server.lock().await.take();
+        if let Some(handle) = api_server {
+            handle.shutdown().await;
+        }
+
+        // Let an in-flight backup finish its atomic write, then block new tunnel
+        // and connection work while all SSH-owned resources are torn down.
+        let _backup_guard = self.backup_operation.lock().await;
+        let _tunnel_guard = self.tunnel_operation.lock().await;
+        let _config_guard = self.connection_config_gate.write().await;
+        self.remote.shutdown_all_for_exit(app).await;
     }
 }
 
@@ -181,8 +258,26 @@ async fn connect_session(
     state: &State<'_, AppState>,
     session_id: &str,
 ) -> AppResult<ConnectionInfo> {
+    let _config_guard = state.connection_config_gate.read().await;
     let (session, known_host) = session_bundle(state, session_id)?;
-    state.remote.connect(app, session, known_host).await
+    let connection = state
+        .remote
+        .connect(app, session.clone(), known_host)
+        .await?;
+    let still_valid = with_store(state, |store| {
+        session_matches_current_connection_config(store, &session)
+    })
+    .unwrap_or(false);
+    if !still_valid {
+        let _ = state
+            .remote
+            .shutdown_connection(app, &connection.connection_id)
+            .await;
+        return Err(AppError::InvalidInput(
+            "会话配置已变更，请重新连接".to_string(),
+        ));
+    }
+    Ok(connection)
 }
 
 async fn connect_session_new(
@@ -190,8 +285,26 @@ async fn connect_session_new(
     state: &State<'_, AppState>,
     session_id: &str,
 ) -> AppResult<ConnectionInfo> {
+    let _config_guard = state.connection_config_gate.read().await;
     let (session, known_host) = session_bundle(state, session_id)?;
-    state.remote.connect_new(app, session, known_host).await
+    let connection = state
+        .remote
+        .connect_new(app, session.clone(), known_host)
+        .await?;
+    let still_valid = with_store(state, |store| {
+        session_matches_current_connection_config(store, &session)
+    })
+    .unwrap_or(false);
+    if !still_valid {
+        let _ = state
+            .remote
+            .shutdown_connection(app, &connection.connection_id)
+            .await;
+        return Err(AppError::InvalidInput(
+            "会话配置已变更，请重新连接".to_string(),
+        ));
+    }
+    Ok(connection)
 }
 
 fn session_bundle(
@@ -238,12 +351,24 @@ fn apply_global_proxy(session: &mut SessionConfig, settings: &AppSettings) {
     }
 }
 
+pub(crate) fn session_matches_current_connection_config(
+    store: &VaultStore,
+    expected: &SessionConfig,
+) -> AppResult<bool> {
+    let (current, _) = build_session_for_connect(store, &expected.id)?;
+    Ok(current.host == expected.host
+        && current.port == expected.port
+        && current.username == expected.username
+        && current.auth == expected.auth
+        && current.ssh == expected.ssh)
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::VaultData;
+    use crate::config::{VaultData, VAULT_DATA_VERSION};
     use tempfile::TempDir;
 
     fn fresh_state() -> (AppState, TempDir) {
@@ -264,9 +389,22 @@ mod tests {
     #[test]
     fn vault_data_defaults_have_one_group_and_no_sessions() {
         let data = VaultData::with_default_group();
-        assert_eq!(data.version, 1);
+        assert_eq!(data.version, VAULT_DATA_VERSION);
         assert_eq!(data.groups.len(), 1);
         assert!(data.sessions.is_empty());
+    }
+
+    #[test]
+    fn shutdown_can_only_start_once_and_then_completes() {
+        let (state, _temp) = fresh_state();
+        assert!(state.begin_shutdown());
+        assert!(!state.begin_shutdown());
+        assert!(state.is_shutting_down());
+        assert!(!state.shutdown_complete());
+
+        state.finish_shutdown();
+        assert!(state.shutdown_complete());
+        assert!(!state.begin_shutdown());
     }
 
     #[test]

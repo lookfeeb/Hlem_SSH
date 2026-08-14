@@ -1,9 +1,10 @@
 import { Modal } from "antd";
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { appApi } from "../api/appApi";
-import { defaultBackupSettings, vaultApi } from "../api/vaultApi";
+import { vaultApi } from "../api/vaultApi";
 import { getErrorMessage } from "../lib/configMapping";
 import { useMountedRef } from "../lib/reactLifecycle";
+import { normalizeUpdateVersion, updateAssetKey } from "../lib/updateAssets";
 import type { AppInfo, ConfigSnapshot, UpdateInfo } from "../types";
 
 type UseAppUpdaterOptions = {
@@ -29,6 +30,13 @@ export function useAppUpdater({
   const autoUpdateTimerRef = useRef<number | null>(null);
   const autoUpdateIdleCancelRef = useRef<(() => void) | null>(null);
   const autoUpdateScheduledRef = useRef(false);
+  const updateCheckVersionRef = useRef(0);
+  const manualCheckVersionRef = useRef(0);
+  const manualCheckInFlightRef = useRef(false);
+  const downloadVersionRef = useRef(0);
+  const currentUpdateVersionRef = useRef<string | null>(null);
+  const currentAssetKeyRef = useRef<string | null>(null);
+  const downloadedAssetKeyRef = useRef<string | null>(null);
   const mountedRef = useMountedRef();
 
   useEffect(() => {
@@ -58,26 +66,35 @@ export function useAppUpdater({
   }
 
   async function checkForUpdate(manual = true, knownInfo = appInfo) {
-    const info = knownInfo ?? (await appApi.info());
-    if (!mountedRef.current) return;
-    setAppInfo(info);
+    // 延迟自动检查不得取代正在进行的手动检查，否则旧的手动请求无法清掉 loading。
+    if (!manual && manualCheckInFlightRef.current) return;
+    const requestVersion = ++updateCheckVersionRef.current;
     if (manual) {
+      manualCheckVersionRef.current = requestVersion;
+      manualCheckInFlightRef.current = true;
       setUpdateChecking(true);
       setUpdateError(null);
     }
     try {
+      const info = knownInfo ?? (await appApi.info());
+      if (!mountedRef.current || requestVersion !== updateCheckVersionRef.current) return;
+      setAppInfo(info);
       const next = await appApi.checkUpdate(info.version, info.arch);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || requestVersion !== updateCheckVersionRef.current) return;
       if (!next) {
         setUpdateInfo(next);
+        applyCurrentUpdateAsset(null, null);
         return;
       }
       const ignored = configSnapshotRef.current?.data.settings?.ignoredUpdateVersions ?? [];
-      const candidate = normalizeIgnoredVersion(next.latestVersion, next.tagName);
-      setUpdateInfo(next.hasUpdate && candidate && ignored.includes(candidate) ? { ...next, hasUpdate: false } : next);
+      const candidate = normalizeUpdateVersion(next.latestVersion, next.tagName);
+      const normalized = next.hasUpdate && candidate && ignored.includes(candidate) ? { ...next, hasUpdate: false } : next;
+      setUpdateInfo(normalized);
+      const nextAssetKey = updateAssetKey(normalized);
+      applyCurrentUpdateAsset(candidate || null, nextAssetKey);
     } catch (error) {
       const message = getErrorMessage(error);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || requestVersion !== updateCheckVersionRef.current) return;
       if (manual) {
         setUpdateError(message);
         Modal.error({ title: "检查更新失败", content: message });
@@ -85,23 +102,37 @@ export function useAppUpdater({
         console.warn("[helm] auto update check failed:", message);
       }
     } finally {
-      if (manual && mountedRef.current) setUpdateChecking(false);
+      if (manual && requestVersion === manualCheckVersionRef.current) {
+        manualCheckInFlightRef.current = false;
+        if (mountedRef.current) setUpdateChecking(false);
+      }
     }
   }
 
   async function downloadUpdate(target = updateInfo) {
-    if (!target?.asset) return;
+    const assetKey = updateAssetKey(target);
+    if (!target?.asset || !assetKey || assetKey !== currentAssetKeyRef.current) return;
+    const requestVersion = ++downloadVersionRef.current;
     setUpdateDownloading(true);
     try {
       const path = await appApi.downloadSignedUpdate(target.asset.downloadUrl, target.asset.name, target.asset.sha256);
-      if (!mountedRef.current) return;
+      if (
+        !mountedRef.current
+        || requestVersion !== downloadVersionRef.current
+        || currentAssetKeyRef.current !== assetKey
+      ) return;
+      downloadedAssetKeyRef.current = assetKey;
       setDownloadedUpdatePath(path);
     } catch (error) {
-      if (mountedRef.current) {
+      if (
+        mountedRef.current
+        && requestVersion === downloadVersionRef.current
+        && currentAssetKeyRef.current === assetKey
+      ) {
         Modal.error({ title: "下载更新失败", content: getErrorMessage(error) });
       }
     } finally {
-      if (mountedRef.current) setUpdateDownloading(false);
+      if (mountedRef.current && requestVersion === downloadVersionRef.current) setUpdateDownloading(false);
     }
   }
 
@@ -117,29 +148,49 @@ export function useAppUpdater({
   }
 
   async function ignoreUpdateVersion(target = updateInfo) {
-    const snapshot = configSnapshotRef.current;
-    if (!target || !snapshot) return;
-    const candidate = normalizeIgnoredVersion(target.latestVersion, target.tagName);
+    if (!target) return;
+    const candidate = normalizeUpdateVersion(target.latestVersion, target.tagName);
     if (!candidate) return;
-    const previous = snapshot.data.settings?.ignoredUpdateVersions ?? [];
+    const previous = configSnapshotRef.current?.data.settings?.ignoredUpdateVersions ?? [];
     if (previous.includes(candidate)) {
-      setUpdateInfo({ ...target, hasUpdate: false });
+      markUpdateIgnored(candidate);
       return;
     }
     try {
-      const next = await vaultApi.settingsUpdate({
-        ...snapshot.data.settings,
-        backup: snapshot.data.settings.backup ?? defaultBackupSettings(),
-        ignoredUpdateVersions: [...previous, candidate],
-      });
+      const next = await vaultApi.settingsIgnoreUpdateVersion(candidate);
       if (!mountedRef.current) return;
       applyConfigSnapshot(next);
-      setUpdateInfo({ ...target, hasUpdate: false });
+      markUpdateIgnored(candidate);
     } catch (error) {
       if (mountedRef.current) {
         Modal.error({ title: "忽略版本失败", content: getErrorMessage(error) });
       }
     }
+  }
+
+  function applyCurrentUpdateAsset(version: string | null, assetKey: string | null) {
+    const assetChanged = currentAssetKeyRef.current !== assetKey;
+    currentUpdateVersionRef.current = version;
+    currentAssetKeyRef.current = assetKey;
+    if (assetChanged) {
+      downloadVersionRef.current += 1;
+      setUpdateDownloading(false);
+    }
+    if (!assetKey || downloadedAssetKeyRef.current !== assetKey) {
+      downloadedAssetKeyRef.current = null;
+      setDownloadedUpdatePath(null);
+    }
+  }
+
+  function markUpdateIgnored(candidate: string) {
+    if (currentUpdateVersionRef.current === candidate) {
+      applyCurrentUpdateAsset(candidate, null);
+    }
+    setUpdateInfo((current) => (
+      current && normalizeUpdateVersion(current.latestVersion, current.tagName) === candidate
+        ? { ...current, hasUpdate: false }
+        : current
+    ));
   }
 
   return {
@@ -166,10 +217,4 @@ function runWhenBrowserIdle(task: () => void): () => void {
   }
   const timer = window.setTimeout(task, 0);
   return () => window.clearTimeout(timer);
-}
-
-function normalizeIgnoredVersion(latestVersion: string | undefined, tagName: string | undefined) {
-  const candidate = (latestVersion || tagName || "").trim();
-  if (!candidate) return "";
-  return candidate.replace(/^v/i, "");
 }

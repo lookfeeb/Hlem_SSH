@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex as StdMutex,
+        Arc, Mutex as StdMutex, Weak,
     },
     time::{Duration, SystemTime},
 };
@@ -62,6 +62,16 @@ use ssh::*;
 use telemetry::*;
 use transfer::*;
 
+fn lock_unpoisoned<'a, T>(mutex: &'a StdMutex<T>, context: &str) -> std::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("{context} lock was poisoned; recovering the runtime registry");
+            poisoned.into_inner()
+        }
+    }
+}
+
 const DEFAULT_EXEC_TIMEOUT_MS: u64 = 20_000;
 const MAX_TEXT_EDIT_BYTES: u64 = 10 * 1024 * 1024;
 const TELEMETRY_PROCESS_MIN_INTERVAL_MS: u64 = 15_000;
@@ -84,6 +94,10 @@ const SFTP_FILE_OPERATION_TIMEOUT_MS: u64 = 30 * 60_000;
 const SFTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_TRANSFER_HISTORY: usize = 100;
 const MAX_TERMINAL_STARTUP_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const CHANNEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const CONNECTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const TELEMETRY_JOB_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const API_UPLOAD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const TRANSFER_BUFFER_BYTES: usize = 1024 * 1024;
 const TRANSFER_ACCELERATED_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 const TRANSFER_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
@@ -348,6 +362,7 @@ type TerminalWriter = ChannelWriteHalf<client::Msg>;
 
 #[derive(Clone, Default)]
 pub struct RemoteRuntime {
+    lifecycle_gate: Arc<RwLock<()>>,
     connections: Arc<RwLock<HashMap<String, ConnectionRecord>>>,
     terminals: Arc<RwLock<HashMap<String, TerminalRecord>>>,
     sftp_sessions: Arc<RwLock<HashMap<String, SftpRecord>>>,
@@ -355,10 +370,14 @@ pub struct RemoteRuntime {
     transfer_history_path: Arc<RwLock<Option<PathBuf>>>,
     transfer_history_loaded: Arc<AtomicBool>,
     transfer_history_load_lock: Arc<Mutex<()>>,
+    transfer_history_write_lock: Arc<Mutex<()>>,
     telemetry_jobs: Arc<RwLock<HashMap<String, TelemetryJobRecord>>>,
     forwards: Arc<RwLock<HashMap<String, ForwardRecord>>>,
-    connection_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    sftp_open_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    forward_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+    remote_forward_start_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+    connection_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+    sftp_open_locks: Arc<Mutex<HashMap<String, Weak<Mutex<()>>>>>,
+    dead_connection_reaper_started: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -456,6 +475,7 @@ pub struct TransferHistorySnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct TelemetryJobInfo {
     pub job_id: String,
+    pub connection_id: String,
     pub session_id: String,
     pub interval_ms: u64,
     pub status: TaskStatus,
@@ -540,6 +560,7 @@ pub struct DiskMetric {
 #[serde(rename_all = "camelCase")]
 pub struct ForwardInfo {
     pub forward_id: String,
+    pub tunnel_id: Option<String>,
     pub session_id: String,
     pub forward_type: ForwardType,
     pub bind_host: String,
@@ -557,6 +578,18 @@ pub enum RuntimeStatus {
     Connecting,
     Connected,
     Disconnected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionOrigin {
+    Desktop,
+    Automation,
+}
+
+impl ConnectionOrigin {
+    fn notifies_desktop(self) -> bool {
+        matches!(self, Self::Desktop)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -588,6 +621,7 @@ pub enum ForwardType {
 #[derive(Clone)]
 struct ConnectionRecord {
     info: ConnectionInfo,
+    origin: ConnectionOrigin,
     handle: SshHandle,
     remote_forwards: Arc<RwLock<HashMap<String, RemoteForwardTarget>>>,
     diagnostics: Arc<StdMutex<RemoteClientDiagnostics>>,
@@ -598,6 +632,8 @@ struct TerminalRecord {
     info: TerminalInfo,
     writer: Arc<Mutex<TerminalWriter>>,
     output_gate: Arc<Mutex<TerminalOutputGate>>,
+    reader: Arc<StdMutex<Option<JoinHandle<()>>>>,
+    closed: Arc<AtomicBool>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -679,9 +715,88 @@ struct SftpRecord {
     transfer_slots: Arc<Semaphore>,
     transfer_pool_ready: Arc<AtomicBool>,
     transfer_pool_notify: Arc<Notify>,
+    transfer_pool_builder: Arc<StdMutex<Option<JoinHandle<()>>>>,
+    closed: Arc<AtomicBool>,
+    active_api_uploads: Arc<AtomicU64>,
+    api_upload_notify: Arc<Notify>,
 }
 
 impl SftpRecord {
+    fn begin_close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.transfer_pool_notify.notify_waiters();
+        self.api_upload_notify.notify_waiters();
+    }
+
+    fn register_api_upload(&self) -> AppResult<ActiveApiUploadGuard> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AppError::missing_sftp(&self.info.sftp_id));
+        }
+        self.active_api_uploads.fetch_add(1, Ordering::AcqRel);
+        if self.closed.load(Ordering::Acquire) {
+            self.active_api_uploads.fetch_sub(1, Ordering::AcqRel);
+            self.api_upload_notify.notify_waiters();
+            return Err(AppError::missing_sftp(&self.info.sftp_id));
+        }
+        Ok(ActiveApiUploadGuard {
+            active: self.active_api_uploads.clone(),
+            notify: self.api_upload_notify.clone(),
+        })
+    }
+
+    async fn wait_for_api_upload_cleanup(&self) {
+        let wait = async {
+            loop {
+                let notified = self.api_upload_notify.notified();
+                if self.active_api_uploads.load(Ordering::Acquire) == 0 {
+                    break;
+                }
+                notified.await;
+            }
+        };
+        if timeout(API_UPLOAD_CLEANUP_TIMEOUT, wait).await.is_err() {
+            log::debug!(
+                "timed out waiting for {} API upload(s) to clean up for SFTP {}",
+                self.active_api_uploads.load(Ordering::Acquire),
+                self.info.sftp_id
+            );
+        }
+    }
+
+    async fn close(&self) {
+        self.begin_close();
+        let builder = lock_unpoisoned(
+            &self.transfer_pool_builder,
+            "SFTP transfer pool task registry",
+        )
+        .take();
+        if let Some(handle) = builder.as_ref() {
+            handle.abort();
+        }
+        if let Some(handle) = builder {
+            if let Err(error) = handle.await {
+                if !error.is_cancelled() {
+                    eprintln!("[helm] SFTP transfer pool task failed while stopping: {error}");
+                }
+            }
+        }
+        self.transfer_pool_ready.store(true, Ordering::Release);
+        self.transfer_pool_notify.notify_waiters();
+        self.wait_for_api_upload_cleanup().await;
+        // Synchronize with the background pool builder. If it was already
+        // publishing a channel, wait for that write and release every pooled
+        // session before returning from close.
+        let sessions = {
+            let mut sessions = self.transfer_sessions.write().await;
+            std::mem::take(&mut *sessions)
+        };
+        for session in sessions {
+            if let Err(error) = session.close().await {
+                log::debug!("failed to close pooled SFTP session: {error}");
+            }
+        }
+    }
+
     async fn next_transfer_session(&self) -> Arc<SftpSession> {
         let sessions = self.transfer_sessions.read().await;
         if sessions.is_empty() {
@@ -694,27 +809,42 @@ impl SftpRecord {
     }
 
     async fn wait_for_transfer_pool(&self) {
-        if self.transfer_pool_ready.load(Ordering::Acquire) {
+        if self.transfer_pool_ready.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
             return;
         }
         let notified = self.transfer_pool_notify.notified();
-        if self.transfer_pool_ready.load(Ordering::Acquire) {
+        if self.transfer_pool_ready.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
             return;
         }
         let _ = timeout(SFTP_TRANSFER_POOL_WAIT, notified).await;
     }
 }
 
+struct ActiveApiUploadGuard {
+    active: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+}
+
+impl Drop for ActiveApiUploadGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
+    }
+}
+
 struct TransferRecord {
     info: TransferInfo,
     request: TransferRequest,
+    cleanup_sftp: Option<Arc<SftpSession>>,
     cancel: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
 struct TelemetryJobRecord {
+    connection_id: String,
     info: TelemetryJobInfo,
+    shutdown: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
 }
 
@@ -740,8 +870,75 @@ struct NetworkBytes {
 }
 
 struct ForwardRecord {
+    connection_id: String,
+    origin: ConnectionOrigin,
     info: ForwardInfo,
     handle: Option<JoinHandle<()>>,
+    child_tasks: Arc<ForwardChildTasks>,
+}
+
+#[derive(Debug, Default)]
+struct ForwardChildTaskState {
+    closed: bool,
+    handles: Vec<JoinHandle<()>>,
+}
+
+#[derive(Debug, Default)]
+struct ForwardChildTasks {
+    state: StdMutex<ForwardChildTaskState>,
+}
+
+impl ForwardChildTasks {
+    fn register(&self, handle: JoinHandle<()>) {
+        let mut state = lock_unpoisoned(&self.state, "forward child task registry");
+        if state.closed {
+            handle.abort();
+            return;
+        }
+        state.handles.retain(|task| !task.is_finished());
+        state.handles.push(handle);
+    }
+
+    fn close_and_take(&self) -> Vec<JoinHandle<()>> {
+        let mut state = lock_unpoisoned(&self.state, "forward child task registry");
+        state.closed = true;
+        std::mem::take(&mut state.handles)
+    }
+}
+
+async fn abort_forward_tasks(record: &mut ForwardRecord) {
+    let mut handles = record.child_tasks.close_and_take();
+    if let Some(handle) = record.handle.take() {
+        handles.push(handle);
+    }
+    for handle in &handles {
+        handle.abort();
+    }
+    for handle in handles {
+        if let Err(error) = handle.await {
+            if !error.is_cancelled() {
+                eprintln!("[helm] forward task failed while stopping: {error}");
+            }
+        }
+    }
+}
+
+fn has_active_remote_forward(
+    forwards: &HashMap<String, ForwardRecord>,
+    connection_id: &str,
+    bind_host: &str,
+    bind_port: u16,
+) -> bool {
+    forwards.values().any(|record| {
+        record.connection_id == connection_id
+            && matches!(record.info.forward_type, ForwardType::Remote)
+            && record.info.bind_host == bind_host
+            && record.info.bind_port == bind_port
+            && !matches!(
+                record.info.status,
+                TaskStatus::Canceled | TaskStatus::Completed
+            )
+    })
 }
 
 pub struct TransferUploadOptions {
@@ -754,6 +951,7 @@ pub struct TransferUploadOptions {
 }
 
 pub struct ForwardLocalOptions {
+    pub tunnel_id: Option<String>,
     pub session_id: String,
     pub connection_id: String,
     pub bind_host: String,
@@ -763,6 +961,7 @@ pub struct ForwardLocalOptions {
 }
 
 pub struct ForwardRemoteOptions {
+    pub tunnel_id: Option<String>,
     pub session_id: String,
     pub connection_id: String,
     pub remote_bind_host: String,
@@ -786,6 +985,7 @@ struct TransferRequest {
 struct RemoteForwardTarget {
     local_host: String,
     local_port: u16,
+    child_tasks: Arc<ForwardChildTasks>,
 }
 
 #[derive(Clone)]
@@ -864,11 +1064,21 @@ impl Handler for RemoteClient {
         _originator_port: u32,
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
-        let key = forward_key(connected_address, connected_port as u16);
+        let Some(connected_port) = normalize_forwarded_channel_port(connected_port) else {
+            eprintln!(
+                "[helm] rejected remote forward channel with invalid connected port: {connected_port}"
+            );
+            if let Err(error) = close_ssh_channel(&channel).await {
+                eprintln!("[helm] failed to close invalid remote forward channel: {error}");
+            }
+            return Ok(());
+        };
+        let key = forward_key(connected_address, connected_port);
         let target = self.remote_forwards.read().await.get(&key).cloned();
         match target {
             Some(target) => {
-                tokio::spawn(async move {
+                let child_tasks = target.child_tasks.clone();
+                let task = tokio::spawn(async move {
                     if let Ok(mut local) = connect_tcp_with_timeout(
                         target.local_host.as_str(),
                         target.local_port,
@@ -883,13 +1093,14 @@ impl Handler for RemoteClient {
                                 target.local_host, target.local_port
                             );
                         }
-                    } else if let Err(error) = channel.close().await {
+                    } else if let Err(error) = close_ssh_channel(&channel).await {
                         eprintln!("[helm] failed to close remote forward channel: {error}");
                     }
                 });
+                child_tasks.register(task);
             }
             None => {
-                if let Err(error) = channel.close().await {
+                if let Err(error) = close_ssh_channel(&channel).await {
                     eprintln!("[helm] failed to close unknown remote forward channel: {error}");
                 }
             }
@@ -1024,9 +1235,20 @@ fn forward_key(host: &str, port: u16) -> String {
     format!("{host}:{port}")
 }
 
+fn normalize_forwarded_channel_port(port: u32) -> Option<u16> {
+    u16::try_from(port).ok().filter(|port| *port != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forwarded_channel_ports_reject_zero_and_out_of_range_values() {
+        assert_eq!(normalize_forwarded_channel_port(22), Some(22));
+        assert_eq!(normalize_forwarded_channel_port(0), None);
+        assert_eq!(normalize_forwarded_channel_port(u16::MAX as u32 + 1), None);
+    }
 
     #[test]
     fn parses_linux_telemetry_output() {
@@ -1081,6 +1303,9 @@ PROC 42 sshd 1.5 20.0
     #[test]
     fn normalizes_and_joins_remote_paths() {
         assert_eq!(normalize_remote_path("tmp//app/"), "/tmp/app");
+        assert_eq!(normalize_remote_path("/tmp/./app/../logs"), "/tmp/logs");
+        assert_eq!(normalize_remote_path("/tmp/.."), "/");
+        assert_eq!(normalize_remote_path("../../etc"), "/etc");
         assert_eq!(join_remote_path("/", "var"), "/var");
         assert_eq!(join_remote_path("/tmp", "app.log"), "/tmp/app.log");
     }
@@ -1166,6 +1391,8 @@ PROC 42 sshd 1.5 20.0
     #[test]
     fn protects_root_and_child_directory_targets() {
         assert!(ensure_not_root_path("/", "不能删除根目录").is_err());
+        assert!(ensure_not_root_path("/.", "不能删除根目录").is_err());
+        assert!(ensure_not_root_path("/tmp/..", "不能删除根目录").is_err());
         assert!(ensure_not_root_path("/tmp", "不能删除根目录").is_ok());
         assert!(is_same_or_child_remote_path("/tmp/app", "/tmp/app"));
         assert!(is_same_or_child_remote_path("/tmp/app", "/tmp/app/logs"));
@@ -1178,6 +1405,165 @@ PROC 42 sshd 1.5 20.0
     async fn new_runtime_has_no_stale_handles() {
         let runtime = RemoteRuntime::default();
         assert!(runtime.ensure_no_stale_handles().await);
+    }
+
+    #[tokio::test]
+    async fn forward_lookup_and_cleanup_use_the_public_tunnel_id() {
+        let runtime = RemoteRuntime::default();
+        let info = ForwardInfo {
+            forward_id: "forward-a".to_string(),
+            tunnel_id: Some("tunnel-a".to_string()),
+            session_id: "session-a".to_string(),
+            forward_type: ForwardType::Local,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 19880,
+            target_host: "127.0.0.1".to_string(),
+            target_port: 22,
+            status: TaskStatus::Running,
+            started_at: now(),
+            error: None,
+        };
+        runtime.forwards.write().await.insert(
+            info.forward_id.clone(),
+            ForwardRecord {
+                connection_id: "connection-a".to_string(),
+                origin: ConnectionOrigin::Desktop,
+                info: info.clone(),
+                handle: None,
+                child_tasks: Arc::new(ForwardChildTasks::default()),
+            },
+        );
+
+        assert_eq!(
+            runtime
+                .forward_for_tunnel("tunnel-a", ConnectionOrigin::Desktop)
+                .await
+                .unwrap()
+                .forward_id,
+            info.forward_id
+        );
+        let removed = runtime
+            .forwards
+            .write()
+            .await
+            .remove("forward-a")
+            .expect("forward must be removable");
+        assert_eq!(removed.info.tunnel_id.as_deref(), Some("tunnel-a"));
+        assert!(runtime
+            .forward_for_tunnel("tunnel-a", ConnectionOrigin::Desktop)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn forward_lookup_is_scoped_to_connection_origin() {
+        let runtime = RemoteRuntime::default();
+        let info = ForwardInfo {
+            forward_id: "forward-api".to_string(),
+            tunnel_id: Some("tunnel-a".to_string()),
+            session_id: "session-a".to_string(),
+            forward_type: ForwardType::Local,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 19881,
+            target_host: "127.0.0.1".to_string(),
+            target_port: 22,
+            status: TaskStatus::Running,
+            started_at: now(),
+            error: None,
+        };
+        runtime.forwards.write().await.insert(
+            info.forward_id.clone(),
+            ForwardRecord {
+                connection_id: "connection-api".to_string(),
+                origin: ConnectionOrigin::Automation,
+                info: info.clone(),
+                handle: None,
+                child_tasks: Arc::new(ForwardChildTasks::default()),
+            },
+        );
+
+        assert!(runtime
+            .forward_for_tunnel("tunnel-a", ConnectionOrigin::Desktop)
+            .await
+            .is_none());
+        assert_eq!(
+            runtime
+                .forward_for_tunnel("tunnel-a", ConnectionOrigin::Automation)
+                .await
+                .unwrap()
+                .forward_id,
+            info.forward_id
+        );
+        assert!(runtime.forward_list().await.is_empty());
+    }
+
+    #[test]
+    fn duplicate_remote_forward_check_is_scoped_to_connection_and_active_status() {
+        let mut forwards = HashMap::new();
+        let info = ForwardInfo {
+            forward_id: "forward-a".to_string(),
+            tunnel_id: None,
+            session_id: "session-a".to_string(),
+            forward_type: ForwardType::Remote,
+            bind_host: "0.0.0.0".to_string(),
+            bind_port: 2200,
+            target_host: "local".to_string(),
+            target_port: 22,
+            status: TaskStatus::Running,
+            started_at: now(),
+            error: None,
+        };
+        forwards.insert(
+            info.forward_id.clone(),
+            ForwardRecord {
+                connection_id: "connection-a".to_string(),
+                origin: ConnectionOrigin::Desktop,
+                info,
+                handle: None,
+                child_tasks: Arc::new(ForwardChildTasks::default()),
+            },
+        );
+
+        assert!(has_active_remote_forward(
+            &forwards,
+            "connection-a",
+            "0.0.0.0",
+            2200
+        ));
+        assert!(!has_active_remote_forward(
+            &forwards,
+            "connection-b",
+            "0.0.0.0",
+            2200
+        ));
+        forwards.get_mut("forward-a").unwrap().info.status = TaskStatus::Failed;
+        assert!(has_active_remote_forward(
+            &forwards,
+            "connection-a",
+            "0.0.0.0",
+            2200
+        ));
+        forwards.get_mut("forward-a").unwrap().info.status = TaskStatus::Canceled;
+        assert!(!has_active_remote_forward(
+            &forwards,
+            "connection-a",
+            "0.0.0.0",
+            2200
+        ));
+    }
+
+    #[tokio::test]
+    async fn forward_child_tasks_abort_late_registration_after_close() {
+        let tasks = ForwardChildTasks::default();
+        let handles = tasks.close_and_take();
+        assert!(handles.is_empty());
+        let handle = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = handle.abort_handle();
+
+        tasks.register(handle);
+        tokio::task::yield_now().await;
+
+        assert!(abort_handle.is_finished());
     }
 
     #[tokio::test]
@@ -1321,6 +1707,7 @@ PROC 42 sshd 1.5 20.0
                     connected_at: now(),
                     disconnect_reason: None,
                 },
+                origin: ConnectionOrigin::Desktop,
                 handle: Arc::new(Mutex::new(handle)),
                 remote_forwards: Arc::new(RwLock::new(HashMap::new())),
                 diagnostics,
@@ -1334,7 +1721,14 @@ PROC 42 sshd 1.5 20.0
         connection_id: &str,
         sftp_id: &str,
     ) {
-        runtime.close_sftp(sftp_id).await.unwrap();
+        runtime
+            .sftp_sessions
+            .write()
+            .await
+            .remove(sftp_id)
+            .unwrap()
+            .closed
+            .store(true, Ordering::Release);
         let connection = runtime
             .connections
             .write()

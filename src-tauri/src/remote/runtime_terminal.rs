@@ -8,6 +8,7 @@ impl RemoteRuntime {
         cols: u16,
         rows: u16,
     ) -> AppResult<TerminalInfo> {
+        let _lifecycle_guard = self.lifecycle_gate.read().await;
         let started = Instant::now();
         let connection = self.connection(connection_id).await?;
         let channel_started = Instant::now();
@@ -17,10 +18,11 @@ impl RemoteRuntime {
         let channel_ms = channel_started.elapsed().as_millis();
         let (mut read_half, write_half) = channel.split();
         let pty_started = Instant::now();
-        write_half
-            .request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
-            .await
-            .map_err(remote_error)?;
+        run_ssh_channel_control(
+            "申请终端 PTY",
+            write_half.request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[]),
+        )
+        .await?;
         let pty_ms = pty_started.elapsed().as_millis();
 
         let terminal_id = Uuid::new_v4().to_string();
@@ -31,6 +33,8 @@ impl RemoteRuntime {
         }
         let writer = Arc::new(Mutex::new(write_half));
         let output_gate = Arc::new(Mutex::new(TerminalOutputGate::default()));
+        let reader = Arc::new(StdMutex::new(None));
+        let closed = Arc::new(AtomicBool::new(false));
         let info = TerminalInfo {
             terminal_id: terminal_id.clone(),
             connection_id: connection_id.to_string(),
@@ -41,7 +45,10 @@ impl RemoteRuntime {
 
         {
             let writer = writer.lock().await;
-            if let Err(error) = writer.set_env(false, "TMOUT", "").await {
+            if let Err(error) =
+                run_ssh_channel_control("设置终端环境变量", writer.set_env(false, "TMOUT", ""))
+                    .await
+            {
                 log::debug!("remote refused TMOUT environment override: {error}");
             }
         }
@@ -52,7 +59,7 @@ impl RemoteRuntime {
         let shell_started = Instant::now();
         {
             let writer = writer.lock().await;
-            writer.request_shell(true).await.map_err(remote_error)?;
+            run_ssh_channel_control("启动远程 Shell", writer.request_shell(true)).await?;
         }
         let shell_ms = shell_started.elapsed().as_millis();
         // Do not inject prompt hooks into the interactive PTY. Even invisible
@@ -60,37 +67,28 @@ impl RemoteRuntime {
         // chunks on the frontend risks desynchronizing xterm's parser/cursor
         // state. Keep terminal output as the remote shell actually produced it.
 
-        self.terminals.write().await.insert(
-            terminal_id.clone(),
-            TerminalRecord {
-                info: info.clone(),
-                writer: writer.clone(),
-                output_gate: output_gate.clone(),
-            },
-        );
-
-        log::info!(
-            "SSH terminal ready: connection_id={} channel_ms={} pty_ms={} shell_ms={} total_ms={}",
-            connection_id,
-            channel_ms,
-            pty_ms,
-            shell_ms,
-            started.elapsed().as_millis()
-        );
-
         let app_handle = app.clone();
         let terminals = self.terminals.clone();
         let closed_terminal_id = terminal_id.clone();
+        let task_closed = closed.clone();
         let reader_connection_id = connection_id.to_string();
         let reader_handle = connection.handle.clone();
         let reader_runtime = self.clone();
-        tokio::spawn(async move {
+        let reader_output_gate = output_gate.clone();
+        let (reader_start_sender, reader_start_receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            if reader_start_receiver.await.is_err() {
+                return;
+            }
             while let Some(message) = read_half.wait().await {
+                if task_closed.load(Ordering::Acquire) {
+                    return;
+                }
                 match message {
                     ChannelMsg::Data { data } => {
                         emit_or_buffer_terminal_output(
                             &app_handle,
-                            &output_gate,
+                            &reader_output_gate,
                             &closed_terminal_id,
                             "output",
                             &data,
@@ -100,7 +98,7 @@ impl RemoteRuntime {
                     ChannelMsg::ExtendedData { data, .. } => {
                         emit_or_buffer_terminal_output(
                             &app_handle,
-                            &output_gate,
+                            &reader_output_gate,
                             &closed_terminal_id,
                             "error",
                             &data,
@@ -128,6 +126,7 @@ impl RemoteRuntime {
                 .remove(&closed_terminal_id)
                 .is_some();
             if removed {
+                task_closed.store(true, Ordering::Release);
                 crate::errors::forget_resource_label(&closed_terminal_id);
                 emit_terminal_closed(&app_handle, closed_terminal_id);
             }
@@ -149,6 +148,12 @@ impl RemoteRuntime {
                     .remove(&reader_connection_id);
                 if let Some(record) = removed_record {
                     let disconnect_reason = observed_disconnect_reason(&record).await;
+                    log::warn!(
+                        "终端通道结束后检测到 SSH 连接已断开: connection={} host={} reason={}",
+                        reader_connection_id,
+                        record.info.host,
+                        disconnect_reason
+                    );
                     reader_runtime
                         .close_children_for_connection(
                             &app_handle,
@@ -156,14 +161,65 @@ impl RemoteRuntime {
                             Some(&disconnect_reason),
                         )
                         .await;
-                    let mut info = record.info;
-                    info.status = RuntimeStatus::Disconnected;
-                    info.disconnect_reason = Some(disconnect_reason);
-                    events::emit(&app_handle, events::SSH_STATUS, info);
+                    if record.origin.notifies_desktop() {
+                        let mut info = record.info;
+                        info.status = RuntimeStatus::Disconnected;
+                        info.disconnect_reason = Some(disconnect_reason);
+                        events::emit(&app_handle, events::SSH_STATUS, info);
+                    }
                     crate::errors::forget_resource_label(&reader_connection_id);
                 }
             }
         });
+        {
+            let mut reader_slot = lock_unpoisoned(&reader, "terminal reader registry");
+            *reader_slot = Some(task);
+        }
+
+        // The reader handle must be attached before the terminal becomes visible in the
+        // registry. Otherwise a concurrent close can remove a record whose reader slot is
+        // still empty, after which the newly spawned reader would no longer be owned by any
+        // lifecycle record.
+        let terminal_record = TerminalRecord {
+            info: info.clone(),
+            writer: writer.clone(),
+            output_gate: output_gate.clone(),
+            reader: reader.clone(),
+            closed: closed.clone(),
+        };
+        let connections = self.connections.read().await;
+        if !connections.contains_key(connection_id) {
+            drop(connections);
+            if let Err(error) = close_terminal_record(terminal_record).await {
+                eprintln!(
+                    "[helm] failed to close terminal opened after connection closed: {terminal_id}: {error}"
+                );
+            }
+            crate::errors::forget_resource_label(&terminal_id);
+            return Err(AppError::missing_connection(connection_id));
+        }
+        self.terminals
+            .write()
+            .await
+            .insert(terminal_id.clone(), terminal_record);
+        drop(connections);
+
+        if reader_start_sender.send(()).is_err() {
+            if let Some(record) = self.terminals.write().await.remove(&terminal_id) {
+                let _ = close_terminal_record(record).await;
+            }
+            crate::errors::forget_resource_label(&terminal_id);
+            return Err(AppError::Remote("终端读取任务启动失败".to_string()));
+        }
+
+        log::info!(
+            "SSH terminal ready: connection_id={} channel_ms={} pty_ms={} shell_ms={} total_ms={}",
+            connection_id,
+            channel_ms,
+            pty_ms,
+            shell_ms,
+            started.elapsed().as_millis()
+        );
 
         Ok(info)
     }
@@ -192,13 +248,17 @@ impl RemoteRuntime {
 
     pub async fn terminal_write(&self, terminal_id: &str, data: String) -> AppResult<()> {
         let writer = self.terminal_writer(terminal_id).await?;
-        let writer = writer.lock().await;
-        let mut stream = writer.make_writer();
-        stream
-            .write_all(data.as_bytes())
-            .await
-            .map_err(remote_error)?;
-        stream.flush().await.map_err(remote_error)?;
+        timeout(CHANNEL_SHUTDOWN_TIMEOUT, async {
+            let writer = writer.lock().await;
+            let mut stream = writer.make_writer();
+            stream
+                .write_all(data.as_bytes())
+                .await
+                .map_err(remote_error)?;
+            stream.flush().await.map_err(remote_error)
+        })
+        .await
+        .map_err(|_| AppError::Remote("写入终端超时（连接可能已断开）".to_string()))??;
         Ok(())
     }
 
@@ -213,10 +273,12 @@ impl RemoteRuntime {
         if record.info.cols == cols && record.info.rows == rows {
             return Ok(());
         }
-        let result = {
+        let result = timeout(CHANNEL_SHUTDOWN_TIMEOUT, async {
             let writer = record.writer.lock().await;
             writer.window_change(cols as u32, rows as u32, 0, 0).await
-        };
+        })
+        .await
+        .map_err(|_| AppError::Remote("调整终端窗口超时（连接可能已断开）".to_string()))?;
         result.map_err(remote_error)?;
 
         if let Some(record) = self.terminals.write().await.get_mut(terminal_id) {
@@ -233,10 +295,10 @@ impl RemoteRuntime {
             .await
             .remove(terminal_id)
             .ok_or_else(|| AppError::missing_terminal(terminal_id))?;
-        close_terminal_record(record).await?;
+        let result = close_terminal_record(record).await;
         crate::errors::forget_resource_label(terminal_id);
         emit_terminal_closed(app, terminal_id.to_string());
-        Ok(())
+        result
     }
 
     pub async fn exec_on_connection(

@@ -1,4 +1,14 @@
-import type { AppSettings, BackupSettings, ConfigSnapshot, GroupInput, SessionInput, SshOptions, TunnelInput } from "../types";
+import type {
+  AiApiSettings,
+  AppProxyOptions,
+  BackupSettings,
+  ConfigSnapshot,
+  GroupInput,
+  QuickCommand,
+  SessionInput,
+  SshOptions,
+  TunnelInput,
+} from "../types";
 import { call } from "./bridge";
 
 export const vaultApi = {
@@ -14,7 +24,22 @@ export const vaultApi = {
   backupRecordDelete: (recordId: string, deleteFile = false) =>
     call<ConfigSnapshot>("backup_record_delete", { recordId, deleteFile }),
   backupRecordsClear: () => call<ConfigSnapshot>("backup_records_clear"),
-  settingsUpdate: (settings: AppSettings) => call<ConfigSnapshot>("settings_update", { settings }),
+  settingsProxyUpdate: (proxy: AppProxyOptions | null) =>
+    call<ConfigSnapshot>("settings_proxy_update", { proxy }),
+  settingsBackupUpdate: (backup: BackupSettings) =>
+    call<ConfigSnapshot>("settings_backup_update", { backup }),
+  quickCommandUpsert: (command: QuickCommand) =>
+    call<ConfigSnapshot>("quick_command_upsert", { command }),
+  quickCommandDelete: (commandId: string) =>
+    call<ConfigSnapshot>("quick_command_delete", { commandId }),
+  settingsAiApiUpdate: (settings: AiApiSettings) =>
+    call<ConfigSnapshot>("settings_ai_api_update", {
+      sessionIds: settings.sessionIds,
+      port: settings.port ?? null,
+      autoStart: settings.autoStart,
+    }),
+  settingsIgnoreUpdateVersion: (version: string) =>
+    call<ConfigSnapshot>("settings_ignore_update_version", { version }),
   connectionSectionStateUpdate: (collapsedSectionIds: string[]) =>
     call<ConfigSnapshot>("connection_section_state_update", { collapsedSectionIds }),
   groupCreate: (input: GroupInput) => call<ConfigSnapshot>("group_create", { input }),

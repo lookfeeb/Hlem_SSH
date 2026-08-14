@@ -1,4 +1,5 @@
 use super::*;
+use crate::atomic_file::write_atomic_async;
 
 const TRANSFER_HISTORY_VERSION: u16 = 1;
 const TRANSFER_HISTORY_STOPPED_ERROR: &str = "程序已关闭，传输已停止";
@@ -32,17 +33,11 @@ impl RemoteRuntime {
     }
 
     pub(super) async fn persist_transfer_history(&self) -> AppResult<TransferHistorySnapshot> {
+        let _guard = self.transfer_history_write_lock.lock().await;
         let snapshot = self.transfer_history_snapshot_from_memory().await;
         if let Some(path) = self.transfer_history_path.read().await.clone() {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|error| AppError::Io(error.to_string()))?;
-            }
             let bytes = serde_json::to_vec_pretty(&snapshot)?;
-            tokio::fs::write(path, bytes)
-                .await
-                .map_err(|error| AppError::Io(error.to_string()))?;
+            write_atomic_async(&path, &bytes).await?;
         }
         Ok(snapshot)
     }
@@ -74,7 +69,14 @@ impl RemoteRuntime {
             }
             Err(error) => return Err(AppError::Io(error.to_string())),
         };
-        let snapshot: TransferHistorySnapshot = serde_json::from_slice(&bytes)?;
+        let snapshot: TransferHistorySnapshot = match serde_json::from_slice(&bytes) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                quarantine_invalid_transfer_history(&path, &error).await;
+                self.transfer_history_loaded.store(true, Ordering::Relaxed);
+                return Ok(());
+            }
+        };
         if snapshot.version != TRANSFER_HISTORY_VERSION {
             self.transfer_history_loaded.store(true, Ordering::Relaxed);
             return Ok(());
@@ -91,6 +93,7 @@ impl RemoteRuntime {
                 .or_insert_with(|| TransferRecord {
                     info,
                     request,
+                    cleanup_sftp: None,
                     cancel: Arc::new(AtomicBool::new(false)),
                     paused: Arc::new(AtomicBool::new(false)),
                     handle: None,
@@ -119,6 +122,25 @@ impl RemoteRuntime {
             saved_at: now(),
             transfers,
         }
+    }
+}
+
+async fn quarantine_invalid_transfer_history(path: &Path, error: &serde_json::Error) {
+    let file_name = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("transfer-history");
+    let quarantine_path =
+        path.with_file_name(format!("{file_name}.corrupt-{}.json", Uuid::new_v4()));
+    match tokio::fs::rename(path, &quarantine_path).await {
+        Ok(()) => eprintln!(
+            "[helm] invalid transfer history moved to {}: {error}",
+            quarantine_path.display()
+        ),
+        Err(rename_error) => eprintln!(
+            "[helm] invalid transfer history ignored; failed to quarantine {}: {rename_error}; parse error: {error}",
+            path.display()
+        ),
     }
 }
 
@@ -159,6 +181,10 @@ fn transfer_timestamp(info: &TransferInfo) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::*;
 
     fn transfer(id: usize, status: TaskStatus) -> TransferInfo {
@@ -199,6 +225,7 @@ mod tests {
                     TransferRecord {
                         request: request_from_transfer(&info),
                         info,
+                        cleanup_sftp: None,
                         cancel: Arc::new(AtomicBool::new(false)),
                         paused: Arc::new(AtomicBool::new(false)),
                         handle: None,
@@ -209,5 +236,72 @@ mod tests {
         let snapshot = runtime.transfer_history_snapshot_from_memory().await;
         assert_eq!(snapshot.transfers.len(), 100);
         assert_eq!(snapshot.transfers[0].transfer_id, "transfer-104");
+    }
+
+    #[tokio::test]
+    async fn concurrent_history_writes_leave_valid_latest_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("transfer-history.json");
+        let runtime = RemoteRuntime::with_transfer_history_path(path.clone());
+        runtime
+            .transfer_history_loaded
+            .store(true, Ordering::Relaxed);
+        {
+            let mut records = runtime.transfers.write().await;
+            for id in 0..20 {
+                let info = transfer(id, TaskStatus::Completed);
+                records.insert(
+                    info.transfer_id.clone(),
+                    TransferRecord {
+                        request: request_from_transfer(&info),
+                        info,
+                        cleanup_sftp: None,
+                        cancel: Arc::new(AtomicBool::new(false)),
+                        paused: Arc::new(AtomicBool::new(false)),
+                        handle: None,
+                    },
+                );
+            }
+        }
+
+        let mut writes = Vec::new();
+        for _ in 0..8 {
+            let runtime = runtime.clone();
+            writes.push(tokio::spawn(async move {
+                runtime.persist_transfer_history().await.unwrap();
+            }));
+        }
+        for write in writes {
+            write.await.unwrap();
+        }
+
+        let bytes = tokio::fs::read(path).await.unwrap();
+        let snapshot: TransferHistorySnapshot = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(snapshot.transfers.len(), 20);
+        assert_eq!(snapshot.transfers[0].transfer_id, "transfer-19");
+    }
+
+    #[tokio::test]
+    async fn invalid_history_is_quarantined_and_does_not_block_startup() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("transfer-history.json");
+        tokio::fs::write(&path, b"{not-json").await.unwrap();
+        let runtime = RemoteRuntime::with_transfer_history_path(path.clone());
+
+        runtime.load_transfer_history().await.unwrap();
+
+        assert!(runtime
+            .transfer_history_snapshot()
+            .await
+            .unwrap()
+            .transfers
+            .is_empty());
+        assert!(!path.exists());
+        let quarantined = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".corrupt-"))
+            .count();
+        assert_eq!(quarantined, 1);
     }
 }
