@@ -28,6 +28,7 @@ impl RemoteRuntime {
         remote_path: String,
         local_path: String,
         overwrite: bool,
+        resume: bool,
     ) -> AppResult<TransferInfo> {
         self.start_transfer(
             app,
@@ -38,7 +39,7 @@ impl RemoteRuntime {
                 remote_path,
                 overwrite,
                 accelerated: false,
-                resume: false,
+                resume,
             },
         )
         .await
@@ -118,8 +119,7 @@ impl RemoteRuntime {
             }
         };
         if let Some(record) = record {
-            cleanup_transfer_staging(&record.request, transfer_id, record.cleanup_sftp.as_deref())
-                .await;
+            self.cleanup_transfer_record_staging(&record).await;
             crate::errors::forget_resource_label(transfer_id);
         }
         self.persist_transfer_history().await
@@ -142,9 +142,12 @@ impl RemoteRuntime {
             }
             record.request.clone()
         };
-        request.resume = false;
+        request.resume = true;
         let next = self.start_transfer(app, request).await?;
-        self.transfers.write().await.remove(transfer_id);
+        let removed = self.transfers.write().await.remove(transfer_id);
+        if let Some(record) = removed {
+            self.cleanup_transfer_record_staging(&record).await;
+        }
         crate::errors::forget_resource_label(transfer_id);
         self.persist_transfer_history_best_effort("retry transfer")
             .await;
@@ -157,11 +160,14 @@ impl RemoteRuntime {
         transfer_id: &str,
         reason: &str,
     ) -> AppResult<TransferInfo> {
-        let (info, request, cleanup_sftp, handle) = {
+        let (info, handle, direction, staging_path, worker_parts, cleanup_sftp) = {
             let mut transfers = self.transfers.write().await;
             let record = transfers
                 .get_mut(transfer_id)
                 .ok_or_else(|| AppError::missing_transfer(transfer_id))?;
+            if !accepts_transfer_activity(&record.info.status) {
+                return Ok(record.info.clone());
+            }
             record.cancel.store(true, Ordering::Relaxed);
             record.info.status = TaskStatus::Canceled;
             record.info.speed_kbps = 0.0;
@@ -169,15 +175,18 @@ impl RemoteRuntime {
             record.info.updated_at = now();
             (
                 record.info.clone(),
-                record.request.clone(),
-                record.cleanup_sftp.clone(),
                 record.handle.take(),
+                record.request.direction.clone(),
+                record.staging_path.clone(),
+                record.worker_parts,
+                record.cleanup_sftp.clone(),
             )
         };
-        abort_and_join_transfer_task(handle, transfer_id).await;
-        cleanup_transfer_staging(&request, transfer_id, cleanup_sftp.as_deref()).await;
+        let forced_abort = cancel_and_join_transfer_task(handle, transfer_id).await;
+        if forced_abort && worker_parts > 1 {
+            cleanup_transfer_staging(&direction, &staging_path, cleanup_sftp.as_deref()).await;
+        }
         events::emit(app, events::TRANSFER_FAILED, info.clone());
-        crate::errors::forget_resource_label(transfer_id);
         Ok(info)
     }
     pub(super) async fn start_transfer(
@@ -185,7 +194,7 @@ impl RemoteRuntime {
         app: &AppHandle,
         mut request: TransferRequest,
     ) -> AppResult<TransferInfo> {
-        let _lifecycle_guard = self.lifecycle_gate.read().await;
+        let lifecycle_guard = self.lifecycle_gate.read().await;
         request.remote_path = normalize_remote_path(&request.remote_path);
         let sftp_record = self.sftp_record(&request.sftp_id).await?;
         let connection = self.connection(&sftp_record.info.connection_id).await?;
@@ -195,17 +204,32 @@ impl RemoteRuntime {
             TransferDirection::Download => None,
         };
         ensure_transfer_overwrite(&sftp, &request).await?;
-        let bytes_total = transfer_total_bytes(&sftp, &request).await.unwrap_or(0);
+        let source = transfer_source_state(&sftp, &request).await?;
+        let session_id = connection.info.session_id;
+        let staging_path = transfer_staging_path(&request, &session_id, &source);
+        let worker_parts = transfer_worker_parts(&request, source.bytes_total);
+        // Waiting for capacity must not hold the lifecycle read lock; otherwise
+        // SFTP shutdown cannot acquire the write lock to cancel active work.
+        drop(lifecycle_guard);
+        let permit = sftp_record
+            .transfer_slots
+            .clone()
+            .acquire_many_owned(worker_parts as u32)
+            .await
+            .map_err(remote_error)?;
+        if sftp_record.closed.load(Ordering::Acquire) {
+            return Err(AppError::missing_sftp(&request.sftp_id));
+        }
         let info = TransferInfo {
             transfer_id: Uuid::new_v4().to_string(),
-            session_id: connection.info.session_id,
+            session_id,
             sftp_id: request.sftp_id.clone(),
             direction: request.direction.clone(),
             local_path: request.local_path.clone(),
             remote_path: request.remote_path.clone(),
             status: TaskStatus::Queued,
             bytes_done: 0,
-            bytes_total,
+            bytes_total: source.bytes_total,
             speed_kbps: 0.0,
             error: None,
             created_at: now(),
@@ -222,9 +246,10 @@ impl RemoteRuntime {
         let app_handle = app.clone();
         let task_info = info.clone();
         let task_request = request.clone();
+        let task_source = source.clone();
+        let task_staging_path = staging_path.clone();
         let task_cancel = cancel.clone();
         let task_paused = paused.clone();
-        let task_cleanup_sftp = cleanup_sftp.clone();
         let (start_sender, start_receiver) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
             // The record and its JoinHandle must be visible before any progress or
@@ -237,18 +262,16 @@ impl RemoteRuntime {
                 &runtime,
                 &app_handle,
                 task_info.clone(),
-                task_request.clone(),
+                task_request,
+                task_source,
+                task_staging_path,
+                worker_parts,
+                permit,
                 task_cancel,
                 task_paused,
             )
             .await;
             if let Err(error) = result {
-                cleanup_transfer_staging(
-                    &task_request,
-                    &task_info.transfer_id,
-                    task_cleanup_sftp.as_deref(),
-                )
-                .await;
                 runtime
                     .mark_transfer_failed(&app_handle, &task_info.transfer_id, error.to_string())
                     .await;
@@ -257,6 +280,8 @@ impl RemoteRuntime {
         let mut record = TransferRecord {
             info: info.clone(),
             request,
+            staging_path: staging_path.clone(),
+            worker_parts,
             cleanup_sftp,
             cancel,
             paused,
@@ -274,24 +299,32 @@ impl RemoteRuntime {
             crate::errors::forget_resource_label(&info.transfer_id);
             return Err(AppError::missing_sftp(&info.sftp_id));
         }
-        self.transfers
-            .write()
-            .await
-            .insert(info.transfer_id.clone(), record);
+        let mut transfers = self.transfers.write().await;
+        if transfers.values().any(|existing| {
+            existing.staging_path == staging_path
+                && accepts_transfer_activity(&existing.info.status)
+        }) {
+            drop(transfers);
+            drop(sftp_sessions);
+            record.cancel.store(true, Ordering::Release);
+            abort_and_join_transfer_task(record.handle.take(), &info.transfer_id).await;
+            crate::errors::forget_resource_label(&info.transfer_id);
+            return Err(AppError::InvalidInput(
+                "相同源文件和目标路径的传输任务正在进行".to_string(),
+            ));
+        }
+        transfers.insert(info.transfer_id.clone(), record);
+        drop(transfers);
         drop(sftp_sessions);
         events::emit(app, events::TRANSFER_PROGRESS, info.clone());
         self.persist_transfer_history_best_effort("start transfer")
             .await;
         if start_sender.send(()).is_err() {
-            if let Some(mut record) = self.transfers.write().await.remove(&info.transfer_id) {
+            let removed = self.transfers.write().await.remove(&info.transfer_id);
+            if let Some(mut record) = removed {
                 record.cancel.store(true, Ordering::Release);
                 abort_and_join_transfer_task(record.handle.take(), &info.transfer_id).await;
-                cleanup_transfer_staging(
-                    &record.request,
-                    &info.transfer_id,
-                    record.cleanup_sftp.as_deref(),
-                )
-                .await;
+                self.cleanup_transfer_record_staging(&record).await;
             }
             crate::errors::forget_resource_label(&info.transfer_id);
             self.persist_transfer_history_best_effort("rollback failed transfer start")
@@ -342,13 +375,19 @@ impl RemoteRuntime {
         }
     }
 
-    pub(super) async fn mark_transfer_completed(&self, app: &AppHandle, transfer_id: &str) {
+    pub(super) async fn mark_transfer_completed(
+        &self,
+        app: &AppHandle,
+        transfer_id: &str,
+        completed_bytes: u64,
+    ) {
         if let Some(record) = self.transfers.write().await.get_mut(transfer_id) {
             if !accepts_transfer_activity(&record.info.status) {
                 return;
             }
             record.info.status = TaskStatus::Completed;
-            record.info.bytes_done = record.info.bytes_total;
+            record.info.bytes_done = completed_bytes;
+            record.info.bytes_total = completed_bytes;
             record.info.speed_kbps = 0.0;
             record.info.updated_at = now();
             events::emit(app, events::TRANSFER_COMPLETED, record.info.clone());
@@ -380,27 +419,75 @@ impl RemoteRuntime {
     }
 
     pub(super) async fn prune_transfer_history(&self) {
-        let mut transfers = self.transfers.write().await;
-        let mut finished: Vec<(String, String)> = transfers
-            .iter()
-            .filter(|(_, record)| {
-                matches!(
-                    record.info.status,
-                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Canceled
-                )
-            })
-            .map(|(id, record)| (id.clone(), record.info.updated_at.clone()))
-            .collect();
-        if finished.len() <= MAX_TRANSFER_HISTORY {
-            return;
-        }
-        let remove_count = finished.len() - MAX_TRANSFER_HISTORY;
-        finished.sort_by(|a, b| a.1.cmp(&b.1));
-        for (id, _) in finished.into_iter().take(remove_count) {
-            transfers.remove(&id);
+        let removed = {
+            let mut transfers = self.transfers.write().await;
+            let mut finished: Vec<(String, String)> = transfers
+                .iter()
+                .filter(|(_, record)| {
+                    matches!(
+                        record.info.status,
+                        TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Canceled
+                    )
+                })
+                .map(|(id, record)| (id.clone(), record.info.updated_at.clone()))
+                .collect();
+            if finished.len() <= MAX_TRANSFER_HISTORY {
+                Vec::new()
+            } else {
+                let remove_count = finished.len() - MAX_TRANSFER_HISTORY;
+                finished.sort_by(|a, b| a.1.cmp(&b.1));
+                finished
+                    .into_iter()
+                    .take(remove_count)
+                    .filter_map(|(id, _)| transfers.remove(&id).map(|record| (id, record)))
+                    .collect::<Vec<_>>()
+            }
+        };
+        for (id, record) in removed {
+            self.cleanup_transfer_record_staging(&record).await;
             crate::errors::forget_resource_label(&id);
         }
     }
+
+    pub(super) async fn cleanup_transfer_record_staging(&self, record: &TransferRecord) {
+        if record.staging_path.is_empty() {
+            return;
+        }
+        // Keep the read lock through deletion so a retry using the same stable
+        // staging path cannot be inserted between the sharing check and cleanup.
+        let transfers = self.transfers.read().await;
+        let staging_in_use = transfers.iter().any(|(id, existing)| {
+            id != &record.info.transfer_id && existing.staging_path == record.staging_path
+        });
+        if staging_in_use {
+            return;
+        }
+        cleanup_transfer_staging(
+            &record.request.direction,
+            &record.staging_path,
+            record.cleanup_sftp.as_deref(),
+        )
+        .await;
+    }
+}
+
+fn transfer_worker_parts(request: &TransferRequest, bytes_total: u64) -> u64 {
+    if request.resume || bytes_total == 0 {
+        return 1;
+    }
+    let configured = match request.direction {
+        TransferDirection::Upload if bytes_total >= PARALLEL_UPLOAD_THRESHOLD => {
+            PARALLEL_UPLOAD_PARTS
+        }
+        TransferDirection::Download if bytes_total >= PARALLEL_DOWNLOAD_THRESHOLD => {
+            PARALLEL_DOWNLOAD_PARTS
+        }
+        _ => 1,
+    };
+    configured
+        .min(MAX_SFTP_TRANSFER_CONCURRENCY as u64)
+        .min(bytes_total.max(1))
+        .max(1)
 }
 
 async fn abort_and_join_transfer_task(handle: Option<JoinHandle<()>>, transfer_id: &str) {
@@ -411,6 +498,33 @@ async fn abort_and_join_transfer_task(handle: Option<JoinHandle<()>>, transfer_i
     if let Err(error) = handle.await {
         if !error.is_cancelled() {
             eprintln!("[helm] transfer task failed while stopping {transfer_id}: {error}");
+        }
+    }
+}
+
+async fn cancel_and_join_transfer_task(handle: Option<JoinHandle<()>>, transfer_id: &str) -> bool {
+    const GRACE_TIMEOUT: Duration = Duration::from_secs(3);
+
+    let Some(mut handle) = handle else {
+        return false;
+    };
+    match timeout(GRACE_TIMEOUT, &mut handle).await {
+        Ok(Ok(())) => false,
+        Ok(Err(error)) if error.is_cancelled() => false,
+        Ok(Err(error)) => {
+            eprintln!("[helm] transfer task failed while canceling {transfer_id}: {error}");
+            false
+        }
+        Err(_) => {
+            handle.abort();
+            if let Err(error) = handle.await {
+                if !error.is_cancelled() {
+                    eprintln!(
+                        "[helm] transfer task failed after forced cancellation {transfer_id}: {error}"
+                    );
+                }
+            }
+            true
         }
     }
 }
@@ -473,5 +587,31 @@ mod tests {
         assert!(!is_removable_transfer_state(&TaskStatus::Queued));
         assert!(!is_removable_transfer_state(&TaskStatus::Running));
         assert!(!is_removable_transfer_state(&TaskStatus::Paused));
+    }
+
+    #[test]
+    fn large_fresh_transfers_reserve_every_parallel_worker_slot() {
+        let mut request = TransferRequest {
+            sftp_id: "sftp-1".to_string(),
+            direction: TransferDirection::Upload,
+            local_path: "C:/tmp/source.bin".to_string(),
+            remote_path: "/tmp/target.bin".to_string(),
+            overwrite: false,
+            accelerated: true,
+            resume: false,
+        };
+        assert_eq!(
+            transfer_worker_parts(&request, PARALLEL_UPLOAD_THRESHOLD),
+            PARALLEL_UPLOAD_PARTS
+        );
+
+        request.direction = TransferDirection::Download;
+        assert_eq!(
+            transfer_worker_parts(&request, PARALLEL_DOWNLOAD_THRESHOLD),
+            PARALLEL_DOWNLOAD_PARTS
+        );
+
+        request.resume = true;
+        assert_eq!(transfer_worker_parts(&request, u64::MAX), 1);
     }
 }

@@ -352,6 +352,18 @@ impl VaultStore {
         Ok(self.unlocked()?.data.tunnels.clone())
     }
 
+    pub fn sessions(&self) -> AppResult<Vec<SessionConfig>> {
+        Ok(self.unlocked()?.data.sessions.clone())
+    }
+
+    pub fn backup_settings(&self) -> AppResult<BackupSettings> {
+        Ok(self.unlocked()?.data.settings.backup.clone())
+    }
+
+    pub fn backup_records(&self) -> AppResult<Vec<BackupRecord>> {
+        Ok(self.unlocked()?.data.backup_records.clone())
+    }
+
     pub fn validate_tunnel_update(&self, tunnel_id: &str, input: &TunnelInput) -> AppResult<()> {
         let data = &self.unlocked()?.data;
         if !data.tunnels.iter().any(|tunnel| tunnel.id == tunnel_id) {

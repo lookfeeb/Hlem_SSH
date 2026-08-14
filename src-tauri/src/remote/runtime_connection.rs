@@ -99,6 +99,11 @@ impl RemoteRuntime {
             }
         }
 
+        // 私钥读取、解密和 KDF 与网络建连并行执行，避免握手完成后才开始做
+        // 本地准备工作。密码认证会直接返回，不会额外创建任务。
+        let authentication_prepare_started = Instant::now();
+        let authentication_preparation = prepare_authentication(&session)?;
+
         let connection_id = Uuid::new_v4().to_string();
         let remote_forwards = Arc::new(RwLock::new(HashMap::new()));
         let verification = HostKeyVerification {
@@ -303,8 +308,51 @@ impl RemoteRuntime {
             }
         };
 
+        let authentication_prepare_wait_started = Instant::now();
+        let prepared_authentication = match timeout(
+            connect_timeout,
+            authentication_preparation.resolve(),
+        )
+        .await
+        {
+            Ok(Ok(authentication)) => authentication,
+            Ok(Err(error)) => {
+                log::warn!(
+                    "SSH authentication preparation failed: session={} host={} port={} user={} error={}",
+                    session.name,
+                    session.host,
+                    session.port,
+                    session.username,
+                    error
+                );
+                return Err(error);
+            }
+            Err(_) => {
+                let error = AppError::Remote(format!(
+                    "SSH 认证材料准备超时：未在 {} 毫秒内完成",
+                    session.ssh.connect_timeout_ms.max(1_000)
+                ));
+                log::warn!(
+                    "SSH authentication preparation timed out: session={} host={} port={} user={} timeout_ms={}",
+                    session.name,
+                    session.host,
+                    session.port,
+                    session.username,
+                    session.ssh.connect_timeout_ms.max(1_000)
+                );
+                return Err(error);
+            }
+        };
+        let authentication_prepare_ms = authentication_prepare_started.elapsed().as_millis();
+        let authentication_prepare_wait_ms =
+            authentication_prepare_wait_started.elapsed().as_millis();
+        let authentication_method = prepared_authentication.label();
         let authentication_started = Instant::now();
-        let authentication = timeout(connect_timeout, authenticate(&mut handle, &session)).await;
+        let authentication = timeout(
+            connect_timeout,
+            authenticate(&mut handle, &session.username, &prepared_authentication),
+        )
+        .await;
         if let Err(error) = match authentication {
             Ok(result) => result,
             Err(_) => Err(AppError::Remote(format!(
@@ -329,12 +377,17 @@ impl RemoteRuntime {
         }
         let authentication_ms = authentication_started.elapsed().as_millis();
         log::info!(
-            "SSH authentication complete: session={} attempt={} auth_ms={}",
+            "SSH authentication complete: session={} attempt={} method={} prepare_ms={} prepare_wait_ms={} auth_ms={}",
             session.name,
             successful_attempt,
+            authentication_method,
+            authentication_prepare_ms,
+            authentication_prepare_wait_ms,
             authentication_ms
         );
-        let handle = Arc::new(Mutex::new(handle));
+        let handle = Arc::new(handle);
+        let exec_channel_pool = Arc::new(ExecChannelPool::default());
+        let exec_process_tracker = Arc::new(ExecProcessTracker::default());
         let info = ConnectionInfo {
             connection_id: connection_id.clone(),
             session_id: session.id.clone(),
@@ -352,15 +405,20 @@ impl RemoteRuntime {
                 info: info.clone(),
                 origin,
                 handle: handle.clone(),
+                exec_channel_pool: exec_channel_pool.clone(),
+                exec_process_tracker,
                 remote_forwards,
                 diagnostics,
             },
         );
+        if origin == ConnectionOrigin::Automation {
+            exec_channel_pool.schedule_refill(handle.clone());
+        }
         if origin.notifies_desktop() {
             events::emit(app, events::SSH_STATUS, info.clone());
         }
         log::info!(
-            "SSH connected: session={} host={} port={} user={} route={} attempt={} lock_wait_ms={} tcp_ms={} handshake_ms={} auth_ms={} total_ms={}",
+            "SSH connected: session={} host={} port={} user={} route={} attempt={} lock_wait_ms={} tcp_ms={} handshake_ms={} auth_prepare_ms={} auth_prepare_wait_ms={} auth_ms={} total_ms={}",
             session.name,
             session.host,
             session.port,
@@ -370,6 +428,8 @@ impl RemoteRuntime {
             lock_wait_ms,
             tcp_ms,
             handshake_ms,
+            authentication_prepare_ms,
+            authentication_prepare_wait_ms,
             authentication_ms,
             connection_started.elapsed().as_millis()
         );
@@ -564,8 +624,8 @@ impl RemoteRuntime {
     }
 
     async fn reap_dead_connections(&self, app: &AppHandle) {
-        // Phase 1: 在 read 锁内只做识别，不持有任何 handle Mutex 太久。
-        // 用 try_lock，拿不到说明此刻有人在用（活的），下轮再查；不会和正常请求打架。
+        // Phase 1: 在 read 锁内只做识别。认证后的 russh Handle 可并发只读，
+        // is_closed 不会阻塞正常请求。
         let dead_ids: Vec<String> = {
             let connections = self.connections.read().await;
             let mut victims = Vec::new();
@@ -573,10 +633,7 @@ impl RemoteRuntime {
                 if record.info.status != RuntimeStatus::Connected {
                     continue;
                 }
-                let dead = match record.handle.try_lock() {
-                    Ok(guard) => guard.is_closed(),
-                    Err(_) => false,
-                };
+                let dead = record.handle.is_closed();
                 if dead {
                     victims.push(id.clone());
                 }
@@ -623,11 +680,7 @@ impl RemoteRuntime {
 }
 
 pub(super) fn connection_record_is_closed(record: &ConnectionRecord) -> bool {
-    record
-        .handle
-        .try_lock()
-        .map(|handle| handle.is_closed())
-        .unwrap_or(false)
+    record.handle.is_closed()
 }
 
 fn should_shutdown_automation_connection(

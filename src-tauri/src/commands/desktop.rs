@@ -18,13 +18,14 @@ use rsa::{
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 
-use super::{resolve_vault_path, AppError, AppResult};
+use super::{resolve_vault_path, AppError, AppResult, AppState};
 use crate::http_client::{http_client, send_with_retry};
 
 const UPDATE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+const UPDATE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_UPDATE_REPO: &str = "lookfeeb/Hlem_SSH";
 const HELM_UPDATE_REPO_ENV: &str = "HELM_UPDATE_REPO";
 const VITE_UPDATE_REPO_ENV: &str = "VITE_HELM_UPDATE_REPO";
@@ -38,6 +39,14 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 pub struct LocalExpandedEntry {
     pub local_path: String,
     pub relative_path: String,
+    pub entry_type: LocalExpandedEntryType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalExpandedEntryType {
+    File,
+    Directory,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,8 +114,7 @@ struct SignedUpdateAsset {
     sha256: Option<String>,
 }
 
-/// Expand local paths: if a path is a directory, recursively list all files inside it
-/// with their relative paths preserved. If a path is a file, return it as-is.
+/// Expand local paths while preserving files and every directory, including empty ones.
 #[tauri::command]
 pub async fn local_expand_paths(paths: Vec<String>) -> AppResult<Vec<LocalExpandedEntry>> {
     let mut results = Vec::new();
@@ -124,6 +132,7 @@ pub async fn local_expand_paths(paths: Vec<String>) -> AppResult<Vec<LocalExpand
             results.push(LocalExpandedEntry {
                 local_path: root.clone(),
                 relative_path: file_name,
+                entry_type: LocalExpandedEntryType::File,
             });
         } else if metadata.is_dir() {
             let root_name = root_path
@@ -131,6 +140,11 @@ pub async fn local_expand_paths(paths: Vec<String>) -> AppResult<Vec<LocalExpand
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
+            results.push(LocalExpandedEntry {
+                local_path: root.clone(),
+                relative_path: root_name.clone(),
+                entry_type: LocalExpandedEntryType::Directory,
+            });
             let mut stack = vec![(root_path.clone(), root_name.clone())];
             while let Some((dir, prefix)) = stack.pop() {
                 let mut entries = tokio::fs::read_dir(&dir).await.map_err(|error| {
@@ -152,8 +166,14 @@ pub async fn local_expand_paths(paths: Vec<String>) -> AppResult<Vec<LocalExpand
                         results.push(LocalExpandedEntry {
                             local_path: entry_path.to_string_lossy().to_string(),
                             relative_path: relative,
+                            entry_type: LocalExpandedEntryType::File,
                         });
                     } else if ft.is_dir() {
+                        results.push(LocalExpandedEntry {
+                            local_path: entry_path.to_string_lossy().to_string(),
+                            relative_path: relative.clone(),
+                            entry_type: LocalExpandedEntryType::Directory,
+                        });
                         stack.push((entry_path, relative));
                     }
                 }
@@ -345,7 +365,11 @@ pub async fn download_update(
 }
 
 #[tauri::command]
-pub fn install_update(app: AppHandle, installer_path: String) -> AppResult<()> {
+pub async fn install_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    installer_path: String,
+) -> AppResult<()> {
     let trimmed = installer_path.trim();
     if trimmed.is_empty() {
         return Err(AppError::InvalidInput("安装包路径为空".to_string()));
@@ -357,7 +381,23 @@ pub fn install_update(app: AppHandle, installer_path: String) -> AppResult<()> {
             path.display()
         )));
     }
-    launch_update_installer(&app, &path)
+    if !state.begin_shutdown() {
+        return Err(AppError::InvalidInput("程序正在关闭，请稍候".to_string()));
+    }
+    if let Err(error) = spawn_update_installer(&path) {
+        state.cancel_shutdown_start();
+        return Err(error);
+    }
+
+    if tokio::time::timeout(UPDATE_SHUTDOWN_TIMEOUT, state.shutdown_runtime(&app))
+        .await
+        .is_err()
+    {
+        eprintln!("[helm] update cleanup timed out; installer will wait for process exit");
+    }
+    state.finish_shutdown();
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -655,33 +695,10 @@ fn verify_manifest_signature(
         .is_ok())
 }
 
-fn launch_update_installer(_app: &AppHandle, installer: &Path) -> AppResult<()> {
+fn spawn_update_installer(installer: &Path) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     {
-        let current_pid = std::process::id();
-        let process_name = env::current_exe()
-            .ok()
-            .and_then(|path| {
-                path.file_stem()
-                    .map(|value| value.to_string_lossy().to_string())
-            })
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "HelM".to_string())
-            .replace('\'', "''");
-        let installer_path = installer.display().to_string().replace('\'', "''");
-        let script = format!(
-            r#"
-$installer = '{installer_path}'
-$currentPid = {current_pid}
-$processName = '{process_name}'
-Start-Sleep -Milliseconds 800
-Get-Process -Name $processName -ErrorAction SilentlyContinue |
-  Where-Object {{ $_.Id -ne $PID }} |
-  Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Process -FilePath $installer -ArgumentList '{installer_args}' -Wait
-"#,
-            installer_args = windows_update_installer_args().replace('\'', "''")
-        );
+        let script = windows_update_script(installer, std::process::id());
         let encoded = general_purpose::STANDARD.encode(
             script
                 .encode_utf16()
@@ -703,16 +720,41 @@ Start-Process -FilePath $installer -ArgumentList '{installer_args}' -Wait
         command
             .spawn()
             .map_err(|error| AppError::Io(error.to_string()))?;
-        _app.exit(0);
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new(installer)
+        Command::new("sh")
+            .arg("-c")
+            .arg("while kill -0 \"$2\" 2>/dev/null; do sleep 0.1; done; exec \"$1\"")
+            .arg("helm-updater")
+            .arg(installer)
+            .arg(std::process::id().to_string())
             .spawn()
             .map_err(|error| AppError::Io(error.to_string()))?;
         Ok(())
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_update_script(installer: &Path, current_pid: u32) -> String {
+    let installer_path = installer.display().to_string().replace('\'', "''");
+    format!(
+        r#"
+$installer = '{installer_path}'
+$currentPid = {current_pid}
+$deadline = (Get-Date).AddSeconds(30)
+while ((Get-Process -Id $currentPid -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{
+  Start-Sleep -Milliseconds 100
+}}
+if (Get-Process -Id $currentPid -ErrorAction SilentlyContinue) {{
+  Stop-Process -Id $currentPid -Force -ErrorAction SilentlyContinue
+  Wait-Process -Id $currentPid -ErrorAction SilentlyContinue
+}}
+Start-Process -FilePath $installer -ArgumentList '{installer_args}' -Wait
+"#,
+        installer_args = windows_update_installer_args().replace('\'', "''")
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -885,6 +927,32 @@ mod tests {
             .contains(&nested.to_string_lossy().to_string()));
     }
 
+    #[tokio::test]
+    async fn expands_empty_local_directories_as_directory_entries() {
+        let root = tempdir().expect("temp directory");
+        let selected = root.path().join("selected");
+        let nested = selected.join("empty").join("nested");
+        tokio::fs::create_dir_all(&nested)
+            .await
+            .expect("create empty directories");
+
+        let expanded = local_expand_paths(vec![selected.to_string_lossy().into_owned()])
+            .await
+            .expect("expand local paths");
+
+        assert!(expanded.iter().any(|entry| {
+            entry.entry_type == LocalExpandedEntryType::Directory
+                && entry.relative_path.replace('\\', "/") == "selected"
+        }));
+        assert!(expanded.iter().any(|entry| {
+            entry.entry_type == LocalExpandedEntryType::Directory
+                && entry.relative_path.replace('\\', "/") == "selected/empty/nested"
+        }));
+        assert!(!expanded
+            .iter()
+            .any(|entry| entry.entry_type == LocalExpandedEntryType::File));
+    }
+
     #[test]
     fn compares_semver_like_versions() {
         assert!(compare_versions("1.2.4", "1.2.3") > 0);
@@ -997,5 +1065,16 @@ mod tests {
         assert!(args
             .split_whitespace()
             .any(|arg| arg.eq_ignore_ascii_case("/R")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_updater_waits_for_the_current_process_only() {
+        let script = windows_update_script(Path::new("C:\\Temp\\HelM-setup.exe"), 4242);
+        assert!(script.contains("Get-Process -Id $currentPid"));
+        assert!(script.contains("Stop-Process -Id $currentPid"));
+        assert!(script.contains("Start-Process -FilePath $installer"));
+        assert!(!script.contains("Get-Process -Name"));
+        assert!(!script.contains("Stop-Process -Name"));
     }
 }

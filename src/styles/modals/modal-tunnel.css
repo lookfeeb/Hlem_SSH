@@ -1451,42 +1451,6 @@
   }
 }
 
-/* 备份弹窗仍沿用 Ant Design footer，保留其独立按钮样式。 */
-.backupModal .ant-modal-footer .ant-btn {
-  height: 36px;
-  padding: 0 22px;
-  border-radius: var(--radius) !important;
-  font-size: 13px;
-  font-weight: 600;
-  transition: all .22s cubic-bezier(.4, 0, .2, 1) !important;
-}
-
-.backupModal .ant-modal-footer .ant-btn-default {
-  border: 1px solid rgba(221, 230, 241, .9) !important;
-  background: rgba(255, 255, 255, .9) !important;
-  color: var(--text-secondary) !important;
-}
-
-.backupModal .ant-modal-footer .ant-btn-default:hover {
-  border-color: rgba(99, 102, 241, .35) !important;
-  color: var(--accent) !important;
-  background: var(--accent-light) !important;
-  transform: translateY(-1px);
-}
-
-.backupModal .ant-modal-footer .ant-btn-primary {
-  border: 0 !important;
-  background: var(--accent-grad) !important;
-  color: #ffffff !important;
-  box-shadow: 0 6px 16px -4px rgba(99, 102, 241, .5) !important;
-}
-
-.backupModal .ant-modal-footer .ant-btn-primary:hover {
-  transform: translateY(-2px);
-  filter: brightness(1.06);
-  box-shadow: 0 10px 22px -6px rgba(99, 102, 241, .6) !important;
-}
-
 /* ─── 隧道配置 Modal v2：实时预览 + 路由工作区 ─────────────────────────── */
 .ant-modal-wrap:has(> .tunnelConfigModal) {
   display: flex;

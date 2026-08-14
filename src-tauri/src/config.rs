@@ -269,6 +269,48 @@ pub struct TunnelInput {
     pub target_port: u16,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TunnelPatch {
+    pub name: Option<String>,
+    pub session_id: Option<String>,
+    pub forward_type: Option<String>,
+    pub bind_host: Option<String>,
+    pub bind_port: Option<u16>,
+    pub target_host: Option<String>,
+    pub target_port: Option<u16>,
+}
+
+impl TunnelPatch {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.session_id.is_none()
+            && self.forward_type.is_none()
+            && self.bind_host.is_none()
+            && self.bind_port.is_none()
+            && self.target_host.is_none()
+            && self.target_port.is_none()
+    }
+
+    pub fn apply_to(self, current: &TunnelConfig) -> TunnelInput {
+        TunnelInput {
+            name: self.name.unwrap_or_else(|| current.name.clone()),
+            session_id: self
+                .session_id
+                .unwrap_or_else(|| current.session_id.clone()),
+            forward_type: self
+                .forward_type
+                .unwrap_or_else(|| current.forward_type.clone()),
+            bind_host: self.bind_host.unwrap_or_else(|| current.bind_host.clone()),
+            bind_port: self.bind_port.unwrap_or(current.bind_port),
+            target_host: self
+                .target_host
+                .unwrap_or_else(|| current.target_host.clone()),
+            target_port: self.target_port.unwrap_or(current.target_port),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SftpOptions {

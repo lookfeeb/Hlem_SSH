@@ -209,6 +209,65 @@ impl SftpSession {
         })
     }
 
+    /// Reads at most one directory page without draining the complete remote
+    /// directory. `offset` is the number of non-dot entries to skip and
+    /// `limit` is clamped to at least one. The boolean indicates that another
+    /// entry exists after the returned page.
+    pub async fn read_dir_page<P: Into<String>>(
+        &self,
+        path: P,
+        offset: usize,
+        limit: usize,
+    ) -> SftpResult<(ReadDir, bool)> {
+        let handle = self.session.opendir(path).await?.handle;
+        let limit = limit.max(1);
+        let page_result = async {
+            let mut skipped = 0usize;
+            let mut files = Vec::with_capacity(limit.saturating_add(1));
+            'read: loop {
+                match self.session.readdir(handle.as_str()).await {
+                    Ok(name) => {
+                        for file in name.files {
+                            if file.filename == "." || file.filename == ".." {
+                                continue;
+                            }
+                            if skipped < offset {
+                                skipped = skipped.saturating_add(1);
+                                continue;
+                            }
+                            files.push((file.filename, file.attrs));
+                            if files.len() > limit {
+                                break 'read;
+                            }
+                        }
+                    }
+                    Err(Error::Status(status)) if status.status_code == StatusCode::Eof => break,
+                    Err(error) => return Err(error),
+                }
+            }
+            let has_more = files.len() > limit;
+            files.truncate(limit);
+            Ok((
+                ReadDir {
+                    entries: files.into(),
+                },
+                has_more,
+            ))
+        }
+        .await;
+        let close_result = self.session.close(handle).await;
+        match page_result {
+            Ok(page) => {
+                close_result?;
+                Ok(page)
+            }
+            Err(error) => {
+                let _ = close_result;
+                Err(error)
+            }
+        }
+    }
+
     /// Reads a symbolic link, returning the file that the link points to.
     pub async fn read_link<P: Into<String>>(&self, path: P) -> SftpResult<String> {
         let name = self.session.readlink(path).await?;

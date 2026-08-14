@@ -6,6 +6,7 @@ const DEFAULT_UPDATE_REPO = "lookfeeb/Hlem_SSH";
 export type LocalExpandedEntry = {
   localPath: string;
   relativePath: string;
+  entryType: "file" | "directory";
 };
 
 export type ApiServerInfo = {

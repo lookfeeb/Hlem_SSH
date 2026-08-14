@@ -3,7 +3,7 @@
 > 基于 **Tauri 2 + React 19 + Rust** 的现代 SSH / SFTP 桌面工作台
 
 [![Windows Release](https://github.com/user/Helm/actions/workflows/release.yml/badge.svg)](https://github.com/user/Helm/actions/workflows/release.yml)
-![Version](https://img.shields.io/badge/version-0.0.44-blue)
+![Version](https://img.shields.io/badge/version-0.0.48-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64%20|%20x86%20|%20ARM64-green)
 
 ---
@@ -20,6 +20,7 @@
 - [数据流：文件传输](#数据流文件传输)
 - [端口转发架构](#端口转发架构)
 - [安全架构](#安全架构)
+- [AI API 本地网关](#ai-api-本地网关)
 - [构建与发布流水线](#构建与发布流水线)
 - [自动更新流程](#自动更新流程)
 - [窗口与进程模型](#窗口与进程模型)
@@ -32,7 +33,7 @@
 
 ## 项目概览
 
-HelM 是一款面向运维和开发人员的 **SSH / SFTP 桌面客户端**，集成终端、文件管理、端口转发、系统遥测、AI API 代理等功能于一体。单一可执行文件、原生窗口、零云端依赖，把多服务器运维所需的"终端 + 文件 + 转发 + 编辑 + 备份"收拢在一个加密工作区里。
+HelM 是一款面向运维和开发人员的 **SSH / SFTP 桌面客户端**，集成终端、文件管理、端口转发、系统遥测、AI API 本地网关等功能于一体。单一可执行文件、原生窗口、零云端依赖，把多服务器运维所需的"终端 + 文件 + 转发 + 编辑 + 备份"收拢在一个加密工作区里。
 
 ---
 
@@ -54,7 +55,7 @@ graph TB
             CmdLayer[Commands IPC 层]
             RemoteMgr[Remote 连接管理器]
             VaultMgr[Vault 加密存储]
-            APIServer[AI API Server]
+            APIServer[AI API REST Gateway]
             BackupEng[备份引擎]
         end
 
@@ -135,7 +136,7 @@ graph LR
 | 后端 | Rust (Edition 2021) | 核心逻辑、异步 I/O |
 | SSH | russh 0.60 | SSH2 协议实现 |
 | SFTP | russh-sftp 2.1 | SFTP 子系统 |
-| HTTP | Axum 0.8 + Tower-HTTP | AI API 代理服务器 |
+| HTTP | Axum 0.8 + Tower-HTTP | AI API 本地 REST 网关 |
 | 加密 | ChaCha20-Poly1305 + Argon2 | Vault 数据加密 |
 | 异步 | Tokio (fs/io-util/net/sync/time) | 异步运行时 |
 | 网络 | reqwest (rustls) | HTTPS 请求（更新/备份） |
@@ -189,12 +190,16 @@ graph TD
         backup[backup.rs<br/>备份引擎]
     end
 
-    subgraph API["api_server/ — AI API 代理"]
+    subgraph API["api_server/ — AI API 本地网关"]
         api_mod[mod.rs<br/>Axum路由]
-        auth[auth.rs<br/>HMAC鉴权]
-        guard[guard.rs<br/>请求守卫]
-        handlers[handlers_remote.rs<br/>请求处理]
-        ws[ws.rs<br/>WebSocket]
+        auth[auth.rs<br/>Bearer鉴权]
+        guard[guard.rs<br/>命令安全守卫]
+        handlers_remote[handlers_remote.rs<br/>会话/命令/文件]
+        handlers_admin[handlers_admin.rs<br/>隧道/备份]
+        handlers_jobs[handlers_jobs.rs<br/>长任务/SSE]
+        jobs[jobs.rs<br/>任务状态与取消]
+        catalog[field_catalog.rs<br/>动态字段库]
+        openapi[openapi.rs<br/>OpenAPI 3.1]
     end
 
     lib --> Commands
@@ -464,7 +469,7 @@ graph TD
 |------|------|------|
 | Vault 主密钥 | Argon2id (内存硬度) | 从用户密码派生加密密钥 |
 | 数据加密 | ChaCha20-Poly1305 (AEAD) | 加密会话配置、凭据、私钥 |
-| API 鉴权 | HMAC-SHA256 | AI API Server 请求签名验证 |
+| API 鉴权 | Bearer API Key + 会话白名单 | 本机 REST 请求鉴权与授权范围限制 |
 | 更新签名 | RSA-PSS (SHA256, salt=32) | 验证安装包完整性 |
 | 内存安全 | zeroize crate | 敏感数据使用后立即清零 |
 | 传输安全 | SSH2 加密通道 | 所有远程通信端到端加密 |
@@ -476,6 +481,135 @@ graph TD
 - 备份包传上公共云盘**不暴露明文**——攻击者拿到也只是等长密文
 - known-hosts 指纹纳入 vault，远端被 MITM 时本地立即觉察
 - 前端表单禁用浏览器自动填充，凭据不留痕到 WebView 历史
+
+---
+
+## AI API 本地网关
+
+HelM 的 AI API **不是模型推理接口**，而是面向本机 AI 助手、脚本和自动化工具的 SSH / SFTP REST 网关。服务运行在 Rust 主进程中，仅绑定 `127.0.0.1`，通过用户明确授权的 HelM 会话连接远端服务器。
+
+### 启用与调用
+
+1. 在设置中打开 **AI API 控制**。
+2. 选择 1–20 个允许 API 访问的 SSH 会话，设置监听端口（默认 `19880`）。
+3. 启动服务；如需每次启动 HelM 后自动恢复，可开启 **随应用自动启动**。
+4. 使用控制面板显示的 API 地址和 API Key 调用接口；所有请求都需要 `Authorization: Bearer <api_key>`。
+5. 首次接入可读取 `GET /openapi.json`（标准 OpenAPI 3.1）或 `GET /api/fields`（HelM 动态字段库）。
+6. 服务运行后也可直接点击 **接口调试**，在内置调试台选择端点、会话并执行请求；普通请求与 SSE 实时订阅都可在窗口内查看，也可复制 PowerShell cURL。
+
+```powershell
+$helmApiKey = "<api_key>"
+$helmHeaders = @{ Authorization = "Bearer $helmApiKey" }
+
+# 读取动态字段库
+Invoke-RestMethod `
+  -Headers $helmHeaders `
+  -Uri "http://127.0.0.1:19880/api/fields"
+
+# 自动连接指定会话并执行命令
+$helmBody = @{
+  sessionId = "<session_id>"
+  command = "uname -a"
+  safetyMode = "balanced"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Headers $helmHeaders `
+  -ContentType "application/json" `
+  -Body $helmBody `
+  -Uri "http://127.0.0.1:19880/api/exec"
+
+# 创建长任务；适合部署、构建、日志跟踪等耗时命令
+$helmJobBody = @{
+  sessionId = "<session_id>"
+  command = "docker compose pull && docker compose up -d"
+  timeoutMs = 1800000
+} | ConvertTo-Json
+
+$helmJob = Invoke-RestMethod `
+  -Method Post `
+  -Headers $helmHeaders `
+  -ContentType "application/json" `
+  -Body $helmJobBody `
+  -Uri "http://127.0.0.1:19880/api/jobs"
+
+# 实时订阅 stdout/stderr；断线后可附加 Last-Event-ID 续传
+curl.exe -N `
+  -H "Authorization: Bearer $helmApiKey" `
+  -H "Accept: text/event-stream" `
+  "http://127.0.0.1:19880/api/jobs/$($helmJob.jobId)/events"
+
+# 查询状态或请求取消
+Invoke-RestMethod -Headers $helmHeaders `
+  -Uri "http://127.0.0.1:19880/api/jobs/$($helmJob.jobId)"
+
+Invoke-RestMethod -Method Post -Headers $helmHeaders `
+  -Uri "http://127.0.0.1:19880/api/jobs/$($helmJob.jobId)/cancel"
+```
+
+### 字段库、选择规则与缓存
+
+`GET /api/fields` v10 一次返回 31 个端点、51 个 Schema、18 条端点/字段选择规则和 15 个结构化调用示例。`/api/fields` 与 `/openapi.json` 均返回 `ETag`；调用方缓存正文后发送 `If-None-Match`，内容未变化时会收到无正文的 `304`，不需要每执行一条命令就重新下载文档。
+
+- `selectionRules` 说明何时选择 `exec`、`exec/batch`、`jobs`、文件全量/分页/元数据端点，以及隧道和备份的 PUT/PATCH 语义。
+- `examples` 使用 `method`、`path`、`query`、`headers`、`body` 表达请求，不重复全局鉴权头，可直接转换为 HTTP 请求。
+- 只做鉴权探活时读取 `/api/auth`；需要标准生态兼容时读取 `/openapi.json`。
+
+```powershell
+# 原子上传完整文件；可选 SHA-256 校验，不支持 Content-Range
+$uploadFile = "C:\Temp\helm-upload.bin"
+$uploadSha256 = (Get-FileHash -Algorithm SHA256 $uploadFile).Hash.ToLowerInvariant()
+curl.exe -X PUT `
+  -H "Authorization: Bearer $helmApiKey" `
+  -H "Content-Type: application/octet-stream" `
+  --data-binary "@$uploadFile" `
+  "http://127.0.0.1:19880/api/upload?sessionId=<session_id>&remotePath=%2Ftmp%2Fhelm-upload.bin&sha256=$uploadSha256"
+
+# 只下载前 1 MiB
+curl.exe `
+  -H "Authorization: Bearer $helmApiKey" `
+  -H "Range: bytes=0-1048575" `
+  -o "C:\Temp\syslog.part" `
+  "http://127.0.0.1:19880/api/download?sessionId=<session_id>&path=%2Fvar%2Flog%2Fsyslog"
+```
+
+### OpenAPI 与接口调试台
+
+- `GET /openapi.json` 返回 OpenAPI 3.1 文档，由 `/api/fields` 同一份字段目录动态生成，并通过 `x-helm-selection-rules`、`x-helm-examples` 携带相同规则和示例。
+- `/api/auth` 的端点目录直接由字段库生成，并返回 `fieldCatalogVersion` 与本次进程的 `serverInstanceId`；不会再单独维护第二份端点清单。
+- 内置调试台会读取该文档，自动生成路径参数、查询参数、JSON 请求体和已授权会话示例，并显示状态码、耗时、响应头及响应体。JSON 响应会自动格式化并按键、字符串、数字、布尔值和空值着色，输出框聚焦或悬浮时可一键复制结构化结果。
+- 创建任务后，调试台会记住最新 `jobId`，切换到查询、取消或 SSE 端点时自动填入。SSE 可直接在窗口内开始或停止订阅，实时汇总事件并显示事件数；“复制 cURL”仍会生成带 `curl.exe -N` 的独立订阅命令。
+
+### 当前能力
+
+| 类别 | 端点 | 能力 |
+|------|------|------|
+| 元信息 | `/api/auth`、`/api/fields`、`/openapi.json` | 鉴权探活、动态字段库、ETag 缓存和 OpenAPI 3.1 文档 |
+| 会话 | `/api/sessions`、`/api/connect`、`/api/disconnect` | 查询连接 ID、状态和建立时间，幂等连接会返回 `reused` |
+| 命令 | `/api/exec`、`/api/exec/batch` | 单条或批量执行命令，支持安全模式、超时、输出截断标记和最多 4 路并行 |
+| 长任务 | `/api/jobs...` | 创建、摘要列表、状态与输出查询、SSE 实时输出和取消 |
+| 诊断 | `/api/latency` | 通过 SSH 原生 ping 采集延迟、中位数和抖动 |
+| 文件 | `/api/files...`、`/api/upload`、`/api/download` | 全量/游标分页目录、单路径元数据、SHA-256 原子上传和单段 Range 下载 |
+| 隧道 | `/api/tunnels...` | 隧道配置查询、创建、局部 PATCH、删除、启动和停止 |
+| 备份 | `/api/backup...` | 设置完整 PUT 或 JSON Merge PATCH、执行备份、查询及删除记录 |
+
+字段库 v10 共描述 31 个 HTTP 端点和 51 个 Schema。`exec`、`exec/batch`、`jobs`、`latency`、`files`、`upload` 和 `download` 会自动建立并复用 SSH / SFTP；`/api/connect` 仅用于主动预热或单独检查连接。连续短命令会复用连接并预热 SSH 执行通道，超时、取消或本地中止会终止已跟踪的远端进程组。
+
+`exec`、`exec/batch` 与长任务共用执行配额：每个会话最多 4 条、全局最多 16 条命令同时运行，队列等待超过 3 秒会返回 `429` 或将任务标记为失败。会话授权使用内存哈希索引，配置提交时同步刷新；AI API 的 `stdout`、`stderr` 各保留尾部 1 MiB，并通过 `stdoutBytes`、`stderrBytes`、`outputTruncated` 返回原始大小和截断状态。`ExecResult` 还返回 `durationMs`、`queueMs`、`connectionMs`、`channelOpenMs` 和 `executionMs`，用于区分端到端、排队、冷连接、通道创建与命令执行耗时。
+
+长任务默认超时 30 分钟、最长 24 小时，创建记录后立即返回 `202`；SSH 连接和执行队列阶段也能取消。任务状态包含 `connecting`，快照与摘要返回 `queueMs`、`connectionMs`、`channelOpenMs`、`executionMs` 和 `durationMs`。`GET /api/jobs` 只返回不含正文的摘要，完整输出通过 `GET /api/jobs/{job_id}` 查询。每个任务的 SSE 历史同时受 1024 条事件和 4 MiB 字节预算限制；结束后的任务记录保留 30 分钟。
+
+所有 JSON 错误响应保留兼容字段 `error`，并增加 `code`、`message`、`retryable` 与 `requestId`。下载仅接受单段 `Range`：语法错误返回 `400`，多段或越界返回 `416`；不会再退化为完整文件的 `200` 响应。
+
+### 安全边界
+
+- 服务只监听本机回环地址，CORS 仅允许本机来源，不直接向局域网或公网暴露。
+- API Key 是整个本地 API 的全权令牌；会话类操作还会额外受会话白名单限制，密钥泄露后应立即在控制面板重新生成。
+- 会话白名单可在运行中热更新；清空授权会话会立即停止 API 服务。
+- 命令默认使用 `balanced` 安全模式，也可使用限制更严格的 `strict` 模式。
+- 未知主机密钥不会被 API 自动信任，必须在 HelM 主窗口确认服务器指纹。
+- API 操作日志会对常见令牌、密码、认证头、私钥和凭据内容进行脱敏。
 
 ---
 
@@ -548,11 +682,15 @@ sequenceDiagram
         User->>App: 确认下载
         App->>GH: 下载对应架构 .exe
         App->>App: SHA256 校验
-        App->>User: 启动 NSIS 安装程序
+        App->>App: 停止接收 API 请求并取消长任务
+        App->>App: 等待 AI API 监听端口与 SSH 资源释放
+        App->>User: 退出当前进程并启动 NSIS 安装程序
     else 已是最新
         App->>App: 静默跳过
     end
 ```
+
+更新辅助进程只等待当前 HelM PID 退出，不会按进程名强制结束其他实例。安装程序在旧进程退出、AI API 端口释放后才执行并重启新版本，避免重启后端口仍被占用。
 
 ---
 
@@ -665,9 +803,13 @@ mindmap
       定时自动备份
       保留策略自动清理
       加密形态导出
-    AI API 代理
-      本地 HTTP/WS 服务器
-      HMAC-SHA256 鉴权
+    AI API 本地网关
+      127.0.0.1 HTTP REST
+      Bearer API Key + 会话白名单
+      31 个端点与动态字段库
+      OpenAPI 3.1 + 内置调试台
+      长任务 SSE 实时输出与取消
+      SSH/SFTP 自动连接复用
       自动启动
     系统集成
       系统托盘(双击恢复)
@@ -705,6 +847,16 @@ mindmap
 
 - **远端指标侧边栏** — CPU、内存、网络、磁盘实时折线图
 - **无需额外 agent** — 后端通过 SSH exec 定时采样推送，无需在远端安装任何软件
+
+### AI API 本地网关
+
+- **本机 REST 自动化** — 仅监听 `127.0.0.1`，供本机 AI 助手、脚本和自动化工具调用
+- **动态字段库** — `/api/fields` v10 一次返回端点、Schema、约束、选择规则和结构化示例，可按版本或 ETag 缓存
+- **标准规范与调试** — `/openapi.json` 提供 OpenAPI 3.1，内置调试台可直接生成并执行请求
+- **可控长任务** — 任务状态查询、SSE 实时 stdout/stderr、断线续传、超时和取消
+- **会话授权范围** — 最多选择 20 个可访问会话，运行中可热更新并立即生效
+- **自动连接复用** — 命令、诊断和文件操作按需拉起并复用 SSH / SFTP 连接
+- **安全与审计** — Bearer API Key、命令危险模式拦截、主机指纹确认和脱敏操作日志
 
 ### 安全与备份
 
@@ -755,6 +907,8 @@ Helm/
 │   │   ├── TelemetrySidebar.tsx    # 系统监控侧边栏
 │   │   ├── BackupModal.tsx         # 备份/恢复弹窗
 │   │   ├── SettingsModal.tsx       # 全局设置 + 自动更新
+│   │   ├── settings/
+│   │   │   └── ApiExplorerModal.tsx # OpenAPI 接口调试台
 │   │   ├── SessionConfigModal.tsx  # 会话配置弹窗
 │   │   ├── CodeEditor.tsx          # CodeMirror 远程编辑器
 │   │   ├── EditorWindowApp.tsx     # 编辑器子窗口入口
@@ -767,6 +921,7 @@ Helm/
 │   │   ├── editorChannel.ts        # 编辑器 BroadcastChannel
 │   │   ├── fileClassify.ts         # 文件类型识别
 │   │   ├── format.ts              # 格式化工具
+│   │   ├── apiExplorer.ts          # OpenAPI 解析、示例请求与 cURL 生成
 │   │   └── clipboard.ts           # 剪贴板
 │   ├── styles/                     # 模块化 CSS
 │   │   ├── tokens.css             # 设计令牌
@@ -801,12 +956,16 @@ Helm/
 │   │   │   ├── backup.rs          # 备份命令
 │   │   │   ├── desktop.rs         # 桌面操作
 │   │   │   └── api_server_cmd.rs  # API 服务命令
-│   │   ├── api_server/             # AI API 代理服务器
-│   │   │   ├── mod.rs             # Axum 路由
-│   │   │   ├── auth.rs            # HMAC 鉴权
-│   │   │   ├── guard.rs           # 请求守卫
-│   │   │   ├── handlers_remote.rs # 请求处理
-│   │   │   └── ws.rs             # WebSocket
+│   │   ├── api_server/             # AI API 本地 REST 网关
+│   │   │   ├── mod.rs             # Axum 路由、CORS 与操作日志
+│   │   │   ├── auth.rs            # Bearer 鉴权与会话访问校验
+│   │   │   ├── guard.rs           # 危险命令安全守卫
+│   │   │   ├── field_catalog.rs   # 动态端点与字段库
+│   │   │   ├── openapi.rs          # OpenAPI 3.1 文档生成
+│   │   │   ├── jobs.rs             # 长任务注册表、事件历史与取消
+│   │   │   ├── handlers_jobs.rs    # 任务 REST 与 SSE 接口
+│   │   │   ├── handlers_remote.rs # 会话、命令与文件接口
+│   │   │   └── handlers_admin.rs  # 隧道与备份接口
 │   │   ├── vault.rs               # 加密工作区(Argon2+ChaCha20)
 │   │   ├── crypto.rs              # 密码学原语
 │   │   ├── backup.rs              # 本地/WebDAV/S3 备份引擎

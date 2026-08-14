@@ -997,7 +997,7 @@ function FileManagerView({
         && sessionIdRef.current === requestSessionId
         && directoryStateSftpIdRef.current === requestSftpId
       ) {
-        message.success(`已开始上传 ${localPaths.length} 个文件`);
+        message.success(`已开始上传 ${localPaths.length} 个项目`);
       }
     } catch (error) {
       if (

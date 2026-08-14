@@ -63,6 +63,24 @@ pub async fn replace_file_async(source: &Path, target: &Path) -> AppResult<()> {
     }
 }
 
+/// Atomically move a completed staging file into place only when the target
+/// does not exist. The source and target must be on the same filesystem.
+pub async fn move_file_no_replace_async(source: &Path, target: &Path) -> AppResult<()> {
+    #[cfg(windows)]
+    {
+        move_file_no_replace(source, target)
+    }
+    #[cfg(not(windows))]
+    {
+        tokio::fs::hard_link(source, target)
+            .await
+            .map_err(|error| AppError::Io(error.to_string()))?;
+        tokio::fs::remove_file(source)
+            .await
+            .map_err(|error| AppError::Io(error.to_string()))
+    }
+}
+
 fn create_parent(path: &Path) -> AppResult<()> {
     if let Some(parent) = path
         .parent()
@@ -96,10 +114,28 @@ fn temp_path_for(path: &Path) -> PathBuf {
 
 #[cfg(windows)]
 fn replace_file(source: &Path, target: &Path) -> AppResult<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
+
+    move_file_windows(
+        source,
+        target,
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+    )
+}
+
+#[cfg(windows)]
+fn move_file_no_replace(source: &Path, target: &Path) -> AppResult<()> {
+    use windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
+
+    move_file_windows(source, target, MOVEFILE_WRITE_THROUGH)
+}
+
+#[cfg(windows)]
+fn move_file_windows(source: &Path, target: &Path, flags: u32) -> AppResult<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 
     let source: Vec<u16> = source
         .as_os_str()
@@ -111,13 +147,7 @@ fn replace_file(source: &Path, target: &Path) -> AppResult<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
+    let result = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), flags) };
     if result == 0 {
         return Err(AppError::Io(std::io::Error::last_os_error().to_string()));
     }
@@ -157,5 +187,32 @@ mod tests {
 
         assert_eq!(tokio::fs::read(&path).await.unwrap(), b"new");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_replace_move_succeeds_when_target_is_absent() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.part");
+        let target = dir.path().join("target.bin");
+        tokio::fs::write(&source, b"new").await.unwrap();
+
+        move_file_no_replace_async(&source, &target).await.unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn no_replace_move_preserves_an_existing_target() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.part");
+        let target = dir.path().join("target.bin");
+        tokio::fs::write(&source, b"new").await.unwrap();
+        tokio::fs::write(&target, b"old").await.unwrap();
+
+        assert!(move_file_no_replace_async(&source, &target).await.is_err());
+
+        assert_eq!(tokio::fs::read(&source).await.unwrap(), b"new");
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"old");
     }
 }

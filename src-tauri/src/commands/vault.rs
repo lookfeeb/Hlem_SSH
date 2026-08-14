@@ -5,7 +5,7 @@ use tauri::{AppHandle, State};
 use super::{
     api_server_cmd::{
         reconcile_api_server_with_snapshot, restore_api_server_after_config_replacement,
-        stop_api_server_for_config_replacement,
+        stop_api_server_for_config_replacement, sync_api_server_authorization_cache,
     },
     with_store, AppError, AppResult, AppState,
 };
@@ -119,6 +119,7 @@ pub async fn settings_ai_api_update(
     auto_start: bool,
 ) -> AppResult<ConfigSnapshot> {
     let ticket = state.config_mutations.ticket();
+    let api_guard = state.api_server_operation.lock().await;
     let _mutation_guard = state.config_mutations.lock(ticket).await?;
     let snapshot = with_store(&state, |store| {
         store.settings_ai_api_update(AiApiSettingsUpdate {
@@ -127,7 +128,9 @@ pub async fn settings_ai_api_update(
             auto_start,
         })
     })?;
+    sync_api_server_authorization_cache(&state, &snapshot).await;
     drop(_mutation_guard);
+    drop(api_guard);
     reconcile_api_server_with_snapshot(&app, &state).await;
     crate::events::emit(&app, crate::events::CONFIG_CHANGED, snapshot.clone());
     Ok(snapshot)

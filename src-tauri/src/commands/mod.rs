@@ -164,7 +164,7 @@ impl AppState {
     }
 
     pub(super) fn request_shutdown(&self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_tx.send_replace(true);
     }
 
     pub(super) fn begin_shutdown(&self) -> bool {
@@ -180,6 +180,15 @@ impl AppState {
 
     pub(super) fn shutdown_complete(&self) -> bool {
         self.shutdown_phase.load(Ordering::Acquire) == SHUTDOWN_COMPLETE
+    }
+
+    pub(super) fn cancel_shutdown_start(&self) {
+        let _ = self.shutdown_phase.compare_exchange(
+            SHUTDOWN_IN_PROGRESS,
+            SHUTDOWN_NOT_STARTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     pub(super) fn is_shutting_down(&self) -> bool {

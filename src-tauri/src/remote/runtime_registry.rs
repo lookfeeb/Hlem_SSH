@@ -129,6 +129,30 @@ impl RemoteRuntime {
         }
     }
 
+    pub(super) async fn open_exec_channel_for_connection(
+        &self,
+        connection: &ConnectionRecord,
+        reclaim_telemetry: bool,
+    ) -> AppResult<(Channel<client::Msg>, u128)> {
+        if let Some(channel) = connection.exec_channel_pool.take().await {
+            connection
+                .exec_channel_pool
+                .schedule_refill(connection.handle.clone());
+            return Ok((channel, 0));
+        }
+
+        // 当前命令走正常 channel-open；同时补一个空闲 channel。补充操作与远端命令
+        // 执行重叠，下一条顺序命令通常可少一次 RTT。
+        connection
+            .exec_channel_pool
+            .schedule_refill(connection.handle.clone());
+        let started = Instant::now();
+        let channel = self
+            .open_session_channel_for_connection(connection, reclaim_telemetry)
+            .await?;
+        Ok((channel, started.elapsed().as_millis()))
+    }
+
     async fn compact_sftp_transfer_pool_for_connection(&self, connection_id: &str) -> usize {
         let records: Vec<SftpRecord> = self
             .sftp_sessions
@@ -162,6 +186,7 @@ impl RemoteRuntime {
         disconnect_reason: Option<&str>,
     ) {
         let connection_id = connection.info.connection_id.as_str();
+        connection.exec_channel_pool.close().await;
         let terminal_ids: Vec<String> = self
             .terminals
             .read()
@@ -306,6 +331,7 @@ impl RemoteRuntime {
             .collect();
         for record in connection_records {
             let connection_id = record.info.connection_id.clone();
+            record.exec_channel_pool.close().await;
             if let Err(error) = disconnect_connection_handle(&record.handle, "HelM shutdown").await
             {
                 eprintln!(

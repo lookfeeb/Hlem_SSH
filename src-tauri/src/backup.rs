@@ -614,56 +614,9 @@ async fn list_webdav_backups(config: &WebdavBackupConfig) -> AppResult<Vec<Backu
 async fn upload_s3(config: &S3BackupConfig, file_name: &str, bytes: Vec<u8>) -> AppResult<String> {
     let key = join_object_key(&config.prefix, file_name);
     let (url, canonical_uri, host) = s3_url(config, &key)?;
-    let now = Utc::now();
-    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let short_date = now.format("%Y%m%d").to_string();
     let body = Bytes::from(bytes);
     let payload_hash = hex::encode(Sha256::digest(&body));
-    let canonical_headers = format!(
-        "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
-        host, payload_hash, amz_date
-    );
-    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-    let canonical_request = format!(
-        "PUT\n{}\n\n{}{}\n{}",
-        canonical_uri, canonical_headers, signed_headers, payload_hash
-    );
-    let credential_scope = format!("{}/{}/s3/aws4_request", short_date, config.region.trim());
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        amz_date,
-        credential_scope,
-        hex::encode(Sha256::digest(canonical_request.as_bytes()))
-    );
-    let signing_key = s3_signing_key(&config.secret_access_key, &short_date, config.region.trim())?;
-    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
-    let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
-        config.access_key_id.trim(),
-        credential_scope,
-        signed_headers,
-        signature
-    );
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        HOST,
-        HeaderValue::from_str(&host).map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        "x-amz-content-sha256",
-        HeaderValue::from_str(&payload_hash)
-            .map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        "x-amz-date",
-        HeaderValue::from_str(&amz_date).map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&authorization)
-            .map_err(|error| AppError::Remote(error.to_string()))?,
-    );
+    let headers = s3_signed_headers(config, "PUT", &canonical_uri, "", &host, &payload_hash)?;
 
     let client = http_client(CLOUD_TRANSFER_TIMEOUT)?;
     let response = send_with_retry("S3 上传", || {
@@ -685,55 +638,8 @@ async fn upload_s3(config: &S3BackupConfig, file_name: &str, bytes: Vec<u8>) -> 
 async fn download_s3(config: &S3BackupConfig, target_path: &str) -> AppResult<Vec<u8>> {
     let key = s3_key_from_target(config, target_path)?;
     let (url, canonical_uri, host) = s3_url(config, &key)?;
-    let now = Utc::now();
-    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let short_date = now.format("%Y%m%d").to_string();
     let payload_hash = hex::encode(Sha256::digest([]));
-    let canonical_headers = format!(
-        "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
-        host, payload_hash, amz_date
-    );
-    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-    let canonical_request = format!(
-        "GET\n{}\n\n{}{}\n{}",
-        canonical_uri, canonical_headers, signed_headers, payload_hash
-    );
-    let credential_scope = format!("{}/{}/s3/aws4_request", short_date, config.region.trim());
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        amz_date,
-        credential_scope,
-        hex::encode(Sha256::digest(canonical_request.as_bytes()))
-    );
-    let signing_key = s3_signing_key(&config.secret_access_key, &short_date, config.region.trim())?;
-    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
-    let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
-        config.access_key_id.trim(),
-        credential_scope,
-        signed_headers,
-        signature
-    );
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        HOST,
-        HeaderValue::from_str(&host).map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        "x-amz-content-sha256",
-        HeaderValue::from_str(&payload_hash)
-            .map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        "x-amz-date",
-        HeaderValue::from_str(&amz_date).map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&authorization)
-            .map_err(|error| AppError::Remote(error.to_string()))?,
-    );
+    let headers = s3_signed_headers(config, "GET", &canonical_uri, "", &host, &payload_hash)?;
 
     let client = http_client(CLOUD_TRANSFER_TIMEOUT)?;
     let response = send_with_retry("S3 下载", || {
@@ -755,54 +661,8 @@ async fn download_s3(config: &S3BackupConfig, target_path: &str) -> AppResult<Ve
 
 async fn delete_s3(config: &S3BackupConfig, key: &str) -> AppResult<()> {
     let (url, canonical_uri, host) = s3_url(config, key)?;
-    let now = Utc::now();
-    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let short_date = now.format("%Y%m%d").to_string();
     let payload_hash = hex::encode(Sha256::digest([]));
-    let canonical_headers = format!(
-        "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
-        host, payload_hash, amz_date
-    );
-    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-    let canonical_request = format!(
-        "DELETE\n{}\n\n{}{}\n{}",
-        canonical_uri, canonical_headers, signed_headers, payload_hash
-    );
-    let credential_scope = format!("{}/{}/s3/aws4_request", short_date, config.region.trim());
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        amz_date,
-        credential_scope,
-        hex::encode(Sha256::digest(canonical_request.as_bytes()))
-    );
-    let signing_key = s3_signing_key(&config.secret_access_key, &short_date, config.region.trim())?;
-    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
-    let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
-        config.access_key_id.trim(),
-        credential_scope,
-        signed_headers,
-        signature
-    );
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        HOST,
-        HeaderValue::from_str(&host).map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        "x-amz-content-sha256",
-        HeaderValue::from_str(&payload_hash)
-            .map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        "x-amz-date",
-        HeaderValue::from_str(&amz_date).map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&authorization)
-            .map_err(|error| AppError::Remote(error.to_string()))?,
-    );
+    let headers = s3_signed_headers(config, "DELETE", &canonical_uri, "", &host, &payload_hash)?;
     let client = http_client(CLOUD_TRANSFER_TIMEOUT)?;
     let response = send_with_retry("S3 删除", || {
         client.delete(url.as_str()).headers(headers.clone())
@@ -829,55 +689,15 @@ async fn list_s3_backups(config: &S3BackupConfig) -> AppResult<Vec<BackupRecord>
         .append_pair("list-type", "2")
         .append_pair("prefix", &prefix);
     let canonical_query = url.query().unwrap_or_default().to_string();
-    let now = Utc::now();
-    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
-    let short_date = now.format("%Y%m%d").to_string();
     let payload_hash = hex::encode(Sha256::digest([]));
-    let canonical_headers = format!(
-        "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
-        host, payload_hash, amz_date
-    );
-    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
-    let canonical_request = format!(
-        "GET\n{}\n{}\n{}{}\n{}",
-        canonical_uri, canonical_query, canonical_headers, signed_headers, payload_hash
-    );
-    let credential_scope = format!("{}/{}/s3/aws4_request", short_date, config.region.trim());
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
-        amz_date,
-        credential_scope,
-        hex::encode(Sha256::digest(canonical_request.as_bytes()))
-    );
-    let signing_key = s3_signing_key(&config.secret_access_key, &short_date, config.region.trim())?;
-    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
-    let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
-        config.access_key_id.trim(),
-        credential_scope,
-        signed_headers,
-        signature
-    );
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        HOST,
-        HeaderValue::from_str(&host).map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        "x-amz-content-sha256",
-        HeaderValue::from_str(&payload_hash)
-            .map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        "x-amz-date",
-        HeaderValue::from_str(&amz_date).map_err(|error| AppError::Remote(error.to_string()))?,
-    );
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&authorization)
-            .map_err(|error| AppError::Remote(error.to_string()))?,
-    );
+    let headers = s3_signed_headers(
+        config,
+        "GET",
+        &canonical_uri,
+        &canonical_query,
+        &host,
+        &payload_hash,
+    )?;
 
     let client = http_client(CLOUD_LIST_TIMEOUT)?;
     let response = send_with_retry("S3 列表读取", || {
@@ -955,47 +775,24 @@ fn join_object_key(prefix: &str, file_name: &str) -> String {
 }
 
 fn s3_url(config: &S3BackupConfig, key: &str) -> AppResult<(Url, String, String)> {
-    let mut url = Url::parse(config.endpoint.trim())
-        .map_err(|error| AppError::InvalidInput(error.to_string()))?;
-    let base_path = url.path().trim_end_matches('/').to_string();
-    let encoded_key = encode_path(key);
-    if config.path_style {
-        let path = format!(
-            "{}/{}/{}",
-            base_path.trim_end_matches('/'),
-            encode_segment(config.bucket.trim()),
-            encoded_key
-        );
-        url.set_path(&path);
-    } else {
-        let host = url
-            .host_str()
-            .ok_or_else(|| AppError::InvalidInput("S3 endpoint 缺少主机名".to_string()))?;
-        let virtual_host = format!("{}.{}", config.bucket.trim(), host);
-        url.set_host(Some(&virtual_host))
-            .map_err(|_| AppError::InvalidInput("S3 bucket 不能用于虚拟主机名".to_string()))?;
-        let path = format!("{}/{}", base_path.trim_end_matches('/'), encoded_key);
-        url.set_path(&path);
-    }
-    let canonical_uri = if url.path().is_empty() {
-        "/".to_string()
-    } else {
-        url.path().to_string()
-    };
-    let host = host_header(&url)?;
-    Ok((url, canonical_uri, host))
+    s3_target_url(config, Some(key))
 }
 
 fn s3_bucket_url(config: &S3BackupConfig) -> AppResult<(Url, String, String)> {
+    s3_target_url(config, None)
+}
+
+fn s3_target_url(config: &S3BackupConfig, key: Option<&str>) -> AppResult<(Url, String, String)> {
     let mut url = Url::parse(config.endpoint.trim())
         .map_err(|error| AppError::InvalidInput(error.to_string()))?;
     let base_path = url.path().trim_end_matches('/').to_string();
+    let encoded_key = key.map(encode_path);
     if config.path_style {
-        let path = format!(
-            "{}/{}",
-            base_path.trim_end_matches('/'),
-            encode_segment(config.bucket.trim())
-        );
+        let bucket = encode_segment(config.bucket.trim());
+        let path = match encoded_key.as_deref() {
+            Some(key) => format!("{base_path}/{bucket}/{key}"),
+            None => format!("{base_path}/{bucket}"),
+        };
         url.set_path(&path);
     } else {
         let host = url
@@ -1004,11 +801,17 @@ fn s3_bucket_url(config: &S3BackupConfig) -> AppResult<(Url, String, String)> {
         let virtual_host = format!("{}.{}", config.bucket.trim(), host);
         url.set_host(Some(&virtual_host))
             .map_err(|_| AppError::InvalidInput("S3 bucket 不能用于虚拟主机名".to_string()))?;
-        url.set_path(if base_path.is_empty() {
-            "/"
-        } else {
-            &base_path
-        });
+        let path = encoded_key
+            .as_deref()
+            .map(|key| format!("{base_path}/{key}"))
+            .unwrap_or_else(|| {
+                if base_path.is_empty() {
+                    "/".to_string()
+                } else {
+                    base_path.clone()
+                }
+            });
+        url.set_path(&path);
     }
     let canonical_uri = if url.path().is_empty() {
         "/".to_string()
@@ -1027,6 +830,53 @@ fn host_header(url: &Url) -> AppResult<String> {
         Some(port) => format!("{}:{}", host, port),
         None => host.to_string(),
     })
+}
+
+fn s3_signed_headers(
+    config: &S3BackupConfig,
+    method: &str,
+    canonical_uri: &str,
+    canonical_query: &str,
+    host: &str,
+    payload_hash: &str,
+) -> AppResult<HeaderMap> {
+    const SIGNED_HEADERS: &str = "host;x-amz-content-sha256;x-amz-date";
+
+    let now = Utc::now();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let short_date = now.format("%Y%m%d").to_string();
+    let canonical_headers =
+        format!("host:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n");
+    let canonical_request = format!(
+        "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}{SIGNED_HEADERS}\n{payload_hash}"
+    );
+    let region = config.region.trim();
+    let credential_scope = format!("{short_date}/{region}/s3/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+        amz_date,
+        credential_scope,
+        hex::encode(Sha256::digest(canonical_request.as_bytes()))
+    );
+    let signing_key = s3_signing_key(&config.secret_access_key, &short_date, region)?;
+    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{}, SignedHeaders={}, Signature={}",
+        config.access_key_id.trim(),
+        credential_scope,
+        SIGNED_HEADERS,
+        signature
+    );
+
+    let header_value = |value: &str| {
+        HeaderValue::from_str(value).map_err(|error| AppError::Remote(error.to_string()))
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, header_value(host)?);
+    headers.insert("x-amz-content-sha256", header_value(payload_hash)?);
+    headers.insert("x-amz-date", header_value(&amz_date)?);
+    headers.insert(AUTHORIZATION, header_value(&authorization)?);
+    Ok(headers)
 }
 
 fn s3_signing_key(secret: &str, short_date: &str, region: &str) -> AppResult<Vec<u8>> {
@@ -1288,6 +1138,54 @@ mod tests {
         );
         assert_eq!(canonical, "/helm/backup/a%20b.rpvault");
         assert_eq!(host, "s3.example.com");
+
+        let (bucket_url, bucket_canonical, bucket_host) = s3_bucket_url(&config).unwrap();
+        assert_eq!(bucket_url.as_str(), "https://s3.example.com/helm");
+        assert_eq!(bucket_canonical, "/helm");
+        assert_eq!(bucket_host, "s3.example.com");
+    }
+
+    #[test]
+    fn builds_virtual_hosted_s3_urls_and_headers() {
+        let config = S3BackupConfig {
+            endpoint: "https://s3.example.com/root".to_string(),
+            region: "us-east-1".to_string(),
+            bucket: "helm".to_string(),
+            access_key_id: "ak".to_string(),
+            secret_access_key: "sk".to_string(),
+            prefix: "backup".to_string(),
+            path_style: false,
+        };
+        let (url, canonical, host) = s3_url(&config, "backup/a.rpvault").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://helm.s3.example.com/root/backup/a.rpvault"
+        );
+        assert_eq!(canonical, "/root/backup/a.rpvault");
+        assert_eq!(host, "helm.s3.example.com");
+
+        let (bucket_url, bucket_canonical, _) = s3_bucket_url(&config).unwrap();
+        assert_eq!(bucket_url.as_str(), "https://helm.s3.example.com/root");
+        assert_eq!(bucket_canonical, "/root");
+
+        let payload_hash = hex::encode(Sha256::digest([]));
+        let headers =
+            s3_signed_headers(&config, "GET", &canonical, "", &host, &payload_hash).unwrap();
+        assert_eq!(headers.get(HOST).unwrap(), "helm.s3.example.com");
+        assert_eq!(
+            headers
+                .get("x-amz-content-sha256")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            payload_hash
+        );
+        assert!(headers
+            .get(AUTHORIZATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("AWS4-HMAC-SHA256 Credential=ak/"));
     }
 
     #[test]

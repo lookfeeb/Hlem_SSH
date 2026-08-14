@@ -79,23 +79,32 @@ export const remoteApi = {
     accelerated = false,
     resume = false,
   ) =>
-    call<TransferInfo>("transfer_upload", {
-      input: {
+    call<TransferInfo>(
+      "transfer_upload",
+      {
+        input: {
+          sftpId,
+          localPath,
+          remotePath,
+          overwrite,
+          accelerated,
+          resume,
+        },
+      },
+      { timeoutMs: 0 },
+    ),
+  download: (sftpId: string, remotePath: string, localPath: string, overwrite = false, resume = false) =>
+    call<TransferInfo>(
+      "transfer_download",
+      {
         sftpId,
-        localPath,
         remotePath,
+        localPath,
         overwrite,
-        accelerated,
         resume,
       },
-    }),
-  download: (sftpId: string, remotePath: string, localPath: string, overwrite = false) =>
-    call<TransferInfo>("transfer_download", {
-      sftpId,
-      remotePath,
-      localPath,
-      overwrite,
-    }),
+      { timeoutMs: 0 },
+    ),
   cancelTransfer: (transferId: string) => call<void>("transfer_cancel", { transferId }),
   pauseTransfer: (transferId: string) => call<TransferInfo>("transfer_pause", { transferId }),
   resumeTransfer: (transferId: string) => call<TransferInfo>("transfer_resume", { transferId }),

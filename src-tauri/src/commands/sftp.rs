@@ -201,11 +201,19 @@ pub async fn transfer_download(
     remote_path: String,
     local_path: String,
     overwrite: bool,
+    resume: Option<bool>,
 ) -> AppResult<TransferInfo> {
     ensure_vault_unlocked(&state)?;
     state
         .remote
-        .transfer_download(&app, sftp_id, remote_path, local_path, overwrite)
+        .transfer_download(
+            &app,
+            sftp_id,
+            remote_path,
+            local_path,
+            overwrite,
+            resume.unwrap_or(false),
+        )
         .await
 }
 

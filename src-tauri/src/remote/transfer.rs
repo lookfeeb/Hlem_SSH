@@ -1,29 +1,222 @@
 use super::*;
+use sha2::{Digest, Sha256};
+use tokio::sync::OwnedSemaphorePermit;
 
 pub(super) async fn cleanup_transfer_staging(
-    request: &TransferRequest,
-    transfer_id: &str,
+    direction: &TransferDirection,
+    staging_path: &str,
     cleanup_sftp: Option<&SftpSession>,
 ) {
-    match request.direction {
+    if staging_path.is_empty() {
+        return;
+    }
+    match direction {
         TransferDirection::Upload => {
             if let Some(sftp) = cleanup_sftp {
-                let path = format!("{}.helm-{}.part", request.remote_path, transfer_id);
-                let _ = sftp.remove_file(path).await;
+                let _ = remove_remote_staging(sftp, staging_path).await;
             }
         }
         TransferDirection::Download => {
-            let path = format!("{}.helm-{}.part", request.local_path, transfer_id);
-            let _ = tokio::fs::remove_file(path).await;
+            let _ = remove_local_staging(staging_path).await;
         }
     }
 }
 
-async fn sync_and_replace_local(staging: &str, target: &str) -> AppResult<()> {
-    let file = File::open(staging).await.map_err(remote_error)?;
+async fn sync_and_replace_local(staging: &str, target: &str, overwrite: bool) -> AppResult<()> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(staging)
+        .await
+        .map_err(remote_error)?;
     file.sync_all().await.map_err(remote_error)?;
     drop(file);
-    crate::atomic_file::replace_file_async(Path::new(staging), Path::new(target)).await
+    if overwrite {
+        crate::atomic_file::replace_file_async(Path::new(staging), Path::new(target)).await
+    } else {
+        match crate::atomic_file::move_file_no_replace_async(Path::new(staging), Path::new(target))
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(_) if tokio::fs::symlink_metadata(target).await.is_ok() => {
+                Err(AppError::TransferNeedsOverwrite(target.to_string()))
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TransferSourceState {
+    pub bytes_total: u64,
+    modified_marker: String,
+}
+
+pub(super) async fn transfer_source_state(
+    sftp: &SftpSession,
+    request: &TransferRequest,
+) -> AppResult<TransferSourceState> {
+    match request.direction {
+        TransferDirection::Upload => {
+            let metadata = tokio::fs::metadata(&request.local_path)
+                .await
+                .map_err(remote_error)?;
+            if !metadata.is_file() {
+                return Err(AppError::InvalidInput(format!(
+                    "上传源不是普通文件: {}",
+                    request.local_path
+                )));
+            }
+            let modified_marker = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|value| format!("{}:{}", value.as_secs(), value.subsec_nanos()))
+                .unwrap_or_else(|| "unknown".to_string());
+            Ok(TransferSourceState {
+                bytes_total: metadata.len(),
+                modified_marker,
+            })
+        }
+        TransferDirection::Download => {
+            let metadata = sftp
+                .metadata(request.remote_path.clone())
+                .await
+                .map_err(remote_error)?;
+            if !metadata.is_regular() {
+                return Err(AppError::InvalidInput(format!(
+                    "下载源不是普通文件: {}",
+                    request.remote_path
+                )));
+            }
+            Ok(TransferSourceState {
+                bytes_total: metadata.len(),
+                modified_marker: metadata
+                    .mtime
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+            })
+        }
+    }
+}
+
+pub(super) fn transfer_staging_path(
+    request: &TransferRequest,
+    session_id: &str,
+    source: &TransferSourceState,
+) -> String {
+    let mut hasher = Sha256::new();
+    let direction = match request.direction {
+        TransferDirection::Upload => b"upload".as_slice(),
+        TransferDirection::Download => b"download".as_slice(),
+    };
+    let size_marker = source.bytes_total.to_string();
+    for part in [
+        session_id.as_bytes(),
+        direction,
+        request.local_path.as_bytes(),
+        request.remote_path.as_bytes(),
+        size_marker.as_bytes(),
+        source.modified_marker.as_bytes(),
+    ] {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    let digest = hasher.finalize();
+    let token = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let file_name = format!(".helm-{token}.part");
+    match request.direction {
+        TransferDirection::Upload => {
+            let parent = request
+                .remote_path
+                .rsplit_once('/')
+                .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+                .unwrap_or("/");
+            join_remote_path(parent, &file_name)
+        }
+        TransferDirection::Download => Path::new(&request.local_path)
+            .with_file_name(file_name)
+            .to_string_lossy()
+            .into_owned(),
+    }
+}
+
+async fn remote_staging_metadata(
+    sftp: &SftpSession,
+    path: &str,
+) -> AppResult<Option<FileAttributes>> {
+    match sftp.symlink_metadata(path.to_string()).await {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(metadata_error) => match sftp.try_exists(path.to_string()).await {
+            Ok(false) => Ok(None),
+            Ok(true) => Err(remote_error(metadata_error)),
+            Err(exists_error) => Err(remote_error(exists_error)),
+        },
+    }
+}
+
+async fn remove_remote_staging(sftp: &SftpSession, path: &str) -> AppResult<()> {
+    let Some(metadata) = remote_staging_metadata(sftp, path).await? else {
+        return Ok(());
+    };
+    if metadata.is_dir() && !metadata.is_symlink() {
+        sftp.remove_dir(path.to_string())
+            .await
+            .map_err(remote_error)
+    } else {
+        sftp.remove_file(path.to_string())
+            .await
+            .map_err(remote_error)
+    }
+}
+
+async fn prepare_remote_staging(
+    sftp: &SftpSession,
+    path: &str,
+    source_size: u64,
+    resume: bool,
+) -> AppResult<u64> {
+    let Some(metadata) = remote_staging_metadata(sftp, path).await? else {
+        return Ok(0);
+    };
+    if resume && metadata.is_regular() && !metadata.is_symlink() && metadata.len() <= source_size {
+        return Ok(metadata.len());
+    }
+    remove_remote_staging(sftp, path).await?;
+    Ok(0)
+}
+
+async fn remove_local_staging(path: &str) -> AppResult<()> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(remote_error(error)),
+    };
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        tokio::fs::remove_dir_all(path).await.map_err(remote_error)
+    } else {
+        tokio::fs::remove_file(path).await.map_err(remote_error)
+    }
+}
+
+async fn prepare_local_staging(path: &str, source_size: u64, resume: bool) -> AppResult<u64> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(remote_error(error)),
+    };
+    if resume
+        && metadata.is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.len() <= source_size
+    {
+        return Ok(metadata.len());
+    }
+    remove_local_staging(path).await?;
+    Ok(0)
 }
 
 struct AbortOnDropTask<T>(Option<JoinHandle<T>>);
@@ -65,6 +258,7 @@ struct ParallelTransferOptions<'a> {
     sftp_record: &'a SftpRecord,
     total_size: u64,
     buffer_size: usize,
+    parts: u64,
     cancel: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
 }
@@ -81,7 +275,12 @@ pub(super) async fn ensure_transfer_overwrite(
             .try_exists(request.remote_path.clone())
             .await
             .map_err(remote_error)?,
-        TransferDirection::Download => Path::new(&request.local_path).exists(),
+        TransferDirection::Download => match tokio::fs::symlink_metadata(&request.local_path).await
+        {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(remote_error(error)),
+        },
     };
     if target_exists {
         Err(AppError::TransferNeedsOverwrite(match request.direction {
@@ -93,62 +292,47 @@ pub(super) async fn ensure_transfer_overwrite(
     }
 }
 
-pub(super) async fn transfer_total_bytes(
-    sftp: &SftpSession,
-    request: &TransferRequest,
-) -> AppResult<u64> {
-    match request.direction {
-        TransferDirection::Upload => Ok(tokio::fs::metadata(&request.local_path)
-            .await
-            .map_err(remote_error)?
-            .len()),
-        TransferDirection::Download => Ok(sftp
-            .metadata(request.remote_path.clone())
-            .await
-            .map_err(remote_error)?
-            .len()),
-    }
-}
-
 pub(super) async fn run_transfer(
     runtime: &RemoteRuntime,
     app: &AppHandle,
     info: TransferInfo,
     request: TransferRequest,
+    expected_source: TransferSourceState,
+    staging_path: String,
+    worker_parts: u64,
+    _permit: OwnedSemaphorePermit,
     cancel: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
 ) -> AppResult<()> {
     let sftp_record = runtime.sftp_record(&request.sftp_id).await?;
-    let _permit = sftp_record
-        .transfer_slots
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(remote_error)?;
+    if sftp_record.closed.load(Ordering::Acquire) {
+        return Err(AppError::missing_sftp(&request.sftp_id));
+    }
     let sftp = sftp_record.next_transfer_session().await;
+    if transfer_source_state(&sftp, &request).await? != expected_source {
+        return Err(AppError::Remote(
+            "传输源文件在任务排队期间发生变化，请重新开始传输".to_string(),
+        ));
+    }
     runtime.mark_transfer_running(app, &info.transfer_id).await;
     let buffer_size = if request.accelerated {
         TRANSFER_ACCELERATED_BUFFER_BYTES
     } else {
         TRANSFER_BUFFER_BYTES
     };
-    let staging_remote_path = format!("{}.helm-{}.part", request.remote_path, info.transfer_id);
-    let staging_local_path = format!("{}.helm-{}.part", request.local_path, info.transfer_id);
     match request.direction {
         TransferDirection::Upload => {
             let local_size = tokio::fs::metadata(&request.local_path)
                 .await
                 .map_err(remote_error)?
                 .len();
-            let resume_from = 0;
-            let _ = sftp.remove_file(staging_remote_path.clone()).await;
+            let resume_from =
+                prepare_remote_staging(&sftp, &staging_path, local_size, request.resume).await?;
             let mut staged_request = request.clone();
-            staged_request.remote_path = staging_remote_path.clone();
+            staged_request.remote_path = staging_path.clone();
             staged_request.resume = false;
 
-            let should_parallel = local_size >= PARALLEL_UPLOAD_THRESHOLD
-                && resume_from == 0
-                && PARALLEL_UPLOAD_PARTS >= 2;
+            let should_parallel = resume_from == 0 && worker_parts >= 2;
 
             if should_parallel {
                 run_parallel_upload(ParallelTransferOptions {
@@ -159,6 +343,7 @@ pub(super) async fn run_transfer(
                     sftp_record: &sftp_record,
                     total_size: local_size,
                     buffer_size,
+                    parts: worker_parts,
                     cancel: cancel.clone(),
                     paused: paused.clone(),
                 })
@@ -179,7 +364,7 @@ pub(super) async fn run_transfer(
                     OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE
                 };
                 let mut remote = sftp
-                    .open_with_flags(staging_remote_path.clone(), remote_flags)
+                    .open_with_flags(staging_path.clone(), remote_flags)
                     .await
                     .map_err(remote_error)?;
                 if resume_from > 0 {
@@ -225,7 +410,7 @@ pub(super) async fn run_transfer(
                 emit_transfer_progress(runtime, app, &info.transfer_id, final_bytes, 0.0).await;
             }
             let remote_size = sftp
-                .metadata(staging_remote_path.clone())
+                .metadata(staging_path.clone())
                 .await
                 .map_err(remote_error)?
                 .len();
@@ -235,8 +420,18 @@ pub(super) async fn run_transfer(
                     remote_size, local_size
                 )));
             }
+            if transfer_source_state(&sftp, &request).await? != expected_source {
+                return Err(AppError::Remote(
+                    "上传源文件在传输过程中发生变化，请重新开始传输".to_string(),
+                ));
+            }
             runtime
-                .replace_remote_file(&request.sftp_id, &staging_remote_path, &request.remote_path)
+                .replace_remote_file(
+                    &request.sftp_id,
+                    &staging_path,
+                    &request.remote_path,
+                    request.overwrite,
+                )
                 .await?;
         }
         TransferDirection::Download => {
@@ -250,16 +445,14 @@ pub(super) async fn run_transfer(
                     .await
                     .map_err(remote_error)?;
             }
-            let resume_from = 0;
-            let _ = tokio::fs::remove_file(&staging_local_path).await;
+            let resume_from =
+                prepare_local_staging(&staging_path, remote_size, request.resume).await?;
             let mut staged_request = request.clone();
-            staged_request.local_path = staging_local_path.clone();
+            staged_request.local_path = staging_path.clone();
             staged_request.resume = false;
 
             // 大文件 + 非续传：走多 File handle 并行下载以提升高延迟链路吞吐。
-            let should_parallel = remote_size >= PARALLEL_DOWNLOAD_THRESHOLD
-                && resume_from == 0
-                && PARALLEL_DOWNLOAD_PARTS >= 2;
+            let should_parallel = resume_from == 0 && worker_parts >= 2;
 
             if should_parallel {
                 run_parallel_download(ParallelTransferOptions {
@@ -270,6 +463,7 @@ pub(super) async fn run_transfer(
                     sftp_record: &sftp_record,
                     total_size: remote_size,
                     buffer_size,
+                    parts: worker_parts,
                     cancel: cancel.clone(),
                     paused: paused.clone(),
                 })
@@ -284,13 +478,11 @@ pub(super) async fn run_transfer(
                         .create(true)
                         .truncate(false)
                         .write(true)
-                        .open(&staging_local_path)
+                        .open(&staging_path)
                         .await
                         .map_err(remote_error)?
                 } else {
-                    File::create(&staging_local_path)
-                        .await
-                        .map_err(remote_error)?
+                    File::create(&staging_path).await.map_err(remote_error)?
                 };
                 if resume_from > 0 {
                     remote
@@ -338,7 +530,7 @@ pub(super) async fn run_transfer(
                 let final_bytes = bytes_done.load(Ordering::Relaxed);
                 emit_transfer_progress(runtime, app, &info.transfer_id, final_bytes, 0.0).await;
             }
-            let local_size = tokio::fs::metadata(&staging_local_path)
+            let local_size = tokio::fs::metadata(&staging_path)
                 .await
                 .map_err(remote_error)?
                 .len();
@@ -348,11 +540,16 @@ pub(super) async fn run_transfer(
                     local_size, remote_size
                 )));
             }
-            sync_and_replace_local(&staging_local_path, &request.local_path).await?;
+            if transfer_source_state(&sftp, &request).await? != expected_source {
+                return Err(AppError::Remote(
+                    "远端源文件在传输过程中发生变化，请重新开始传输".to_string(),
+                ));
+            }
+            sync_and_replace_local(&staging_path, &request.local_path, request.overwrite).await?;
         }
     }
     runtime
-        .mark_transfer_completed(app, &info.transfer_id)
+        .mark_transfer_completed(app, &info.transfer_id, info.bytes_total)
         .await;
     Ok(())
 }
@@ -430,11 +627,25 @@ where
     W: tokio::io::AsyncWrite + Unpin + ?Sized,
 {
     let mut buffer = vec![0u8; buffer_size];
+    let coalesce_target = buffer.len().clamp(1, 256 * 1024);
     loop {
         ensure_transfer_not_canceled(cancel)?;
         wait_while_paused(paused, cancel).await?;
-        let read = src.read(&mut buffer).await.map_err(remote_error)?;
-        if read == 0 {
+        let mut read = 0usize;
+        let mut reached_eof = false;
+        while read < coalesce_target {
+            let next = timeout(Duration::from_secs(30), src.read(&mut buffer[read..]))
+                .await
+                .map_err(|_| AppError::Remote("上传数据接收超时".to_string()))?
+                .map_err(remote_error)?;
+            if next == 0 {
+                reached_eof = true;
+                break;
+            }
+            read += next;
+            ensure_transfer_not_canceled(cancel)?;
+        }
+        if read == 0 && reached_eof {
             break;
         }
         let current = bytes_done.load(Ordering::Relaxed);
@@ -448,6 +659,9 @@ where
         wait_while_paused(paused, cancel).await?;
         dst.write_all(&buffer[..read]).await.map_err(remote_error)?;
         bytes_done.fetch_add(read as u64, Ordering::Relaxed);
+        if reached_eof {
+            break;
+        }
     }
     dst.flush().await.map_err(remote_error)?;
     Ok(())
@@ -531,6 +745,7 @@ fn spawn_progress_ticker(
 ///
 /// 用于并行下载场景：每个 part task 只搬运分配给自己的字节范围。
 /// 提前遇到 EOF（远端文件比期望短）会返回错误，避免静默生成损坏文件。
+#[cfg(test)]
 pub(super) async fn copy_n_async<R, W>(
     src: &mut R,
     dst: &mut W,
@@ -553,12 +768,44 @@ where
             cancel,
             paused,
             bytes_done,
+            part_bytes_done: None,
             flush_destination: true,
         },
     )
     .await
 }
 
+async fn copy_n_async_tracked<R, W>(
+    src: &mut R,
+    dst: &mut W,
+    limit: u64,
+    buffer_size: usize,
+    cancel: &AtomicBool,
+    paused: &AtomicBool,
+    bytes_done: &AtomicU64,
+    part_bytes_done: &AtomicU64,
+) -> AppResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin + ?Sized,
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    copy_n_async_inner(
+        src,
+        dst,
+        limit,
+        CopyAsyncOptions {
+            buffer_size,
+            cancel,
+            paused,
+            bytes_done,
+            part_bytes_done: Some(part_bytes_done),
+            flush_destination: true,
+        },
+    )
+    .await
+}
+
+#[cfg(test)]
 pub(super) async fn copy_n_async_without_flush<R, W>(
     src: &mut R,
     dst: &mut W,
@@ -581,6 +828,37 @@ where
             cancel,
             paused,
             bytes_done,
+            part_bytes_done: None,
+            flush_destination: false,
+        },
+    )
+    .await
+}
+
+async fn copy_n_async_without_flush_tracked<R, W>(
+    src: &mut R,
+    dst: &mut W,
+    limit: u64,
+    buffer_size: usize,
+    cancel: &AtomicBool,
+    paused: &AtomicBool,
+    bytes_done: &AtomicU64,
+    part_bytes_done: &AtomicU64,
+) -> AppResult<()>
+where
+    R: tokio::io::AsyncRead + Unpin + ?Sized,
+    W: tokio::io::AsyncWrite + Unpin + ?Sized,
+{
+    copy_n_async_inner(
+        src,
+        dst,
+        limit,
+        CopyAsyncOptions {
+            buffer_size,
+            cancel,
+            paused,
+            bytes_done,
+            part_bytes_done: Some(part_bytes_done),
             flush_destination: false,
         },
     )
@@ -592,7 +870,12 @@ struct CopyAsyncOptions<'a> {
     cancel: &'a AtomicBool,
     paused: &'a AtomicBool,
     bytes_done: &'a AtomicU64,
+    part_bytes_done: Option<&'a AtomicU64>,
     flush_destination: bool,
+}
+
+pub(super) fn read_chunk_len(remaining: u64, buffer_len: usize) -> usize {
+    remaining.min(buffer_len as u64) as usize
 }
 
 async fn copy_n_async_inner<R, W>(
@@ -610,6 +893,7 @@ where
         cancel,
         paused,
         bytes_done,
+        part_bytes_done,
         flush_destination,
     } = options;
     let mut buffer = vec![0u8; buffer_size];
@@ -622,7 +906,7 @@ where
         }
         wait_while_paused(paused, cancel).await?;
 
-        let to_read = std::cmp::min(remaining as usize, buffer.len());
+        let to_read = read_chunk_len(remaining, buffer.len());
         let read = src
             .read(&mut buffer[..to_read])
             .await
@@ -636,6 +920,9 @@ where
         wait_while_paused(paused, cancel).await?;
         dst.write_all(&buffer[..read]).await.map_err(remote_error)?;
         bytes_done.fetch_add(read as u64, Ordering::Relaxed);
+        if let Some(part_bytes_done) = part_bytes_done {
+            part_bytes_done.fetch_add(read as u64, Ordering::Relaxed);
+        }
         remaining -= read as u64;
     }
     if flush_destination {
@@ -657,6 +944,7 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
         sftp_record,
         total_size: local_size,
         buffer_size,
+        parts,
         cancel,
         paused,
     } = options;
@@ -685,23 +973,21 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
         stop_progress.clone(),
     );
 
-    let chunk_size = local_size / PARALLEL_UPLOAD_PARTS;
-    let mut workers = Vec::with_capacity(PARALLEL_UPLOAD_PARTS as usize);
+    let chunk_size = local_size / parts;
+    let mut workers = Vec::with_capacity(parts as usize);
+    let part_progress = (0..parts)
+        .map(|_| Arc::new(AtomicU64::new(0)))
+        .collect::<Vec<_>>();
 
     log::info!(
         "并行上传启动：{} 字节 / {} 路 (chunk≈{} 字节)",
         local_size,
-        PARALLEL_UPLOAD_PARTS,
+        parts,
         chunk_size
     );
 
-    for i in 0..PARALLEL_UPLOAD_PARTS {
-        let start = i * chunk_size;
-        let len = if i == PARALLEL_UPLOAD_PARTS - 1 {
-            local_size - start
-        } else {
-            chunk_size
-        };
+    for i in 0..parts {
+        let (start, len) = parallel_part_range(local_size, parts, i);
 
         let task_sftp = sftp_record.next_transfer_session().await;
         let task_local_path = request.local_path.clone();
@@ -709,6 +995,7 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
         let task_cancel = cancel.clone();
         let task_paused = paused.clone();
         let task_bytes_done = bytes_done.clone();
+        let task_part_bytes_done = part_progress[i as usize].clone();
 
         workers.push(async move {
             let result: AppResult<()> = async {
@@ -731,7 +1018,7 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
                         .map_err(remote_error)?;
                 }
 
-                copy_n_async_without_flush(
+                copy_n_async_without_flush_tracked(
                     &mut local_file,
                     &mut remote_file,
                     len,
@@ -739,6 +1026,7 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
                     &task_cancel,
                     &task_paused,
                     &task_bytes_done,
+                    &task_part_bytes_done,
                 )
                 .await?;
                 remote_file.shutdown().await.map_err(remote_error)
@@ -765,6 +1053,21 @@ async fn run_parallel_upload(options: ParallelTransferOptions<'_>) -> AppResult<
     await_progress_ticker(progress_handle, &info.transfer_id).await;
 
     if let Some(error) = first_error {
+        let resumable_prefix = contiguous_parallel_prefix(local_size, parts, &part_progress);
+        let mut metadata = FileAttributes::empty();
+        metadata.size = Some(resumable_prefix);
+        let truncate_result = sftp_record
+            .next_transfer_session()
+            .await
+            .set_metadata(request.remote_path.clone(), metadata)
+            .await;
+        if let Err(truncate_error) = truncate_result {
+            log::warn!(
+                "failed to truncate interrupted parallel upload staging file: {truncate_error}"
+            );
+            let cleanup_sftp = sftp_record.next_transfer_session().await;
+            let _ = remove_remote_staging(&cleanup_sftp, &request.remote_path).await;
+        }
         return Err(error);
     }
 
@@ -810,6 +1113,7 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
         sftp_record,
         total_size: remote_size,
         buffer_size,
+        parts,
         cancel,
         paused,
     } = options;
@@ -838,23 +1142,21 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
         stop_progress.clone(),
     );
 
-    let chunk_size = remote_size / PARALLEL_DOWNLOAD_PARTS;
-    let mut workers = Vec::with_capacity(PARALLEL_DOWNLOAD_PARTS as usize);
+    let chunk_size = remote_size / parts;
+    let mut workers = Vec::with_capacity(parts as usize);
+    let part_progress = (0..parts)
+        .map(|_| Arc::new(AtomicU64::new(0)))
+        .collect::<Vec<_>>();
 
     log::info!(
         "并行下载启动：{} 字节 / {} 路 (chunk≈{} 字节)",
         remote_size,
-        PARALLEL_DOWNLOAD_PARTS,
+        parts,
         chunk_size
     );
 
-    for i in 0..PARALLEL_DOWNLOAD_PARTS {
-        let start = i * chunk_size;
-        let len = if i == PARALLEL_DOWNLOAD_PARTS - 1 {
-            remote_size - start
-        } else {
-            chunk_size
-        };
+    for i in 0..parts {
+        let (start, len) = parallel_part_range(remote_size, parts, i);
 
         // 每个 task 抓一个 transfer 池里的 SftpSession（轮询）。
         // 池里只有 1 个时多 task 共用同一 session，仍可借多 File handle 并行；
@@ -865,6 +1167,7 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
         let task_cancel = cancel.clone();
         let task_paused = paused.clone();
         let task_bytes_done = bytes_done.clone();
+        let task_part_bytes_done = part_progress[i as usize].clone();
 
         workers.push(async move {
             let result: AppResult<()> = async {
@@ -892,7 +1195,7 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
                         .map_err(remote_error)?;
                 }
 
-                copy_n_async(
+                copy_n_async_tracked(
                     &mut remote_file,
                     &mut local_file,
                     len,
@@ -900,6 +1203,7 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
                     &task_cancel,
                     &task_paused,
                     &task_bytes_done,
+                    &task_part_bytes_done,
                 )
                 .await?;
                 remote_file.shutdown().await.map_err(remote_error)
@@ -927,6 +1231,21 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
     await_progress_ticker(progress_handle, &info.transfer_id).await;
 
     if let Some(error) = first_error {
+        let resumable_prefix = contiguous_parallel_prefix(remote_size, parts, &part_progress);
+        let truncate_result = match OpenOptions::new()
+            .write(true)
+            .open(&request.local_path)
+            .await
+        {
+            Ok(file) => file.set_len(resumable_prefix).await,
+            Err(error) => Err(error),
+        };
+        if let Err(truncate_error) = truncate_result {
+            log::warn!(
+                "failed to truncate interrupted parallel download staging file: {truncate_error}"
+            );
+            let _ = remove_local_staging(&request.local_path).await;
+        }
         return Err(error);
     }
 
@@ -935,13 +1254,45 @@ async fn run_parallel_download(options: ParallelTransferOptions<'_>) -> AppResul
     Ok(())
 }
 
+fn parallel_part_range(total_size: u64, parts: u64, index: u64) -> (u64, u64) {
+    let chunk_size = total_size / parts;
+    let start = index * chunk_size;
+    let len = if index == parts - 1 {
+        total_size - start
+    } else {
+        chunk_size
+    };
+    (start, len)
+}
+
+fn contiguous_parallel_prefix(total_size: u64, parts: u64, progress: &[Arc<AtomicU64>]) -> u64 {
+    let mut prefix = 0;
+    for index in 0..parts {
+        let (_, part_len) = parallel_part_range(total_size, parts, index);
+        let completed = progress[index as usize]
+            .load(Ordering::Acquire)
+            .min(part_len);
+        prefix += completed;
+        if completed < part_len {
+            break;
+        }
+    }
+    prefix
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_transfer_staging, copy_async, copy_async_limited};
+    use super::{
+        cleanup_transfer_staging, contiguous_parallel_prefix, copy_async, copy_async_limited,
+        prepare_local_staging, read_chunk_len, sync_and_replace_local, transfer_staging_path,
+        TransferSourceState,
+    };
     use crate::errors::AppError;
     use crate::remote::{TransferDirection, TransferRequest};
-    use std::path::Path;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    };
     use tempfile::tempdir;
     use tokio::io::{repeat, sink, AsyncReadExt};
 
@@ -1018,21 +1369,101 @@ mod tests {
     #[tokio::test]
     async fn download_staging_cleanup_does_not_require_a_live_sftp_record() {
         let directory = tempdir().unwrap();
-        let target = directory.path().join("download.bin");
-        let staging = format!("{}.helm-transfer-1.part", target.display());
+        let staging = directory.path().join(".helm-transfer-1.part");
         tokio::fs::write(&staging, b"partial").await.unwrap();
+
+        cleanup_transfer_staging(
+            &TransferDirection::Download,
+            &staging.to_string_lossy(),
+            None,
+        )
+        .await;
+
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn chunk_length_handles_values_larger_than_32_bit_usize() {
+        assert_eq!(
+            read_chunk_len(u32::MAX as u64 + 1, 1024 * 1024),
+            1024 * 1024
+        );
+        assert_eq!(read_chunk_len(17, 1024), 17);
+    }
+
+    #[test]
+    fn interrupted_parallel_transfer_keeps_only_the_contiguous_prefix() {
+        let progress = [4, 2, 4, 4]
+            .into_iter()
+            .map(|value| Arc::new(AtomicU64::new(value)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(contiguous_parallel_prefix(16, 4, &progress), 6);
+    }
+
+    #[tokio::test]
+    async fn local_resume_keeps_valid_partial_and_resets_invalid_staging() {
+        let directory = tempdir().unwrap();
+        let staging = directory.path().join(".helm-resume.part");
+        tokio::fs::write(&staging, b"partial").await.unwrap();
+
+        assert_eq!(
+            prepare_local_staging(&staging.to_string_lossy(), 32, true)
+                .await
+                .unwrap(),
+            7,
+        );
+        assert!(staging.exists());
+
+        assert_eq!(
+            prepare_local_staging(&staging.to_string_lossy(), 4, true)
+                .await
+                .unwrap(),
+            0,
+        );
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn staging_path_is_stable_and_uses_a_short_hidden_name() {
         let request = TransferRequest {
-            sftp_id: "already-closed".to_string(),
-            direction: TransferDirection::Download,
-            local_path: target.to_string_lossy().into_owned(),
-            remote_path: "/tmp/download.bin".to_string(),
-            overwrite: true,
+            sftp_id: "sftp-1".to_string(),
+            direction: TransferDirection::Upload,
+            local_path: "C:/very/long/source.bin".to_string(),
+            remote_path: "/tmp/target.bin".to_string(),
+            overwrite: false,
             accelerated: false,
-            resume: false,
+            resume: true,
+        };
+        let source = TransferSourceState {
+            bytes_total: 42,
+            modified_marker: "123:456".to_string(),
         };
 
-        cleanup_transfer_staging(&request, "transfer-1", None).await;
+        let first = transfer_staging_path(&request, "session-1", &source);
+        let second = transfer_staging_path(&request, "session-1", &source);
 
-        assert!(!Path::new(&staging).exists());
+        assert_eq!(first, second);
+        assert!(first.starts_with("/tmp/.helm-"));
+        assert!(first.ends_with(".part"));
+        assert!(first.len() < 80);
+    }
+
+    #[tokio::test]
+    async fn local_no_overwrite_commit_preserves_racing_target() {
+        let directory = tempdir().unwrap();
+        let staging = directory.path().join(".helm-race.part");
+        let target = directory.path().join("target.bin");
+        tokio::fs::write(&staging, b"new").await.unwrap();
+        tokio::fs::write(&target, b"old").await.unwrap();
+
+        let error =
+            sync_and_replace_local(&staging.to_string_lossy(), &target.to_string_lossy(), false)
+                .await
+                .unwrap_err();
+
+        assert!(matches!(error, AppError::TransferNeedsOverwrite(_)));
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"old");
+        assert_eq!(tokio::fs::read(&staging).await.unwrap(), b"new");
     }
 }

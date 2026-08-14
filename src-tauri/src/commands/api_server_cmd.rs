@@ -49,6 +49,7 @@ pub async fn api_server_configure_and_start(
             auto_start,
         })
     })?;
+    sync_api_server_authorization_cache(&state, &snapshot).await;
     drop(mutation_guard);
     events::emit(&app, events::CONFIG_CHANGED, snapshot.clone());
     match start_api_server_inner(app.clone(), &state, effective_port, allowed_session_ids).await {
@@ -102,8 +103,7 @@ async fn start_api_server_inner(
     if let Some(existing) = handle_guard.as_ref() {
         existing
             .update_allowed_sessions(allowed_session_ids, allowed_session_names)
-            .await
-            .map_err(AppError::Remote)?;
+            .await;
         let info = ApiServerInfo {
             running: true,
             port: existing.port,
@@ -413,6 +413,17 @@ fn configured_allowed_sessions(snapshot: &ConfigSnapshot) -> (Vec<String>, Vec<(
     (ids, names)
 }
 
+pub(super) async fn sync_api_server_authorization_cache(
+    state: &State<'_, AppState>,
+    snapshot: &ConfigSnapshot,
+) {
+    let (allowed_session_ids, allowed_session_names) = configured_allowed_sessions(snapshot);
+    let handle_guard = state.api_server.lock().await;
+    if let Some(handle) = handle_guard.as_ref() {
+        handle.replace_allowed_sessions_cache(allowed_session_ids, allowed_session_names);
+    }
+}
+
 pub(super) async fn reconcile_api_server_with_snapshot(
     app: &AppHandle,
     state: &State<'_, AppState>,
@@ -485,8 +496,7 @@ async fn reconcile_api_server_with_snapshot_inner(
         Some(handle) => {
             handle
                 .update_allowed_sessions(allowed_session_ids, allowed_session_names)
-                .await
-                .map_err(AppError::Remote)?;
+                .await;
             Ok(ApiServerInfo {
                 running: true,
                 port: handle.port,

@@ -415,7 +415,8 @@ impl RemoteRuntime {
             if size != content.len() as u64 {
                 return Err(AppError::Remote("编辑内容写入校验失败".to_string()));
             }
-            self.replace_remote_file(sftp_id, &temp_path, &path).await
+            self.replace_remote_file(sftp_id, &temp_path, &path, true)
+                .await
         }
         .await;
         if result.is_err() {
@@ -431,15 +432,67 @@ impl RemoteRuntime {
         sftp_id: &str,
         from: &str,
         to: &str,
+        overwrite: bool,
     ) -> AppResult<()> {
-        let connection_id = self.sftp_record(sftp_id).await?.info.connection_id;
+        let sftp_record = self.sftp_record(sftp_id).await?;
+        let sftp = sftp_record.session.clone();
+        let staging_metadata = sftp
+            .symlink_metadata(from.to_string())
+            .await
+            .map_err(remote_error)?;
+        if staging_metadata.is_symlink() || !staging_metadata.is_regular() {
+            return Err(AppError::Remote(
+                "远端临时文件不是可安全提交的普通文件".to_string(),
+            ));
+        }
+
+        let target_metadata = match sftp.symlink_metadata(to.to_string()).await {
+            Ok(metadata) => Some(metadata),
+            Err(metadata_error) => match sftp.try_exists(to.to_string()).await {
+                Ok(false) => None,
+                Ok(true) => return Err(remote_error(metadata_error)),
+                Err(exists_error) => return Err(remote_error(exists_error)),
+            },
+        };
+        if let Some(metadata) = target_metadata {
+            if metadata.is_symlink() {
+                return Err(AppError::InvalidInput(format!(
+                    "目标是软链接，拒绝替换: {to}"
+                )));
+            }
+            if !metadata.is_regular() {
+                return Err(AppError::InvalidInput(format!(
+                    "目标不是普通文件，拒绝替换: {to}"
+                )));
+            }
+            if !overwrite {
+                return Err(AppError::TransferNeedsOverwrite(to.to_string()));
+            }
+            let mut preserved = FileAttributes::empty();
+            preserved.uid = metadata.uid;
+            preserved.gid = metadata.gid;
+            preserved.permissions = metadata.permissions.map(|mode| mode & 0o7777);
+            preserved.atime = metadata.atime;
+            preserved.mtime = metadata.mtime;
+            sftp.set_metadata(from.to_string(), preserved)
+                .await
+                .map_err(remote_error)?;
+        }
+
+        let connection_id = sftp_record.info.connection_id;
         let result = self
             .exec_on_connection(
                 &connection_id,
-                build_remote_replace_command(from, to),
+                build_remote_replace_command(from, to, overwrite),
                 Some(SFTP_FILE_OPERATION_TIMEOUT_MS),
             )
             .await?;
+        if !overwrite
+            && (result.stderr.contains(REMOTE_TARGET_EXISTS_MARKER)
+                || result.stdout.contains(REMOTE_TARGET_EXISTS_MARKER))
+        {
+            return Err(AppError::TransferNeedsOverwrite(to.to_string()));
+        }
         ensure_remote_file_command_success(result, "替换远端文件")
     }
 

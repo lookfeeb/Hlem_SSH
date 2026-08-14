@@ -6,12 +6,6 @@ const TELEMETRY_FRAME_CHANNEL_CAPACITY: usize = 4;
 const TELEMETRY_STREAM_INIT_TIMEOUT_MS: u64 = 5_000;
 
 async fn measure_ssh_latency(handle: &SshHandle) -> AppResult<f64> {
-    let handle = timeout(
-        Duration::from_millis(LATENCY_PROBE_TIMEOUT_MS),
-        handle.lock(),
-    )
-    .await
-    .map_err(|_| AppError::Remote("等待 SSH 延迟探测通道超时".to_string()))?;
     let started = Instant::now();
     timeout(
         Duration::from_millis(LATENCY_PROBE_TIMEOUT_MS),

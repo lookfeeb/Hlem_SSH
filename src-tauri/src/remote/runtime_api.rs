@@ -3,12 +3,13 @@ use super::*;
 use crate::api_server::FileEntry;
 use bytes::Bytes;
 use futures_util::Stream;
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf};
 use tokio::sync::{mpsc, OwnedSemaphorePermit};
 use tokio_util::io::ReaderStream;
 
@@ -16,7 +17,62 @@ pub struct SftpDownloadStream {
     inner: Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>>,
     _permit: OwnedSemaphorePermit,
     closed: Arc<AtomicBool>,
+    remaining: u64,
     stopped: bool,
+}
+
+struct Sha256Reader<'a, R: AsyncRead + Unpin + ?Sized> {
+    inner: &'a mut R,
+    hasher: Option<Sha256>,
+}
+
+impl<'a, R: AsyncRead + Unpin + ?Sized> Sha256Reader<'a, R> {
+    fn new(inner: &'a mut R, enabled: bool) -> Self {
+        Self {
+            inner,
+            hasher: enabled.then(Sha256::new),
+        }
+    }
+
+    fn finish(self) -> Option<String> {
+        self.hasher.map(|hasher| hex::encode(hasher.finalize()))
+    }
+}
+
+impl<R: AsyncRead + Unpin + ?Sized> AsyncRead for Sha256Reader<'_, R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut *self.inner).poll_read(cx, buf);
+        if matches!(result, Poll::Ready(Ok(()))) {
+            if let Some(hasher) = self.hasher.as_mut() {
+                hasher.update(&buf.filled()[before..]);
+            }
+        }
+        result
+    }
+}
+
+fn api_file_entry(parent: &str, name: String, metadata: FileAttributes) -> FileEntry {
+    let entry = super::sftp::remote_entry(parent, name, metadata);
+    let file_type = match entry.file_type {
+        RemoteFileType::Directory => "directory",
+        RemoteFileType::Symlink => "symlink",
+        RemoteFileType::File => "file",
+        RemoteFileType::Other => "other",
+    };
+    FileEntry {
+        name: entry.name,
+        path: entry.path,
+        file_type: file_type.to_string(),
+        size: entry.size,
+        modified_at: entry.modified_at,
+        permissions: entry.permissions,
+        owner: entry.owner,
+    }
 }
 
 impl Stream for SftpDownloadStream {
@@ -26,6 +82,10 @@ impl Stream for SftpDownloadStream {
         if self.stopped {
             return Poll::Ready(None);
         }
+        if self.remaining == 0 {
+            self.stopped = true;
+            return Poll::Ready(None);
+        }
         if self.closed.load(Ordering::Acquire) {
             self.stopped = true;
             return Poll::Ready(Some(Err(io::Error::new(
@@ -33,7 +93,38 @@ impl Stream for SftpDownloadStream {
                 "SFTP 已关闭，下载已取消",
             ))));
         }
-        self.inner.as_mut().poll_next(cx)
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                let read = bytes.len() as u64;
+                if read > self.remaining {
+                    self.stopped = true;
+                    return Poll::Ready(Some(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "远端下载流返回了超出请求范围的数据",
+                    ))));
+                }
+                self.remaining -= read;
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.stopped = true;
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) if self.remaining > 0 => {
+                let remaining = self.remaining;
+                self.remaining = 0;
+                self.stopped = true;
+                Poll::Ready(Some(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("远端文件提前结束：还差 {remaining} 字节"),
+                ))))
+            }
+            Poll::Ready(None) => {
+                self.stopped = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -82,6 +173,7 @@ fn abort_download_workers(workers: &mut Vec<JoinHandle<()>>) {
 /// 每个 worker 的 mpsc 通道深度（以 chunk 计，每 chunk 至多 buffer_size 字节）。
 /// 4 worker × 4 槽 × 1MB = 最多 16MB 飞行内存，给客户端慢消费的反压预留空间。
 const PER_WORKER_QUEUE_DEPTH: usize = 4;
+const API_TRANSFER_QUEUE_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct RemoteTempFileGuard {
     sftp: Arc<SftpSession>,
@@ -188,6 +280,44 @@ impl RemoteRuntime {
         (true, sftp_available)
     }
 
+    pub async fn api_session_statuses(&self) -> HashMap<String, ApiSessionStatus> {
+        let connections = {
+            let connections = self.connections.read().await;
+            connections
+                .values()
+                .filter(|record| {
+                    record.origin == ConnectionOrigin::Automation
+                        && !connection_record_is_closed(record)
+                })
+                .map(|record| record.info.clone())
+                .collect::<Vec<_>>()
+        };
+        let sftp_connections = {
+            let sessions = self.sftp_sessions.read().await;
+            sessions
+                .values()
+                .filter(|record| !record.closed.load(Ordering::Acquire))
+                .map(|record| record.info.connection_id.clone())
+                .collect::<HashSet<_>>()
+        };
+        connections
+            .into_iter()
+            .map(|info| {
+                let sftp_available = sftp_connections.contains(&info.connection_id);
+                (
+                    info.session_id.clone(),
+                    ApiSessionStatus {
+                        connected: info.status == RuntimeStatus::Connected,
+                        sftp_available,
+                        connection_id: info.connection_id,
+                        status: info.status,
+                        connected_at: info.connected_at,
+                    },
+                )
+            })
+            .collect()
+    }
+
     pub async fn api_ensure_sftp(&self, session_id: &str) -> Result<(), String> {
         let connection_id = self
             .find_connection_for_session(session_id, ConnectionOrigin::Automation)
@@ -237,12 +367,95 @@ impl RemoteRuntime {
         command: &str,
         timeout_ms: u64,
     ) -> Result<ExecResult, String> {
+        let started = Instant::now();
         let connection_id = self
             .find_connection_for_session(session_id, ConnectionOrigin::Automation)
             .await?;
-        self.exec_on_connection(&connection_id, command.to_string(), Some(timeout_ms))
+        let connection = self
+            .connection(&connection_id)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|error| error.to_string())?;
+        let handle = connection.handle.clone();
+        let tracker = connection.exec_process_tracker.clone();
+        let (channel_result, tracked_process_groups) = tokio::join!(
+            self.open_exec_channel_for_connection(&connection, true),
+            tracker.supports_process_groups(&handle)
+        );
+        let (channel, channel_open_ms) = channel_result.map_err(|error| error.to_string())?;
+        let execution = if tracked_process_groups {
+            exec_tracked_with_channel_output_limit(
+                channel,
+                build_tracked_exec_command(handle, command.to_string()),
+                timeout_ms,
+                MAX_API_EXEC_OUTPUT_BYTES,
+            )
+            .await
+        } else {
+            exec_with_channel_output_limit(
+                channel,
+                command.to_string(),
+                timeout_ms,
+                MAX_API_EXEC_OUTPUT_BYTES,
+            )
+            .await
+        };
+        let mut result = execution.map_err(|error| error.to_string())?;
+        result.channel_open_ms = channel_open_ms;
+        result.duration_ms = started.elapsed().as_millis();
+        Ok(result)
+    }
+
+    /// Execute a command while forwarding stdout/stderr chunks to the caller.
+    /// Cancellation terminates the tracked remote process group without affecting
+    /// the shared automation connection.
+    pub async fn api_exec_stream(
+        &self,
+        session_id: &str,
+        command: String,
+        timeout_ms: u64,
+        output: mpsc::Sender<ExecStreamChunk>,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<ExecResult, String> {
+        let started = Instant::now();
+        let connection_id = self
+            .find_connection_for_session(session_id, ConnectionOrigin::Automation)
+            .await?;
+        let connection = self
+            .connection(&connection_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let handle = connection.handle.clone();
+        let tracker = connection.exec_process_tracker.clone();
+        let (channel_result, tracked_process_groups) = tokio::join!(
+            self.open_exec_channel_for_connection(&connection, true),
+            tracker.supports_process_groups(&handle)
+        );
+        let (channel, channel_open_ms) = channel_result.map_err(|error| error.to_string())?;
+        let execution = if tracked_process_groups {
+            exec_tracked_stream_with_channel(
+                channel,
+                build_tracked_exec_command(handle, command),
+                timeout_ms,
+                output,
+                cancel,
+                MAX_API_EXEC_OUTPUT_BYTES,
+            )
+            .await
+        } else {
+            exec_stream_with_channel(
+                channel,
+                command,
+                timeout_ms,
+                output,
+                cancel,
+                MAX_API_EXEC_OUTPUT_BYTES,
+            )
+            .await
+        };
+        let mut result = execution.map_err(|error| error.to_string())?;
+        result.channel_open_ms = channel_open_ms;
+        result.duration_ms = started.elapsed().as_millis();
+        Ok(result)
     }
 
     /// List files in a remote directory.
@@ -259,34 +472,50 @@ impl RemoteRuntime {
 
         Ok(entries
             .into_iter()
-            .filter(|e| {
-                let name = e.file_name();
-                name != "." && name != ".."
-            })
-            .map(|entry| {
-                let name = entry.file_name();
-                let file_type = entry.file_type();
-                let size = entry.metadata().len();
-                let ft = if file_type.is_dir() {
-                    "directory"
-                } else if file_type.is_symlink() {
-                    "symlink"
-                } else {
-                    "file"
-                };
-                let entry_path = if path == "/" {
-                    format!("/{}", name)
-                } else {
-                    format!("{}/{}", path.trim_end_matches('/'), name)
-                };
-                FileEntry {
-                    name,
-                    path: entry_path,
-                    file_type: ft.to_string(),
-                    size,
-                }
-            })
+            .map(|entry| api_file_entry(path, entry.file_name(), entry.metadata()))
             .collect())
+    }
+
+    pub async fn api_list_files_page(
+        &self,
+        session_id: &str,
+        path: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(Vec<FileEntry>, bool), String> {
+        let sftp = self.find_sftp_for_session(session_id).await?;
+        let (entries, has_more) = sftp
+            .read_dir_page(path.to_string(), offset, limit)
+            .await
+            .map_err(|error| format!("分页列出目录失败: {error}"))?;
+        Ok((
+            entries
+                .into_iter()
+                .map(|entry| api_file_entry(path, entry.file_name(), entry.metadata()))
+                .collect(),
+            has_more,
+        ))
+    }
+
+    pub async fn api_file_stat(&self, session_id: &str, path: &str) -> Result<FileEntry, String> {
+        let sftp = self.find_sftp_for_session(session_id).await?;
+        let normalized = normalize_remote_path(path);
+        let metadata = sftp
+            .symlink_metadata(normalized.clone())
+            .await
+            .map_err(|error| format!("读取文件元数据失败: {error}"))?;
+        let (parent, name) = if normalized == "/" {
+            ("/", "/".to_string())
+        } else {
+            let (parent, name) = normalized.rsplit_once('/').unwrap_or(("/", &normalized));
+            (
+                if parent.is_empty() { "/" } else { parent },
+                name.to_string(),
+            )
+        };
+        let mut entry = api_file_entry(parent, name, metadata);
+        entry.path = normalized;
+        Ok(entry)
     }
 
     // ─── Internal helpers ──────────────────────────────────────────────────────
@@ -348,12 +577,13 @@ impl RemoteRuntime {
                 .cloned()
                 .ok_or_else(|| format!("会话 {} 没有可用的 SFTP 连接", session_id))?
         };
-        let permit = sftp_record
-            .transfer_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|error| format!("获取传输配额失败: {error}"))?;
+        let permit = timeout(
+            API_TRANSFER_QUEUE_TIMEOUT,
+            sftp_record.transfer_slots.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| "传输队列繁忙，请稍后重试".to_string())?
+        .map_err(|error| format!("获取传输配额失败: {error}"))?;
         if sftp_record.closed.load(Ordering::Acquire) {
             return Err(format!("会话 {} 的 SFTP 连接已关闭", session_id));
         }
@@ -374,6 +604,7 @@ impl RemoteRuntime {
             inner: Box::pin(stream),
             _permit: permit,
             closed: sftp_record.closed.clone(),
+            remaining: total_len,
             stopped: false,
         })
     }
@@ -389,8 +620,9 @@ impl RemoteRuntime {
         session_id: &str,
         remote_path: &str,
         reader: &mut R,
+        expected_sha256: Option<&str>,
         max_bytes: u64,
-    ) -> AppResult<u64> {
+    ) -> AppResult<(u64, Option<String>)> {
         use std::sync::atomic::{AtomicBool, AtomicU64};
         let connection_id = self
             .find_connection_for_session(session_id, ConnectionOrigin::Automation)
@@ -409,12 +641,13 @@ impl RemoteRuntime {
                     AppError::Remote(format!("会话 {} 没有可用的 SFTP 连接", session_id))
                 })?
         };
-        let _permit = sftp_record
-            .transfer_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| AppError::Remote(format!("获取传输配额失败: {}", e)))?;
+        let _permit = timeout(
+            API_TRANSFER_QUEUE_TIMEOUT,
+            sftp_record.transfer_slots.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| AppError::Remote("传输队列繁忙，请稍后重试".to_string()))?
+        .map_err(|e| AppError::Remote(format!("获取传输配额失败: {}", e)))?;
         // Register only after acquiring the quota. If close began while this
         // request was queued, registration fails instead of letting an upload
         // start after close_sftp has already finished waiting for active work.
@@ -434,6 +667,7 @@ impl RemoteRuntime {
         let dummy_cancel = AtomicBool::new(false);
         let dummy_paused = AtomicBool::new(false);
         let bytes_done = AtomicU64::new(0);
+        let expected_sha256 = expected_sha256.map(str::to_ascii_lowercase);
         let result = async {
             let mut remote = sftp
                 .open_with_flags(
@@ -451,9 +685,10 @@ impl RemoteRuntime {
                     notified.await;
                 }
             };
+            let mut hashing_reader = Sha256Reader::new(reader, expected_sha256.is_some());
             tokio::select! {
                 result = super::transfer::copy_async_limited(
-                    reader,
+                    &mut hashing_reader,
                     &mut remote,
                     4 * 1024 * 1024,
                     &dummy_cancel,
@@ -467,6 +702,14 @@ impl RemoteRuntime {
             }
             remote.shutdown().await.map_err(remote_error)?;
             let written = bytes_done.load(std::sync::atomic::Ordering::Relaxed);
+            let actual_sha256 = hashing_reader.finish();
+            if let (Some(expected), Some(actual)) = (&expected_sha256, &actual_sha256) {
+                if expected != actual {
+                    return Err(AppError::InvalidInput(format!(
+                        "SHA-256 校验失败：期望 {expected}，实际 {actual}"
+                    )));
+                }
+            }
             let remote_size = sftp
                 .metadata(temp_path.clone())
                 .await
@@ -478,10 +721,10 @@ impl RemoteRuntime {
                     remote_size, written
                 )));
             }
-            self.replace_remote_file(&sftp_record.info.sftp_id, &temp_path, &normalized)
+            self.replace_remote_file(&sftp_record.info.sftp_id, &temp_path, &normalized, true)
                 .await?;
             temp_guard.disarm();
-            Ok(written)
+            Ok((written, actual_sha256))
         }
         .await;
         if result.is_err() {
@@ -530,21 +773,24 @@ impl RemoteRuntime {
         };
         sftp_record.wait_for_transfer_pool().await;
 
-        // 占用一个 transfer 配额，避免并行 worker 把通道挤爆。
-        // 占用持续整个流式响应期间，由 worker 任务持有 permit；最后一个 worker
-        // 退出后 permit 自动释放。
-        let permit = sftp_record
-            .transfer_slots
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| format!("获取传输配额失败: {}", e))?;
+        let available_sessions = sftp_record.transfer_sessions.read().await.len().max(1) as u64;
+        let parts = parts.max(1).min(available_sessions).min(total_len.max(1));
+        // 每个 worker 占用一个传输配额。这样四路并行下载会一次性占满四个槽，
+        // 不会与其他并行请求叠加成十几个 worker 争抢同一组 SFTP channel。
+        let permit = timeout(
+            API_TRANSFER_QUEUE_TIMEOUT,
+            sftp_record
+                .transfer_slots
+                .clone()
+                .acquire_many_owned(parts as u32),
+        )
+        .await
+        .map_err(|_| "传输队列繁忙，请稍后重试".to_string())?
+        .map_err(|e| format!("获取传输配额失败: {}", e))?;
         if sftp_record.closed.load(Ordering::Acquire) {
             return Err(format!("会话 {} 的 SFTP 连接已关闭", session_id));
         }
         let permit = Arc::new(permit);
-
-        let parts = parts.max(2);
         let chunk_size = total_len / parts;
         let mut receivers: VecDeque<mpsc::Receiver<io::Result<Bytes>>> =
             VecDeque::with_capacity(parts as usize);
@@ -603,7 +849,7 @@ impl RemoteRuntime {
                         send_download_worker_error(&tx, "SFTP 已关闭，下载已取消").await;
                         return;
                     }
-                    let to_read = std::cmp::min(remaining as usize, buf.len());
+                    let to_read = super::transfer::read_chunk_len(remaining, buf.len());
                     match file.read(&mut buf[..to_read]).await {
                         Ok(0) => {
                             if tx
@@ -662,6 +908,7 @@ mod tests {
             inner: Box::pin(futures_util::stream::pending()),
             _permit: permit,
             closed,
+            remaining: 1,
             stopped: false,
         };
 
@@ -670,6 +917,48 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::ConnectionAborted);
+        assert!(futures_util::StreamExt::next(&mut stream).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn short_sftp_download_stream_reports_unexpected_eof_once() {
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        let mut stream = SftpDownloadStream {
+            inner: Box::pin(futures_util::stream::empty()),
+            _permit: permit,
+            closed: Arc::new(AtomicBool::new(false)),
+            remaining: 8,
+            stopped: false,
+        };
+
+        let error = futures_util::StreamExt::next(&mut stream)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(futures_util::StreamExt::next(&mut stream).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn completed_sftp_download_stream_ignores_a_late_close_signal() {
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut stream = SftpDownloadStream {
+            inner: Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(
+                b"done",
+            ))])),
+            _permit: permit,
+            closed: closed.clone(),
+            remaining: 4,
+            stopped: false,
+        };
+
+        let bytes = futures_util::StreamExt::next(&mut stream)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, Bytes::from_static(b"done"));
+        closed.store(true, Ordering::Release);
         assert!(futures_util::StreamExt::next(&mut stream).await.is_none());
     }
 
@@ -687,5 +976,18 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(abort_handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn sha256_reader_hashes_exact_stream_bytes() {
+        let mut source = &b"abc"[..];
+        let mut reader = Sha256Reader::new(&mut source, true);
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).await.unwrap();
+        assert_eq!(output, b"abc");
+        assert_eq!(
+            reader.finish().as_deref(),
+            Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
     }
 }

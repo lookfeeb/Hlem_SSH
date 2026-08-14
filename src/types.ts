@@ -324,8 +324,15 @@ export interface SftpInfo {
 export interface ExecResult {
   stdout: string;
   stderr: string;
+  stdoutBytes: number;
+  stderrBytes: number;
+  outputTruncated: boolean;
   exitStatus?: number | null;
   durationMs: number;
+  executionMs: number;
+  channelOpenMs: number;
+  connectionMs: number;
+  queueMs: number;
   timedOut: boolean;
 }
 
@@ -346,7 +353,7 @@ export interface TransferInfo {
 }
 
 export interface TransferHistorySnapshot {
-  version: 1;
+  version: 1 | 2;
   savedAt: string;
   transfers: TransferInfo[];
 }

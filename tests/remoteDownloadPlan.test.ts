@@ -81,6 +81,31 @@ test("拒绝可能造成路径穿越的远端名称", async () => {
   );
 });
 
+test("拒绝 Windows 下大小写不敏感的下载路径冲突", async () => {
+  await assert.rejects(
+    buildRemoteDownloadPlan(
+      [
+        { remotePath: "/root/A.txt", fileName: "A.txt", fileType: "file" },
+        { remotePath: "/root/a.txt", fileName: "a.txt", fileType: "file" },
+      ],
+      async () => [],
+    ),
+    /重复文件名/,
+  );
+});
+
+test("拒绝 Windows 保留名称、非法字符和尾随点空格", async () => {
+  for (const fileName of ["CON.txt", "a:b.txt", "trailing.", "trailing "]) {
+    await assert.rejects(
+      buildRemoteDownloadPlan(
+        [{ remotePath: `/root/${fileName}`, fileName, fileType: "file" }],
+        async () => [],
+      ),
+      /无法安全保存到 Windows/,
+    );
+  }
+});
+
 test("本地下载路径兼容 Windows 目录和远端相对路径", () => {
   assert.equal(
     joinLocalDownloadPath("C:\\Users\\Admin\\Downloads\\", "pkg/nested/a.txt"),

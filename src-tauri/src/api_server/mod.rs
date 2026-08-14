@@ -2,22 +2,26 @@ mod auth;
 mod field_catalog;
 mod guard;
 mod handlers_admin;
+mod handlers_jobs;
 mod handlers_remote;
+mod jobs;
+mod openapi;
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 
 use axum::{
-    http::{header, HeaderValue, Method, StatusCode},
+    http::{header, HeaderName, HeaderValue, Method, StatusCode},
     response::Json,
     routing::{delete, get, patch, post, put},
     Router,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
 use tokio::{
     net::TcpListener,
-    sync::{watch, Mutex as TokioMutex, Notify, RwLock},
+    sync::{watch, Mutex as TokioMutex, Notify, OwnedSemaphorePermit, RwLock, Semaphore},
     task::JoinHandle,
     time::{timeout, Duration},
 };
@@ -38,6 +42,85 @@ pub(super) const MAX_UPLOAD_BODY: u64 = 512 * 1024 * 1024;
 const MAX_LOG_ENTRIES: usize = 100;
 const LOG_FLUSH_DEBOUNCE: Duration = Duration::from_secs(1);
 const SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+const API_EXEC_QUEUE_TIMEOUT: Duration = Duration::from_secs(3);
+const MAX_API_EXEC_CONCURRENCY: usize = 16;
+const MAX_API_EXEC_CONCURRENCY_PER_SESSION: usize = 4;
+
+#[derive(Clone)]
+pub(super) struct ApiExecutionLimiter {
+    global: Arc<Semaphore>,
+    sessions: Arc<TokioMutex<HashMap<String, Arc<Semaphore>>>>,
+}
+
+pub(super) struct ApiExecutionPermit {
+    _session: OwnedSemaphorePermit,
+    _global: OwnedSemaphorePermit,
+}
+
+impl ApiExecutionLimiter {
+    fn new(allowed_session_ids: &[String]) -> Self {
+        let sessions = allowed_session_ids
+            .iter()
+            .map(|session_id| {
+                (
+                    session_id.clone(),
+                    Arc::new(Semaphore::new(MAX_API_EXEC_CONCURRENCY_PER_SESSION)),
+                )
+            })
+            .collect();
+        Self {
+            global: Arc::new(Semaphore::new(MAX_API_EXEC_CONCURRENCY)),
+            sessions: Arc::new(TokioMutex::new(sessions)),
+        }
+    }
+
+    pub async fn acquire(&self, session_id: &str) -> Result<ApiExecutionPermit, String> {
+        let session = {
+            let mut sessions = self.sessions.lock().await;
+            sessions
+                .entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(Semaphore::new(MAX_API_EXEC_CONCURRENCY_PER_SESSION)))
+                .clone()
+        };
+        timeout(API_EXEC_QUEUE_TIMEOUT, async {
+            let session = session
+                .acquire_owned()
+                .await
+                .map_err(|_| "会话执行队列已关闭".to_string())?;
+            let global = self
+                .global
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| "全局执行队列已关闭".to_string())?;
+            Ok(ApiExecutionPermit {
+                _session: session,
+                _global: global,
+            })
+        })
+        .await
+        .map_err(|_| "执行队列繁忙，请稍后重试".to_string())?
+    }
+
+    async fn update_sessions(&self, allowed_session_ids: &[String]) {
+        let allowed = allowed_session_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
+        let mut sessions = self.sessions.lock().await;
+        // A revoked session can still have in-flight or queued permits. Keep its
+        // semaphore until every owner releases it so a quick re-authorization
+        // cannot create a second semaphore and bypass the per-session limit.
+        sessions.retain(|session_id, semaphore| {
+            allowed.contains(session_id.as_str()) || Arc::strong_count(semaphore) > 1
+        });
+        for session_id in allowed_session_ids {
+            sessions
+                .entry(session_id.clone())
+                .or_insert_with(|| Arc::new(Semaphore::new(MAX_API_EXEC_CONCURRENCY_PER_SESSION)));
+        }
+    }
+}
 
 // ─── Public types ──────────────────────────────────────────────────────────────
 
@@ -48,6 +131,7 @@ pub struct ApiServerState {
     pub remote: RemoteRuntime,
     pub vault: Arc<Mutex<VaultStore>>,
     pub allowed_session_ids: Arc<StdRwLock<Vec<String>>>,
+    pub allowed_session_set: Arc<StdRwLock<Arc<HashSet<String>>>>,
     pub allowed_session_names: Arc<StdRwLock<Vec<(String, String)>>>,
     pub logs: Arc<RwLock<Vec<ApiLogEntry>>>,
     pub log_dirty: Arc<Notify>,
@@ -55,6 +139,9 @@ pub struct ApiServerState {
     pub tunnel_operation: Arc<TokioMutex<()>>,
     pub connection_config_gate: Arc<RwLock<()>>,
     pub config_mutations: ConfigMutationCoordinator,
+    pub jobs: jobs::JobRegistry,
+    pub execution_limiter: ApiExecutionLimiter,
+    pub server_instance_id: Arc<str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,9 +173,12 @@ pub struct ApiServerHandle {
     pub port: u16,
     pub api_key: String,
     pub allowed_session_ids: Arc<StdRwLock<Vec<String>>>,
+    allowed_session_set: Arc<StdRwLock<Arc<HashSet<String>>>>,
     pub allowed_session_names: Arc<StdRwLock<Vec<(String, String)>>>,
     pub log_file: PathBuf,
     pub logs: Arc<RwLock<Vec<ApiLogEntry>>>,
+    jobs: jobs::JobRegistry,
+    execution_limiter: ApiExecutionLimiter,
 }
 
 pub struct ApiServerStartOptions {
@@ -106,15 +196,35 @@ pub struct ApiServerStartOptions {
     pub config_mutations: ConfigMutationCoordinator,
 }
 
+fn replace_allowed_session_cache(
+    ids_cache: &StdRwLock<Vec<String>>,
+    set_cache: &StdRwLock<Arc<HashSet<String>>>,
+    names_cache: &StdRwLock<Vec<(String, String)>>,
+    allowed_session_ids: Vec<String>,
+    allowed_session_names: Vec<(String, String)>,
+) {
+    let mut ids = ids_cache
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut set = set_cache
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut names = names_cache
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *set = Arc::new(allowed_session_ids.iter().cloned().collect());
+    *ids = allowed_session_ids;
+    *names = allowed_session_names;
+}
+
 impl ApiServerHandle {
     pub fn is_finished(&self) -> bool {
         self.server_task.is_finished()
     }
 
     pub async fn shutdown(self) {
-        if let Err(error) = self.shutdown_tx.send(true) {
-            eprintln!("[helm] failed to signal API server shutdown: {error}");
-        }
+        self.shutdown_tx.send_replace(true);
+        self.jobs.shutdown().await;
         tokio::join!(
             shutdown_task(self.server_task, "API server"),
             shutdown_task(self.log_task, "API log flusher")
@@ -128,23 +238,30 @@ impl ApiServerHandle {
         &self,
         allowed_session_ids: Vec<String>,
         allowed_session_names: Vec<(String, String)>,
-    ) -> Result<(), String> {
-        {
-            let mut ids = self
-                .allowed_session_ids
-                .write()
-                .map_err(|_| "更新 API 会话限制失败：内部锁错误".to_string())?;
-            let mut names = self
-                .allowed_session_names
-                .write()
-                .map_err(|_| "更新 API 会话名称失败：内部锁错误".to_string())?;
-            *ids = allowed_session_ids.clone();
-            *names = allowed_session_names;
-        }
+    ) {
+        self.replace_allowed_sessions_cache(allowed_session_ids.clone(), allowed_session_names);
+        self.execution_limiter
+            .update_sessions(&allowed_session_ids)
+            .await;
+        let allowed_session_set = allowed_session_ids.iter().cloned().collect();
+        self.jobs.cancel_disallowed(&allowed_session_set).await;
         self.remote
             .shutdown_automation_connections(&self.app, Some(&allowed_session_ids))
             .await;
-        Ok(())
+    }
+
+    pub(crate) fn replace_allowed_sessions_cache(
+        &self,
+        allowed_session_ids: Vec<String>,
+        allowed_session_names: Vec<(String, String)>,
+    ) {
+        replace_allowed_session_cache(
+            &self.allowed_session_ids,
+            &self.allowed_session_set,
+            &self.allowed_session_names,
+            allowed_session_ids,
+            allowed_session_names,
+        );
     }
 
     pub fn allowed_session_ids_snapshot(&self) -> Vec<String> {
@@ -178,9 +295,81 @@ async fn shutdown_task(mut task: JoinHandle<()>, label: &str) {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Debug)]
 struct ApiError {
     error: String,
+}
+
+impl Serialize for ApiError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let (code, retryable) = classify_api_error(&self.error);
+        let mut state = serializer.serialize_struct("ApiError", 5)?;
+        state.serialize_field("error", &self.error)?;
+        state.serialize_field("code", code)?;
+        state.serialize_field("message", &self.error)?;
+        state.serialize_field("retryable", &retryable)?;
+        state.serialize_field(
+            "requestId",
+            &format!("req_{}", uuid::Uuid::new_v4().simple()),
+        )?;
+        state.end()
+    }
+}
+
+fn classify_api_error(message: &str) -> (&'static str, bool) {
+    let lower = message.to_ascii_lowercase();
+    if message.contains("无效的 API Key") {
+        ("AUTH_INVALID", false)
+    } else if message.contains("无权访问") || message.contains("授权范围") {
+        ("SESSION_FORBIDDEN", false)
+    } else if message.contains("命令被拒绝") || message.contains("批量命令被拒绝") {
+        ("COMMAND_REJECTED", false)
+    } else if message.contains("队列繁忙")
+        || message.contains("达到上限")
+        || message.contains("同时最多")
+    {
+        ("RATE_LIMITED", true)
+    } else if message.contains("Range 越界") || message.contains("多段 Range") {
+        ("RANGE_NOT_SATISFIABLE", false)
+    } else if message.contains("主机密钥") {
+        ("HOST_KEY_CONFLICT", false)
+    } else if message.contains("认证失败") || message.contains("身份验证") {
+        ("REMOTE_AUTH_FAILED", false)
+    } else if message.contains("SHA-256 校验失败") {
+        ("CHECKSUM_MISMATCH", false)
+    } else if message.contains("不存在") || message.contains("无法读取远程文件") {
+        ("NOT_FOUND", false)
+    } else if message.contains("配置已变更") || message.contains("已经结束") {
+        ("CONFLICT", true)
+    } else if message.contains("超过")
+        && (message.contains("MiB") || message.contains("KiB") || message.contains("MB"))
+    {
+        ("PAYLOAD_TOO_LARGE", false)
+    } else if message.contains("缺少")
+        || message.contains("必须")
+        || message.contains("仅支持")
+        || message.contains("不能")
+        || message.contains("无效")
+        || message.contains("至少")
+        || message.contains("格式")
+        || message.contains("未知字段")
+    {
+        ("INVALID_ARGUMENT", false)
+    } else if message.contains("未连接")
+        || message.contains("不可用")
+        || message.contains("连接")
+        || lower.contains("ssh")
+        || lower.contains("sftp")
+        || lower.contains("timeout")
+        || message.contains("超时")
+    {
+        ("REMOTE_UNAVAILABLE", true)
+    } else {
+        ("INTERNAL_ERROR", true)
+    }
 }
 
 // ─── Shared helpers (used by handler sub-modules) ──────────────────────────────
@@ -278,7 +467,16 @@ async fn flush_logs_to_file(logs: &Arc<RwLock<Vec<ApiLogEntry>>>, path: &Path) {
 }
 
 fn map_remote_error(e: String, state: &ApiServerState) -> (StatusCode, Json<ApiError>) {
-    if e.contains("未连接") {
+    let lower = e.to_ascii_lowercase();
+    if e.contains("队列繁忙") {
+        (StatusCode::TOO_MANY_REQUESTS, Json(ApiError { error: e }))
+    } else if e.contains("参数无效") || e.contains("必须") || e.contains("格式无效") {
+        (StatusCode::BAD_REQUEST, Json(ApiError { error: e }))
+    } else if e.contains("不存在") || e.contains("no such file") {
+        (StatusCode::NOT_FOUND, Json(ApiError { error: e }))
+    } else if e.contains("主机密钥") || e.contains("配置已变更") {
+        (StatusCode::CONFLICT, Json(ApiError { error: e }))
+    } else if e.contains("未连接") {
         let allowed_session_names = allowed_session_names_snapshot(state);
         let display_name = if allowed_session_names.is_empty() {
             "目标会话".to_string()
@@ -298,6 +496,18 @@ fn map_remote_error(e: String, state: &ApiServerState) -> (StatusCode, Json<ApiE
                 ),
             }),
         )
+    } else if e.contains("连接")
+        || e.contains("网络")
+        || e.contains("超时")
+        || lower.contains("timeout")
+        || lower.contains("connection")
+        || lower.contains("handshake")
+        || lower.contains("refused")
+        || lower.contains("unreachable")
+        || lower.contains("ssh")
+        || lower.contains("sftp")
+    {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(ApiError { error: e }))
     } else {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -315,32 +525,23 @@ fn friendly_error_detail(detail: &str, state: &ApiServerState) -> String {
 }
 
 fn allowed_session_ids_snapshot(state: &ApiServerState) -> Vec<String> {
-    let runtime_ids = state
+    state
         .allowed_session_ids
         .read()
         .map(|items| items.clone())
-        .unwrap_or_default();
-    let configured_ids = state
-        .vault
-        .lock()
-        .ok()
-        .and_then(|store| store.snapshot().ok())
-        .map(|snapshot| {
-            let settings = snapshot.data.settings;
-            let mut ids = settings.ai_api_session_ids;
-            if let Some(legacy_id) = settings.ai_api_session_id {
-                if !legacy_id.is_empty() && !ids.contains(&legacy_id) {
-                    ids.push(legacy_id);
-                }
-            }
-            ids
-        })
-        .unwrap_or_default();
-    intersect_allowed_session_ids(&runtime_ids, &configured_ids)
+        .unwrap_or_default()
+}
+
+fn allowed_session_set_snapshot(state: &ApiServerState) -> Arc<HashSet<String>> {
+    state
+        .allowed_session_set
+        .read()
+        .map(|items| items.clone())
+        .unwrap_or_else(|_| Arc::new(HashSet::new()))
 }
 
 fn allowed_session_names_snapshot(state: &ApiServerState) -> Vec<(String, String)> {
-    let allowed_ids = allowed_session_ids_snapshot(state);
+    let allowed_ids = allowed_session_set_snapshot(state);
     state
         .allowed_session_names
         .read()
@@ -352,14 +553,6 @@ fn allowed_session_names_snapshot(state: &ApiServerState) -> Vec<(String, String
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn intersect_allowed_session_ids(runtime_ids: &[String], configured_ids: &[String]) -> Vec<String> {
-    runtime_ids
-        .iter()
-        .filter(|id| configured_ids.contains(id))
-        .cloned()
-        .collect()
 }
 
 fn truncate_for_log(value: &str, max_chars: usize) -> String {
@@ -470,7 +663,20 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
     let logs = Arc::new(RwLock::new(existing_logs));
     let log_dirty = Arc::new(Notify::new());
     let allowed_session_ids = Arc::new(StdRwLock::new(allowed_session_ids));
+    let allowed_session_set = Arc::new(StdRwLock::new(Arc::new(
+        allowed_session_ids
+            .read()
+            .map(|items| items.iter().cloned().collect::<HashSet<_>>())
+            .unwrap_or_default(),
+    )));
     let allowed_session_names = Arc::new(StdRwLock::new(allowed_session_names));
+    let jobs = jobs::JobRegistry::default();
+    let execution_limiter = ApiExecutionLimiter::new(
+        &allowed_session_ids
+            .read()
+            .map(|items| items.clone())
+            .unwrap_or_default(),
+    );
     let handle_remote = remote.clone();
     let state = ApiServerState {
         api_key: Arc::new(RwLock::new(api_key.clone())),
@@ -478,6 +684,7 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         remote,
         vault,
         allowed_session_ids: allowed_session_ids.clone(),
+        allowed_session_set: allowed_session_set.clone(),
         allowed_session_names: allowed_session_names.clone(),
         logs: logs.clone(),
         log_dirty: log_dirty.clone(),
@@ -485,6 +692,9 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         tunnel_operation,
         connection_config_gate,
         config_mutations,
+        jobs: jobs.clone(),
+        execution_limiter: execution_limiter.clone(),
+        server_instance_id: Arc::from(format!("srv_{}", uuid::Uuid::new_v4().simple())),
     };
 
     let cors = CorsLayer::new()
@@ -499,25 +709,50 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::RANGE])
+        .allow_headers([
+            header::ACCEPT,
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::RANGE,
+            header::IF_NONE_MATCH,
+            HeaderName::from_static("last-event-id"),
+        ])
         .expose_headers([
             header::ACCEPT_RANGES,
             header::CONTENT_DISPOSITION,
             header::CONTENT_RANGE,
+            header::ETAG,
+            header::CACHE_CONTROL,
         ]);
 
     let app_router = Router::new()
         // 鉴权探活
         .route("/api/auth", get(handlers_remote::auth_check))
         .route("/api/fields", get(handlers_remote::rest_fields))
+        .route("/openapi.json", get(handlers_remote::rest_openapi))
         // ─── REST：会话生命周期 + 命令执行 + 文件列表 ──────────────────────────
         .route("/api/sessions", get(handlers_remote::rest_sessions))
         .route("/api/connect", post(handlers_remote::rest_connect))
         .route("/api/disconnect", post(handlers_remote::rest_disconnect))
         .route("/api/exec", post(handlers_remote::rest_exec))
         .route("/api/exec/batch", post(handlers_remote::rest_exec_batch))
+        .route(
+            "/api/jobs",
+            get(handlers_jobs::rest_jobs_list).post(handlers_jobs::rest_jobs_create),
+        )
+        .route("/api/jobs/{job_id}", get(handlers_jobs::rest_job_get))
+        .route(
+            "/api/jobs/{job_id}/events",
+            get(handlers_jobs::rest_job_events),
+        )
+        .route(
+            "/api/jobs/{job_id}/cancel",
+            post(handlers_jobs::rest_job_cancel),
+        )
         .route("/api/latency", post(handlers_remote::rest_latency))
         .route("/api/files", get(handlers_remote::rest_files))
+        .route("/api/files/page", get(handlers_remote::rest_files_page))
+        .route("/api/files/stat", get(handlers_remote::rest_file_stat))
         // ─── REST：隧道管理（CRUD + start/stop） ───────────────────────────────
         .route(
             "/api/tunnels",
@@ -539,7 +774,8 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         .route(
             "/api/backup/settings",
             get(handlers_admin::rest_backup_settings_get)
-                .put(handlers_admin::rest_backup_settings_update),
+                .put(handlers_admin::rest_backup_settings_update)
+                .patch(handlers_admin::rest_backup_settings_patch),
         )
         .route(
             "/api/backup/records",
@@ -566,7 +802,7 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         .map_err(|e| format!("获取端口失败: {}", e))?
         .port();
 
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let log_task = {
         let logs_for_flusher = logs.clone();
@@ -594,23 +830,17 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
     let server_shutdown = shutdown_tx.clone();
     let server_remote = handle_remote.clone();
     let server_app = app.clone();
+    let server_jobs = jobs.clone();
     let server_task = tokio::spawn(async move {
-        let result = axum::serve(listener, app_router)
-            .with_graceful_shutdown(async move {
-                while !*shutdown_rx.borrow_and_update() {
-                    if shutdown_rx.changed().await.is_err() {
-                        break;
-                    }
-                }
-            })
-            .await;
+        let result = serve_router_until_shutdown(listener, app_router, shutdown_rx).await;
         if let Err(error) = &result {
             eprintln!("[helm] api server stopped with error: {error}");
         }
         // The listener can terminate without a command-driven shutdown (for
         // example after an accept-loop failure). Wake the log flusher and tear
         // down automation resources even if no later status query observes it.
-        let _ = server_shutdown.send(true);
+        server_shutdown.send_replace(true);
+        server_jobs.shutdown().await;
         server_remote
             .shutdown_automation_connections(&server_app, None)
             .await;
@@ -636,16 +866,38 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         port: actual_port,
         api_key,
         allowed_session_ids,
+        allowed_session_set,
         allowed_session_names,
         log_file,
         logs,
+        jobs,
+        execution_limiter,
     })
+}
+
+async fn serve_router_until_shutdown(
+    listener: TcpListener,
+    app_router: Router,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    axum::serve(listener, app_router)
+        .with_graceful_shutdown(async move {
+            while !*shutdown_rx.borrow_and_update() {
+                if shutdown_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await
 }
 
 fn is_allowed_local_origin(origin: &HeaderValue) -> bool {
     let Ok(origin_str) = origin.to_str() else {
         return false;
     };
+    if origin_str == "tauri://localhost" {
+        return true;
+    }
     let stripped = origin_str
         .strip_prefix("http://")
         .or_else(|| origin_str.strip_prefix("https://"));
@@ -661,16 +913,24 @@ fn is_allowed_local_origin(origin: &HeaderValue) -> bool {
             .map(|(host, _)| host)
             .unwrap_or(authority)
     };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "tauri.localhost")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        command_log_detail, intersect_allowed_session_ids, load_logs_from_file,
-        response_log_preview,
+        command_log_detail, is_allowed_local_origin, load_logs_from_file,
+        replace_allowed_session_cache, response_log_preview, serve_router_until_shutdown, ApiError,
+        ApiExecutionLimiter, MAX_API_EXEC_CONCURRENCY, MAX_API_EXEC_CONCURRENCY_PER_SESSION,
+    };
+    use axum::http::HeaderValue;
+    use axum::Router;
+    use std::{
+        collections::HashSet,
+        sync::{Arc, RwLock},
     };
     use tempfile::tempdir;
+    use tokio::{net::TcpListener, sync::watch};
 
     #[test]
     fn api_logs_hide_sensitive_command_arguments_and_output() {
@@ -689,6 +949,28 @@ mod tests {
     }
 
     #[test]
+    fn api_errors_keep_legacy_text_and_add_machine_readable_fields() {
+        let value = serde_json::to_value(ApiError {
+            error: "执行队列繁忙，请稍后重试".to_string(),
+        })
+        .unwrap();
+        assert_eq!(value["error"], "执行队列繁忙，请稍后重试");
+        assert_eq!(value["message"], value["error"]);
+        assert_eq!(value["code"], "RATE_LIMITED");
+        assert_eq!(value["retryable"], true);
+        assert!(value["requestId"]
+            .as_str()
+            .is_some_and(|request_id| request_id.starts_with("req_")));
+
+        let checksum = serde_json::to_value(ApiError {
+            error: "SHA-256 校验失败：摘要不一致".to_string(),
+        })
+        .unwrap();
+        assert_eq!(checksum["code"], "CHECKSUM_MISMATCH");
+        assert_eq!(checksum["retryable"], false);
+    }
+
+    #[test]
     fn api_logs_keep_normal_output_preview() {
         assert_eq!(
             response_log_preview("uname -a", "Linux helm", 2_000).as_deref(),
@@ -697,14 +979,95 @@ mod tests {
     }
 
     #[test]
-    fn effective_api_authorization_is_the_runtime_and_persisted_intersection() {
-        let runtime = vec!["session-a".to_string(), "session-b".to_string()];
-        let configured = vec!["session-b".to_string(), "session-c".to_string()];
-        assert_eq!(
-            intersect_allowed_session_ids(&runtime, &configured),
-            ["session-b"]
+    fn api_cors_accepts_browser_and_tauri_loopback_origins_only() {
+        for origin in [
+            "http://127.0.0.1:1420",
+            "http://localhost:1420",
+            "https://tauri.localhost",
+            "tauri://localhost",
+        ] {
+            assert!(is_allowed_local_origin(
+                &HeaderValue::from_str(origin).unwrap()
+            ));
+        }
+        assert!(!is_allowed_local_origin(&HeaderValue::from_static(
+            "https://example.com"
+        )));
+    }
+
+    #[test]
+    fn authorization_cache_replaces_ids_names_and_membership_together() {
+        let ids = RwLock::new(vec!["session-old".to_string()]);
+        let set = RwLock::new(Arc::new(HashSet::from(["session-old".to_string()])));
+        let names = RwLock::new(vec![("session-old".to_string(), "旧会话".to_string())]);
+
+        replace_allowed_session_cache(
+            &ids,
+            &set,
+            &names,
+            vec!["session-new".to_string()],
+            vec![("session-new".to_string(), "新会话".to_string())],
         );
-        assert!(intersect_allowed_session_ids(&runtime, &[]).is_empty());
+
+        assert_eq!(*ids.read().unwrap(), ["session-new"]);
+        assert_eq!(
+            *names.read().unwrap(),
+            [("session-new".to_string(), "新会话".to_string())]
+        );
+        let allowed = set.read().unwrap();
+        assert!(allowed.contains("session-new"));
+        assert!(!allowed.contains("session-old"));
+    }
+
+    #[tokio::test]
+    async fn execution_limiter_preserves_busy_session_across_reauthorization() {
+        let session_id = "session-a".to_string();
+        let limiter = ApiExecutionLimiter::new(std::slice::from_ref(&session_id));
+        let original = limiter
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .unwrap()
+            .clone();
+        let mut permits = Vec::new();
+        for _ in 0..MAX_API_EXEC_CONCURRENCY_PER_SESSION {
+            permits.push(limiter.acquire(&session_id).await.unwrap());
+        }
+        assert_eq!(original.available_permits(), 0);
+
+        limiter.update_sessions(&[]).await;
+        limiter
+            .update_sessions(std::slice::from_ref(&session_id))
+            .await;
+        let current = limiter
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .unwrap()
+            .clone();
+        assert!(Arc::ptr_eq(&original, &current));
+
+        drop(current);
+        drop(original);
+        drop(permits);
+        limiter.update_sessions(&[]).await;
+        assert!(!limiter.sessions.lock().await.contains_key(&session_id));
+    }
+
+    #[tokio::test]
+    async fn execution_limiter_caps_total_concurrency() {
+        let session_ids = (0..MAX_API_EXEC_CONCURRENCY)
+            .map(|index| format!("session-{index}"))
+            .collect::<Vec<_>>();
+        let limiter = ApiExecutionLimiter::new(&session_ids);
+        let mut permits = Vec::new();
+        for session_id in &session_ids {
+            permits.push(limiter.acquire(session_id).await.unwrap());
+        }
+        assert_eq!(limiter.global.available_permits(), 0);
+        drop(permits);
     }
 
     #[tokio::test]
@@ -722,5 +1085,23 @@ mod tests {
         assert_eq!(names.len(), 1);
         assert!(names[0].starts_with("api_logs.corrupt-"));
         assert!(names[0].ends_with(".json"));
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_releases_the_api_port_before_returning() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(serve_router_until_shutdown(
+            listener,
+            Router::new(),
+            shutdown_rx,
+        ));
+
+        shutdown_tx.send_replace(true);
+        server.await.unwrap().unwrap();
+
+        let rebound = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+        drop(rebound);
     }
 }

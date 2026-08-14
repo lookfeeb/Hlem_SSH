@@ -1,8 +1,40 @@
 use super::*;
 use crate::atomic_file::write_atomic_async;
 
-const TRANSFER_HISTORY_VERSION: u16 = 1;
+const TRANSFER_HISTORY_VERSION: u16 = 2;
+const LEGACY_TRANSFER_HISTORY_VERSION: u16 = 1;
 const TRANSFER_HISTORY_STOPPED_ERROR: &str = "程序已关闭，传输已停止";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedTransferHistorySnapshot {
+    version: u16,
+    saved_at: String,
+    transfers: Vec<PersistedTransferRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedTransferRecord {
+    #[serde(flatten)]
+    info: TransferInfo,
+    #[serde(default = "default_true")]
+    overwrite: bool,
+    #[serde(default)]
+    accelerated: bool,
+    #[serde(default)]
+    staging_path: String,
+    #[serde(default = "default_worker_parts")]
+    worker_parts: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_worker_parts() -> u64 {
+    1
+}
 
 impl RemoteRuntime {
     pub fn with_transfer_history_path(path: PathBuf) -> Self {
@@ -23,20 +55,34 @@ impl RemoteRuntime {
 
     pub async fn clear_finished_transfer_history(&self) -> AppResult<TransferHistorySnapshot> {
         self.ensure_transfer_history_loaded().await?;
-        self.transfers.write().await.retain(|_, record| {
-            matches!(
-                record.info.status,
-                TaskStatus::Queued | TaskStatus::Running | TaskStatus::Paused
-            )
-        });
+        let removed = {
+            let mut transfers = self.transfers.write().await;
+            let ids = transfers
+                .iter()
+                .filter(|(_, record)| {
+                    !matches!(
+                        record.info.status,
+                        TaskStatus::Queued | TaskStatus::Running | TaskStatus::Paused
+                    )
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| transfers.remove(&id).map(|record| (id, record)))
+                .collect::<Vec<_>>()
+        };
+        for (id, record) in removed {
+            self.cleanup_transfer_record_staging(&record).await;
+            crate::errors::forget_resource_label(&id);
+        }
         self.persist_transfer_history().await
     }
 
     pub(super) async fn persist_transfer_history(&self) -> AppResult<TransferHistorySnapshot> {
         let _guard = self.transfer_history_write_lock.lock().await;
-        let snapshot = self.transfer_history_snapshot_from_memory().await;
+        let (snapshot, persisted) = self.transfer_history_views_from_memory().await;
         if let Some(path) = self.transfer_history_path.read().await.clone() {
-            let bytes = serde_json::to_vec_pretty(&snapshot)?;
+            let bytes = serde_json::to_vec_pretty(&persisted)?;
             write_atomic_async(&path, &bytes).await?;
         }
         Ok(snapshot)
@@ -69,7 +115,7 @@ impl RemoteRuntime {
             }
             Err(error) => return Err(AppError::Io(error.to_string())),
         };
-        let snapshot: TransferHistorySnapshot = match serde_json::from_slice(&bytes) {
+        let snapshot: PersistedTransferHistorySnapshot = match serde_json::from_slice(&bytes) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 quarantine_invalid_transfer_history(&path, &error).await;
@@ -77,22 +123,23 @@ impl RemoteRuntime {
                 return Ok(());
             }
         };
-        if snapshot.version != TRANSFER_HISTORY_VERSION {
+        if snapshot.version != TRANSFER_HISTORY_VERSION
+            && snapshot.version != LEGACY_TRANSFER_HISTORY_VERSION
+        {
             self.transfer_history_loaded.store(true, Ordering::Relaxed);
             return Ok(());
         }
         let mut transfers = self.transfers.write().await;
-        for info in snapshot
-            .transfers
-            .into_iter()
-            .map(normalize_loaded_transfer)
-        {
-            let request = request_from_transfer(&info);
+        for persisted in snapshot.transfers {
+            let info = normalize_loaded_transfer(persisted.info);
+            let request = request_from_transfer(&info, persisted.overwrite, persisted.accelerated);
             transfers
                 .entry(info.transfer_id.clone())
                 .or_insert_with(|| TransferRecord {
                     info,
                     request,
+                    staging_path: persisted.staging_path,
+                    worker_parts: persisted.worker_parts.max(1),
                     cleanup_sftp: None,
                     cancel: Arc::new(AtomicBool::new(false)),
                     paused: Arc::new(AtomicBool::new(false)),
@@ -104,24 +151,47 @@ impl RemoteRuntime {
     }
 
     async fn transfer_history_snapshot_from_memory(&self) -> TransferHistorySnapshot {
-        let mut transfers: Vec<TransferInfo> = self
-            .transfers
-            .read()
-            .await
-            .values()
-            .map(|record| record.info.clone())
-            .collect();
-        transfers.sort_by(|left, right| {
-            transfer_timestamp(right)
-                .cmp(transfer_timestamp(left))
-                .then_with(|| right.transfer_id.cmp(&left.transfer_id))
+        self.transfer_history_views_from_memory().await.0
+    }
+
+    async fn transfer_history_views_from_memory(
+        &self,
+    ) -> (TransferHistorySnapshot, PersistedTransferHistorySnapshot) {
+        let transfers = self.transfers.read().await;
+        let mut records = transfers.values().collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            transfer_timestamp(&right.info)
+                .cmp(transfer_timestamp(&left.info))
+                .then_with(|| right.info.transfer_id.cmp(&left.info.transfer_id))
         });
-        transfers.truncate(MAX_TRANSFER_HISTORY);
-        TransferHistorySnapshot {
-            version: TRANSFER_HISTORY_VERSION,
-            saved_at: now(),
-            transfers,
-        }
+        records.truncate(MAX_TRANSFER_HISTORY);
+        let saved_at = now();
+        let infos = records
+            .iter()
+            .map(|record| record.info.clone())
+            .collect::<Vec<_>>();
+        let persisted = records
+            .into_iter()
+            .map(|record| PersistedTransferRecord {
+                info: record.info.clone(),
+                overwrite: record.request.overwrite,
+                accelerated: record.request.accelerated,
+                staging_path: record.staging_path.clone(),
+                worker_parts: record.worker_parts.max(1),
+            })
+            .collect::<Vec<_>>();
+        (
+            TransferHistorySnapshot {
+                version: TRANSFER_HISTORY_VERSION,
+                saved_at: saved_at.clone(),
+                transfers: infos,
+            },
+            PersistedTransferHistorySnapshot {
+                version: TRANSFER_HISTORY_VERSION,
+                saved_at,
+                transfers: persisted,
+            },
+        )
     }
 }
 
@@ -159,14 +229,18 @@ fn normalize_loaded_transfer(mut info: TransferInfo) -> TransferInfo {
     info
 }
 
-fn request_from_transfer(info: &TransferInfo) -> TransferRequest {
+fn request_from_transfer(
+    info: &TransferInfo,
+    overwrite: bool,
+    accelerated: bool,
+) -> TransferRequest {
     TransferRequest {
         sftp_id: info.sftp_id.clone(),
         direction: info.direction.clone(),
         local_path: info.local_path.clone(),
         remote_path: info.remote_path.clone(),
-        overwrite: true,
-        accelerated: false,
+        overwrite,
+        accelerated,
         resume: false,
     }
 }
@@ -223,8 +297,10 @@ mod tests {
                 records.insert(
                     info.transfer_id.clone(),
                     TransferRecord {
-                        request: request_from_transfer(&info),
+                        request: request_from_transfer(&info, true, false),
                         info,
+                        staging_path: String::new(),
+                        worker_parts: 1,
                         cleanup_sftp: None,
                         cancel: Arc::new(AtomicBool::new(false)),
                         paused: Arc::new(AtomicBool::new(false)),
@@ -253,8 +329,10 @@ mod tests {
                 records.insert(
                     info.transfer_id.clone(),
                     TransferRecord {
-                        request: request_from_transfer(&info),
+                        request: request_from_transfer(&info, true, false),
                         info,
+                        staging_path: String::new(),
+                        worker_parts: 1,
                         cleanup_sftp: None,
                         cancel: Arc::new(AtomicBool::new(false)),
                         paused: Arc::new(AtomicBool::new(false)),
@@ -276,9 +354,68 @@ mod tests {
         }
 
         let bytes = tokio::fs::read(path).await.unwrap();
-        let snapshot: TransferHistorySnapshot = serde_json::from_slice(&bytes).unwrap();
+        let snapshot: PersistedTransferHistorySnapshot = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(snapshot.transfers.len(), 20);
-        assert_eq!(snapshot.transfers[0].transfer_id, "transfer-19");
+        assert_eq!(snapshot.transfers[0].info.transfer_id, "transfer-19");
+    }
+
+    #[tokio::test]
+    async fn persisted_history_restores_transfer_policy_and_staging_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("transfer-history.json");
+        let runtime = RemoteRuntime::with_transfer_history_path(path.clone());
+        runtime
+            .transfer_history_loaded
+            .store(true, Ordering::Relaxed);
+        let info = transfer(1, TaskStatus::Failed);
+        runtime.transfers.write().await.insert(
+            info.transfer_id.clone(),
+            TransferRecord {
+                request: request_from_transfer(&info, false, true),
+                info,
+                staging_path: "/tmp/.helm-resume.part".to_string(),
+                worker_parts: 4,
+                cleanup_sftp: None,
+                cancel: Arc::new(AtomicBool::new(false)),
+                paused: Arc::new(AtomicBool::new(false)),
+                handle: None,
+            },
+        );
+        runtime.persist_transfer_history().await.unwrap();
+
+        let restored = RemoteRuntime::with_transfer_history_path(path);
+        restored.load_transfer_history().await.unwrap();
+        let records = restored.transfers.read().await;
+        let record = records.get("transfer-1").unwrap();
+
+        assert!(!record.request.overwrite);
+        assert!(record.request.accelerated);
+        assert_eq!(record.staging_path, "/tmp/.helm-resume.part");
+        assert_eq!(record.worker_parts, 4);
+    }
+
+    #[tokio::test]
+    async fn legacy_history_still_loads_with_compatible_defaults() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("transfer-history.json");
+        let legacy = TransferHistorySnapshot {
+            version: LEGACY_TRANSFER_HISTORY_VERSION,
+            saved_at: now(),
+            transfers: vec![transfer(1, TaskStatus::Failed)],
+        };
+        tokio::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap())
+            .await
+            .unwrap();
+
+        let runtime = RemoteRuntime::with_transfer_history_path(path);
+        runtime.load_transfer_history().await.unwrap();
+        let records = runtime.transfers.read().await;
+        let record = records.get("transfer-1").unwrap();
+
+        assert!(record.request.overwrite);
+        assert!(!record.request.accelerated);
+        assert!(record.staging_path.is_empty());
+        assert_eq!(record.worker_parts, 1);
     }
 
     #[tokio::test]

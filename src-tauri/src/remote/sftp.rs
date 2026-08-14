@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const REMOTE_TARGET_EXISTS_MARKER: &str = "__HELM_TARGET_EXISTS__";
+
 pub(super) async fn search_remote_file_with_find(
     handle: &SshHandle,
     base_path: &str,
@@ -55,9 +57,14 @@ pub(super) fn build_remote_rename_command(from: &str, to: &str) -> String {
     )
 }
 
-pub(super) fn build_remote_replace_command(from: &str, to: &str) -> String {
+pub(super) fn build_remote_replace_command(from: &str, to: &str, overwrite: bool) -> String {
+    let script = if overwrite {
+        r#"[ -f "$1" ] && [ ! -L "$1" ] || { printf "%s\n" "临时文件不存在或不是普通文件: $1" >&2; exit 1; }; if [ -L "$2" ]; then printf "%s\n" "目标是软链接，拒绝替换: $2" >&2; exit 1; fi; if [ -e "$2" ]; then [ -f "$2" ] || { printf "%s\n" "目标不是普通文件: $2" >&2; exit 1; }; chmod --reference="$2" "$1" 2>/dev/null || true; chown --reference="$2" "$1" 2>/dev/null || true; touch --reference="$2" "$1" 2>/dev/null || true; if command -v getfacl >/dev/null 2>&1 && command -v setfacl >/dev/null 2>&1; then getfacl -cp -- "$2" 2>/dev/null | setfacl --set-file=- -- "$1" 2>/dev/null || true; fi; cp --attributes-only --preserve=xattr -- "$2" "$1" 2>/dev/null || true; fi; mv -f -- "$1" "$2""#
+    } else {
+        r#"[ -f "$1" ] && [ ! -L "$1" ] || { printf "%s\n" "临时文件不存在或不是普通文件: $1" >&2; exit 1; }; if [ -L "$2" ]; then printf "%s\n" "目标是软链接，拒绝替换: $2" >&2; exit 1; fi; if [ -e "$2" ]; then printf "%s\n%s\n" "目标已存在: $2" "__HELM_TARGET_EXISTS__" >&2; exit 17; fi; if ln -- "$1" "$2" 2>/dev/null; then rm -f -- "$1"; exit 0; fi; if [ -L "$2" ]; then printf "%s\n" "目标是软链接，拒绝替换: $2" >&2; exit 1; fi; if [ -e "$2" ]; then printf "%s\n%s\n" "目标已存在: $2" "__HELM_TARGET_EXISTS__" >&2; exit 17; fi; printf "%s\n" "无法原子提交临时文件: $1" >&2; exit 1"#
+    };
     remote_file_command(
-        r#"[ -e "$1" ] || [ -L "$1" ] || { printf "%s\n" "临时文件不存在: $1" >&2; exit 1; }; if [ -d "$2" ] && [ ! -L "$2" ]; then printf "%s\n" "目标已存在且是目录: $2" >&2; exit 1; fi; if [ -e "$2" ] || [ -L "$2" ]; then chmod --reference="$2" "$1" 2>/dev/null || true; fi; mv -f -- "$1" "$2""#,
+        script,
         &[normalize_remote_path(from), normalize_remote_path(to)],
     )
 }

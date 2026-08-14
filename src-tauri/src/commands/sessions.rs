@@ -1,8 +1,8 @@
 use tauri::{AppHandle, State};
 
 use super::{
-    api_server_cmd::reconcile_api_server_with_snapshot, connect_session_new, ensure_vault_unlocked,
-    with_store, AppResult, AppState,
+    api_server_cmd::{reconcile_api_server_with_snapshot, sync_api_server_authorization_cache},
+    connect_session_new, ensure_vault_unlocked, with_store, AppResult, AppState,
 };
 use crate::config::{ConfigSnapshot, GroupInput, SessionInput};
 use crate::remote::ConnectionInfo;
@@ -128,10 +128,12 @@ pub async fn session_delete(
     session_id: String,
 ) -> AppResult<ConfigSnapshot> {
     let ticket = state.config_mutations.ticket();
+    let api_guard = state.api_server_operation.lock().await;
     let tunnel_guard = state.tunnel_operation.lock().await;
     let config_guard = state.connection_config_gate.write().await;
     let _mutation_guard = state.config_mutations.lock(ticket).await?;
     let snapshot = with_store(&state, |store| store.delete_session(&session_id))?;
+    sync_api_server_authorization_cache(&state, &snapshot).await;
     drop(_mutation_guard);
     state
         .remote
@@ -139,6 +141,7 @@ pub async fn session_delete(
         .await;
     drop(config_guard);
     drop(tunnel_guard);
+    drop(api_guard);
     reconcile_api_server_with_snapshot(&app, &state).await;
     crate::events::emit(&app, crate::events::CONFIG_CHANGED, snapshot.clone());
     Ok(snapshot)

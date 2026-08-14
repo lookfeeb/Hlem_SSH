@@ -1272,10 +1272,6 @@
     grid-template-columns: 1fr 1fr;
   }
 
-  .backupDirectoryField {
-    grid-column: 1 / -1;
-  }
-
   .backupRecordsToolbar {
     grid-template-columns: 190px 108px;
   }

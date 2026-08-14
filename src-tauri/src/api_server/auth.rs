@@ -7,7 +7,7 @@
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Json;
 
-use super::{allowed_session_ids_snapshot, ApiError, ApiServerState};
+use super::{allowed_session_set_snapshot, ApiError, ApiServerState};
 
 pub(super) fn verify_auth(
     headers: &HeaderMap,
@@ -33,8 +33,8 @@ pub(super) fn verify_session_access(
     state: &ApiServerState,
     session_id: &str,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
-    let allowed_session_ids = allowed_session_ids_snapshot(state);
-    if !session_is_authorized(&allowed_session_ids, session_id) {
+    let allowed_session_ids = allowed_session_set_snapshot(state);
+    if !allowed_session_ids.contains(session_id) {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiError {
@@ -68,29 +68,14 @@ pub(super) fn verify_session_access_and_exists(
     })
 }
 
-fn session_is_authorized(allowed_session_ids: &[String], session_id: &str) -> bool {
-    allowed_session_ids
-        .iter()
-        .any(|allowed| allowed == session_id)
-}
-
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderMap;
 
-    use super::{session_is_authorized, verify_auth};
+    use super::verify_auth;
 
     #[test]
     fn empty_api_key_never_authenticates() {
         assert!(verify_auth(&HeaderMap::new(), "").is_err());
-    }
-
-    #[test]
-    fn empty_session_allowlist_authorizes_nothing() {
-        assert!(!session_is_authorized(&[], "session-a"));
-        assert!(session_is_authorized(
-            &["session-a".to_string()],
-            "session-a"
-        ));
     }
 }

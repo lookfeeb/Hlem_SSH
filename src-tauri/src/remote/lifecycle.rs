@@ -71,8 +71,6 @@ pub(super) async fn disconnect_connection_handle(
 ) -> AppResult<()> {
     let result = timeout(CONNECTION_SHUTDOWN_TIMEOUT, async {
         handle
-            .lock()
-            .await
             .disconnect(Disconnect::ByApplication, message, "zh-CN")
             .await
     })

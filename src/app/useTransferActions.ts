@@ -135,7 +135,7 @@ export function useTransferActions({
   function restartTransferOnSession(transfer: TransferInfo, sftpId: string) {
     return transfer.direction === "upload"
       ? remoteApi.upload(sftpId, transfer.localPath, transfer.remotePath, true, true, true)
-      : remoteApi.download(sftpId, transfer.remotePath, transfer.localPath, true);
+      : remoteApi.download(sftpId, transfer.remotePath, transfer.localPath, true, true);
   }
 
   function isMissingTransferError(error: unknown) {

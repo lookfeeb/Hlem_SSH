@@ -136,10 +136,7 @@ impl RemoteRuntime {
             // Disconnected 事件，让前端状态回到已断开。
             // 仅当 shell 正常退出（如用户 `exit`）时 handle 仍存活，此时只清
             // 理终端，不动连接。
-            let ssh_dead = match reader_handle.try_lock() {
-                Ok(guard) => guard.is_closed(),
-                Err(_) => false,
-            };
+            let ssh_dead = reader_handle.is_closed();
             if ssh_dead {
                 let removed_record = reader_runtime
                     .connections
@@ -307,16 +304,22 @@ impl RemoteRuntime {
         command: String,
         timeout_ms: Option<u64>,
     ) -> AppResult<ExecResult> {
+        let started = Instant::now();
         let connection = self.connection(connection_id).await?;
+        let channel_started = Instant::now();
         let channel = self
             .open_session_channel_for_connection(&connection, true)
             .await?;
-        exec_with_channel(
+        let channel_open_ms = channel_started.elapsed().as_millis();
+        let mut result = exec_with_channel(
             channel,
             command,
             timeout_ms.unwrap_or(DEFAULT_EXEC_TIMEOUT_MS),
         )
-        .await
+        .await?;
+        result.channel_open_ms = channel_open_ms;
+        result.duration_ms = started.elapsed().as_millis();
+        Ok(result)
     }
 }
 

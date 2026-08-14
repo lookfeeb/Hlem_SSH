@@ -284,44 +284,67 @@ export function useSftpFiles({
     const expanded = await appApi.expandLocalPaths(localPaths);
     if (expanded.length === 0) return;
     if (!isSessionSftpCurrent(session.id, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
-    const remoteTargets = expanded.map((entry) => joinRemotePath(targetDirectory, remoteRelativePath(entry.relativePath)));
-    const existingRemoteTargets = (await Promise.all(remoteTargets.map(async (path) => {
-      if (!isSessionSftpCurrent(session.id, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
-      return (await remoteApi.pathExists(sftpId, path)) ? path : null;
-    }))).filter((path): path is string => Boolean(path));
+    const fileEntries = expanded.filter((entry) => entry.entryType === "file");
+    const directoryEntries = expanded.filter((entry) => entry.entryType === "directory");
+    const remoteTargets = fileEntries.map((entry) => joinRemotePath(targetDirectory, remoteRelativePath(entry.relativePath)));
+    const existingRemoteTargets = (await runUploadQueue(
+      remoteTargets,
+      uploadConcurrency(remoteTargets.length),
+      async (path) => {
+        if (!isSessionSftpCurrent(session.id, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
+        return (await remoteApi.pathExists(sftpId, path)) ? path : null;
+      },
+    )).filter((path): path is string => Boolean(path));
     if (existingRemoteTargets.length > 0 && !(await confirmOverwrite(`将覆盖 ${existingRemoteTargets.length} 个远端文件，是否继续？`))) return;
     if (!isSessionSftpCurrent(session.id, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
-    const queueConcurrency = expanded.length === 1 ? 1 : uploadConcurrency(expanded.length);
     const dirsToCreate = new Set<string>();
-    for (const entry of expanded) {
+    for (const entry of directoryEntries) {
+      const parts = remoteRelativePath(entry.relativePath).split("/");
+      for (let depth = 1; depth <= parts.length; depth++) {
+        dirsToCreate.add(joinRemotePath(targetDirectory, parts.slice(0, depth).join("/")));
+      }
+    }
+    for (const entry of fileEntries) {
       const parts = remoteRelativePath(entry.relativePath).split("/");
       for (let depth = 1; depth < parts.length; depth++) {
         dirsToCreate.add(joinRemotePath(targetDirectory, parts.slice(0, depth).join("/")));
       }
     }
-    const sortedDirs = [...dirsToCreate].sort((a, b) => a.length - b.length);
+    const sortedDirs = [...dirsToCreate].sort((a, b) => a.split("/").length - b.split("/").length);
     for (const dir of sortedDirs) {
       if (!isSessionSftpCurrent(session.id, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
-      try {
-        await remoteApi.mkdir(sftpId, dir);
-      } catch (error) {
-        console.warn(`[helm] failed to ensure remote upload directory ${dir}:`, getErrorMessage(error));
-      }
+      await remoteApi.mkdir(sftpId, dir);
     }
-    const queuedTransfers = await runUploadQueue(
-      expanded,
-      queueConcurrency,
-      (entry) => {
-        if (!isSessionSftpCurrent(session.id, sftpId)) {
-          return Promise.reject(new Error("当前 SFTP 会话已变化，请重试"));
+    const targetCounts = new Map<string, number>();
+    for (const remotePath of remoteTargets) {
+      targetCounts.set(remotePath, (targetCounts.get(remotePath) ?? 0) + 1);
+    }
+    const existingTargetSet = new Set(existingRemoteTargets);
+    const failures: { relativePath: string; error: unknown }[] = [];
+    let queuedCount = 0;
+    const accelerated = fileEntries.length === 1;
+    await runUploadQueue(
+      fileEntries,
+      fileEntries.length === 1 ? 1 : uploadConcurrency(fileEntries.length),
+      async (entry) => {
+        try {
+          if (!isSessionSftpCurrent(session.id, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
+          const remotePath = joinRemotePath(targetDirectory, remoteRelativePath(entry.relativePath));
+          // 保留同一批次同名目标的既有覆盖语义；其余新目标使用后端原子无覆盖提交。
+          const overwrite = existingTargetSet.has(remotePath) || (targetCounts.get(remotePath) ?? 0) > 1;
+          const transfer = await remoteApi.upload(sftpId, entry.localPath, remotePath, overwrite, accelerated, false);
+          queuedCount += 1;
+          if (mountedRef.current) upsertTransfer(transfer);
+        } catch (error) {
+          failures.push({ relativePath: entry.relativePath, error });
         }
-        const remotePath = joinRemotePath(targetDirectory, remoteRelativePath(entry.relativePath));
-        return remoteApi.upload(sftpId, entry.localPath, remotePath, true, true, false);
       },
     );
-    if (!mountedRef.current) return;
-    queuedTransfers.forEach(upsertTransfer);
-    if (queuedTransfers.length > 1) openTransferCenter();
+    if (queuedCount > 1) openTransferCenter();
+    if (failures.length > 0) {
+      const first = failures[0];
+      throw new Error(`${failures.length} 个上传任务未能启动；${first.relativePath}：${getErrorMessage(first.error)}`);
+    }
   }
 
   async function downloadRemoteFiles(sessionId: string, files: RemoteDownloadSelection[]) {
@@ -357,6 +380,7 @@ export function useSftpFiles({
     const localDirectories = plan.directories.map((relativePath) => joinLocalDownloadPath(dir, relativePath));
     if (localDirectories.length > 0) await appApi.createLocalDirectories(localDirectories);
 
+    const existingLocalTargetSet = new Set(existingLocalTargets);
     const failures: { relativePath: string; error: unknown }[] = [];
     let queuedCount = 0;
     await runUploadQueue(
@@ -366,7 +390,12 @@ export function useSftpFiles({
         try {
           if (!isSessionSftpCurrent(sessionId, sftpId)) throw new Error("当前 SFTP 会话已变化，请重试");
           const localPath = joinLocalDownloadPath(dir, file.relativePath);
-          const transfer = await remoteApi.download(sftpId, file.remotePath, localPath, true);
+          const transfer = await remoteApi.download(
+            sftpId,
+            file.remotePath,
+            localPath,
+            existingLocalTargetSet.has(localPath),
+          );
           queuedCount += 1;
           if (mountedRef.current) upsertTransfer(transfer);
         } catch (error) {

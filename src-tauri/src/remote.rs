@@ -3,7 +3,7 @@ use std::{
     io::SeekFrom,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex as StdMutex, Weak,
     },
     time::{Duration, SystemTime},
@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use russh::{
     client::{self, DisconnectReason, Handler},
     keys::{decode_secret_key, load_secret_key, ssh_key, PrivateKeyWithHashAlg},
-    Channel, ChannelMsg, ChannelOpenFailure, ChannelWriteHalf, Disconnect,
+    Channel, ChannelMsg, ChannelOpenFailure, ChannelWriteHalf, Disconnect, Sig,
 };
 use russh_sftp::{
     client::{Config as SftpClientConfig, SftpSession},
@@ -25,7 +25,7 @@ use tokio::{
     fs::{File, OpenOptions},
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{oneshot, Mutex, Notify, RwLock, Semaphore},
+    sync::{mpsc, oneshot, watch, Mutex, Notify, RwLock, Semaphore},
     task::JoinHandle,
     time::{timeout, Instant, MissedTickBehavior},
 };
@@ -94,10 +94,21 @@ const SFTP_FILE_OPERATION_TIMEOUT_MS: u64 = 30 * 60_000;
 const SFTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_TRANSFER_HISTORY: usize = 100;
 const MAX_TERMINAL_STARTUP_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+/// 普通桌面命令的单路输出上限，防止持续输出命令耗尽进程内存。
+const MAX_EXEC_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+/// AI API 更适合结构化、可控大小的响应；stdout/stderr 分别保留尾部 1 MiB。
+pub(crate) const MAX_API_EXEC_OUTPUT_BYTES: usize = 1024 * 1024;
 const CHANNEL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const CONNECTION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const TELEMETRY_JOB_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const API_UPLOAD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// RSA 的 server-sig-algs 扩展在 russh 中默认最多等待 1 秒。现代服务器通常会在
+/// 握手后立即发送，超过此窗口时直接使用 rsa-sha2-512 并保留兼容回退，避免认证
+/// 被一个纯能力探测额外阻塞整整 1 秒。
+const RSA_SIGNATURE_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+/// 自动化连接保留一个尚未执行命令的 session channel。连续命令可直接发送 exec，
+/// 省掉一次 channel-open 往返；超过此时间的空闲 channel 会被刷新。
+const EXEC_CHANNEL_MAX_IDLE: Duration = Duration::from_secs(5 * 60);
 pub(crate) const TRANSFER_BUFFER_BYTES: usize = 1024 * 1024;
 const TRANSFER_ACCELERATED_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 const TRANSFER_PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(250);
@@ -357,7 +368,10 @@ while IFS= read -r helm_tm_tag; do
 done'"#;
 
 type RawSshHandle = client::Handle<RemoteClient>;
-pub type SshHandle = Arc<Mutex<RawSshHandle>>;
+/// russh 完成认证后的控制方法都只需要 `&Handle`，内部通过消息队列串行写入
+/// SSH 传输。共享不可变 Handle 可让多个 channel-open 同时等待各自确认，避免
+/// 在应用层用一个 Mutex 把所有往返延迟叠加起来。
+pub type SshHandle = Arc<RawSshHandle>;
 type TerminalWriter = ChannelWriteHalf<client::Msg>;
 
 #[derive(Clone, Default)]
@@ -392,6 +406,15 @@ pub struct ConnectionInfo {
     pub connected_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disconnect_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApiSessionStatus {
+    pub connected: bool,
+    pub sftp_available: bool,
+    pub connection_id: String,
+    pub status: RuntimeStatus,
+    pub connected_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -439,9 +462,27 @@ pub enum RemoteFileType {
 pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+    pub output_truncated: bool,
     pub exit_status: Option<u32>,
+    /// 调用链总耗时。AI API 会覆盖为排队、自动连接、channel 创建和命令执行总和。
     pub duration_ms: u128,
+    /// 远端接受 exec 请求后到命令结束的耗时。
+    pub execution_ms: u128,
+    /// 为本次命令创建 SSH session channel 的耗时；命中预热 channel 时为 0。
+    pub channel_open_ms: u128,
+    /// 本次 AI API 请求自动建立 SSH 连接的耗时；复用连接时为 0。
+    pub connection_ms: u128,
+    /// 本次 AI API 请求等待执行并发配额的耗时。
+    pub queue_ms: u128,
     pub timed_out: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecStreamChunk {
+    Stdout(String),
+    Stderr(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -623,8 +664,30 @@ struct ConnectionRecord {
     info: ConnectionInfo,
     origin: ConnectionOrigin,
     handle: SshHandle,
+    exec_channel_pool: Arc<ExecChannelPool>,
+    exec_process_tracker: Arc<ExecProcessTracker>,
     remote_forwards: Arc<RwLock<HashMap<String, RemoteForwardTarget>>>,
     diagnostics: Arc<StdMutex<RemoteClientDiagnostics>>,
+}
+
+struct WarmExecChannel {
+    channel: Channel<client::Msg>,
+    opened_at: Instant,
+}
+
+#[derive(Default)]
+struct ExecChannelPool {
+    idle: Mutex<Option<WarmExecChannel>>,
+    refill_task: StdMutex<Option<JoinHandle<()>>>,
+    refilling: AtomicBool,
+    closed: AtomicBool,
+}
+
+#[derive(Default)]
+struct ExecProcessTracker {
+    /// 0=unknown, 1=supported, 2=unsupported。探测由 probe_lock 单飞执行。
+    state: AtomicU8,
+    probe_lock: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -835,6 +898,8 @@ impl Drop for ActiveApiUploadGuard {
 struct TransferRecord {
     info: TransferInfo,
     request: TransferRequest,
+    staging_path: String,
+    worker_parts: u64,
     cleanup_sftp: Option<Arc<SftpSession>>,
     cancel: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
@@ -1365,11 +1430,14 @@ PROC 42 sshd 1.5 20.0
         assert!(copy.contains("cp -a --"));
         assert!(copy.contains("'/tmp/src dir'"));
         assert!(copy.contains("'/tmp/-target'"));
-        let replace = build_remote_replace_command("/tmp/a.part", "/tmp/a file");
+        let replace = build_remote_replace_command("/tmp/a.part", "/tmp/a file", true);
         assert!(replace.contains("chmod --reference"));
         assert!(replace.contains("mv -f --"));
         assert!(replace.contains("'/tmp/a.part'"));
         assert!(replace.contains("'/tmp/a file'"));
+        let no_replace = build_remote_replace_command("/tmp/a.part", "/tmp/a file", false);
+        assert!(no_replace.contains("ln --"));
+        assert!(no_replace.contains(REMOTE_TARGET_EXISTS_MARKER));
     }
 
     #[test]
@@ -1378,8 +1446,15 @@ PROC 42 sshd 1.5 20.0
             ExecResult {
                 stdout: String::new(),
                 stderr: "permission denied\nmore detail".to_string(),
+                stdout_bytes: 0,
+                stderr_bytes: 29,
+                output_truncated: false,
                 exit_status: Some(1),
                 duration_ms: 12,
+                execution_ms: 12,
+                channel_open_ms: 0,
+                connection_ms: 0,
+                queue_ms: 0,
                 timed_out: false,
             },
             "删除",
@@ -1708,7 +1783,9 @@ PROC 42 sshd 1.5 20.0
                     disconnect_reason: None,
                 },
                 origin: ConnectionOrigin::Desktop,
-                handle: Arc::new(Mutex::new(handle)),
+                handle: Arc::new(handle),
+                exec_channel_pool: Arc::new(ExecChannelPool::default()),
+                exec_process_tracker: Arc::new(ExecProcessTracker::default()),
                 remote_forwards: Arc::new(RwLock::new(HashMap::new())),
                 diagnostics,
             },
@@ -1737,8 +1814,6 @@ PROC 42 sshd 1.5 20.0
             .unwrap();
         let _ = connection
             .handle
-            .lock()
-            .await
             .disconnect(Disconnect::ByApplication, "test complete", "en")
             .await;
     }

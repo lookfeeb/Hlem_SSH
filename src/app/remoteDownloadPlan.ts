@@ -88,10 +88,11 @@ export async function buildRemoteDownloadPlan(
   }
 
   function ensureUniqueLocalTarget(relativePath: string, kind: string) {
-    if (seenLocalTargets.has(relativePath)) {
+    const localTargetKey = relativePath.normalize("NFC").toUpperCase();
+    if (seenLocalTargets.has(localTargetKey)) {
       throw new Error(`远端内容存在重复${kind}名，无法安全下载：${relativePath}`);
     }
-    seenLocalTargets.add(relativePath);
+    seenLocalTargets.add(localTargetKey);
   }
 }
 
@@ -105,7 +106,15 @@ function safePathSegment(name: string, parentPath: string) {
   if (!name || !name.trim() || name === "." || name === ".." || /[\\/\0]/.test(name)) {
     throw new Error(`远端目录 ${parentPath} 包含不安全的名称：${name || "（空名称）"}`);
   }
+  if (/[<>:"|?*\u0000-\u001f]/.test(name) || /[. ]$/.test(name) || isWindowsReservedName(name)) {
+    throw new Error(`远端名称无法安全保存到 Windows：${name}`);
+  }
   return name;
+}
+
+function isWindowsReservedName(name: string) {
+  const baseName = name.split(".", 1)[0].toUpperCase();
+  return /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(baseName);
 }
 
 function downloadPlanErrorMessage(error: unknown) {
