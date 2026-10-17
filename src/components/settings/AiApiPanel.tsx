@@ -429,7 +429,8 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
     const sessionHost = targetSession?.host ?? "";
     const hostLabel = [sessionName, sessionHost].filter((item) => item.length > 0).join(" ");
     return [
-      `curl -H "Authorization: Bearer ${apiKey}" http://127.0.0.1:${port}/api/fields`,
+      `curl -H "Authorization: Bearer ${apiKey}"`,
+      `http://127.0.0.1:${port}/api/fields`,
       "",
       `会话ID: ${sessionId}`,
       ...(hostLabel ? [`会话主机: ${hostLabel}`] : []),

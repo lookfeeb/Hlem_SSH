@@ -472,8 +472,7 @@ impl RemoteRuntime {
             preserved.uid = metadata.uid;
             preserved.gid = metadata.gid;
             preserved.permissions = metadata.permissions.map(|mode| mode & 0o7777);
-            preserved.atime = metadata.atime;
-            preserved.mtime = metadata.mtime;
+            // 提交时使用远端当前时间，不能将旧文件的时间复制到新内容上。
             sftp.set_metadata(from.to_string(), preserved)
                 .await
                 .map_err(remote_error)?;
