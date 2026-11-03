@@ -107,28 +107,23 @@ export function useTunnelRuntime({ appReady, panelOpen, applyConfigSnapshot }: U
 
   async function startTunnel(tunnel: TunnelConfig) {
     const epoch = stateEpochRef.current;
-    const eventVersion = eventVersionRef.current;
     try {
-      const forward = await (
-        tunnel.forwardType === "local"
-          ? remoteApi.startLocalForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort, tunnel.targetHost, tunnel.targetPort, tunnel.id)
-          : tunnel.forwardType === "remote"
-            ? remoteApi.startRemoteForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort, tunnel.targetHost, tunnel.targetPort, tunnel.id)
-            : remoteApi.startDynamicForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort, tunnel.id)
-      );
-      if (mountedRef.current && epoch === stateEpochRef.current && eventVersion === eventVersionRef.current) {
-        eventVersionRef.current += 1;
-        setForwards((current) => applyForwardStatus(current, forward));
-      }
+      const snapshot = await vaultApi.tunnelSetEnabled(tunnel.id, true);
+      if (mountedRef.current && epoch === stateEpochRef.current) applyConfigSnapshot(snapshot);
     } finally {
       if (mountedRef.current && epoch === stateEpochRef.current) await synchronizeForwards();
     }
   }
 
-  async function stopTunnel(forwardId: string) {
+  async function stopTunnel(forwardId?: string, tunnelId?: string) {
     const epoch = stateEpochRef.current;
     try {
-      await remoteApi.stopForward(forwardId);
+      // Preserve stopping by runtime ID for legacy instances without a template binding.
+      if (forwardId) await remoteApi.stopForward(forwardId);
+      if (tunnelId) {
+        const snapshot = await vaultApi.tunnelSetEnabled(tunnelId, false);
+        if (mountedRef.current && epoch === stateEpochRef.current) applyConfigSnapshot(snapshot);
+      }
     } finally {
       if (mountedRef.current && epoch === stateEpochRef.current) await synchronizeForwards();
     }

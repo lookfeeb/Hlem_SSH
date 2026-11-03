@@ -163,8 +163,22 @@ pub async fn forward_stop(
     state: State<'_, AppState>,
     forward_id: String,
 ) -> AppResult<()> {
+    let ticket = state.config_mutations.ticket();
     let _operation_guard = state.tunnel_operation.lock().await;
     ensure_vault_unlocked(&state)?;
+    if let Some(tunnel_id) = state
+        .remote
+        .forward_list()
+        .await
+        .iter()
+        .find(|forward| forward.forward_id == forward_id)
+        .and_then(|forward| forward.tunnel_id.clone())
+    {
+        let _mutation_guard = state.config_mutations.lock(ticket).await?;
+        let snapshot =
+            super::with_store(&state, |store| store.set_tunnel_enabled(&tunnel_id, false))?;
+        crate::events::emit(&app, crate::events::CONFIG_CHANGED, snapshot);
+    }
     state.remote.forward_stop(&app, &forward_id).await
 }
 

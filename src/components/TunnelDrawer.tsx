@@ -39,7 +39,7 @@ interface TunnelDrawerProps {
   onUpdate: (id: string, input: TunnelInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onStart: (tunnel: TunnelConfig) => Promise<void>;
-  onStop: (forwardId: string) => Promise<void>;
+  onStop: (forwardId?: string, tunnelId?: string) => Promise<void>;
 }
 
 type TunnelModalState =
@@ -97,6 +97,8 @@ export function TunnelDrawer({
       if (forward.tunnelId && !byTunnelId.has(forward.tunnelId)) {
         byTunnelId.set(forward.tunnelId, forward);
       }
+      // Bound instances belong only to their template, even when routes match.
+      if (forward.tunnelId) continue;
       const exactKey = forwardExactKey(forward);
       const autoPortKey = forwardAutoPortKey(forward);
       if (!exactForwards.has(exactKey)) exactForwards.set(exactKey, forward);
@@ -198,7 +200,7 @@ export function TunnelDrawer({
     try {
       await onStart(tunnel);
       if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
-        message.success("隧道已启动");
+        message.success("隧道已启用，随关联 SSH 连接恢复");
       }
     } catch (error) {
       if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
@@ -212,16 +214,18 @@ export function TunnelDrawer({
     }
   }
 
-  async function stopForward(forward: ForwardInfo) {
-    const key = `stop:${forward.forwardId}`;
+  async function stopForward(forward?: ForwardInfo, tunnelId?: string) {
+    const key = `stop:${forward?.forwardId ?? tunnelId}`;
     if (operationKeyRef.current) return;
     const openCycle = openCycleRef.current;
     operationKeyRef.current = key;
     setOperationKey(key);
     try {
-      await onStop(forward.forwardId);
+      const boundTunnelId = tunnelId ?? forward?.tunnelId ?? undefined;
+      // A bound tunnel can still be disabled if its runtime disappears during disconnect.
+      await onStop(forward?.tunnelId ? undefined : forward?.forwardId, boundTunnelId);
       if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
-        message.success("隧道已停止");
+        message.success("隧道已停用");
       }
     } catch (error) {
       if (mountedRef.current && openRef.current && openCycleRef.current === openCycle) {
@@ -294,7 +298,7 @@ export function TunnelDrawer({
           <div className="tunnelTableBody">
             {filteredTunnels.map((tunnel) => {
               const forward = forwardByTunnelId.get(tunnel.id);
-              const canQuickStart = !forward && operationKey === null;
+              const canQuickStart = !forward && !tunnel.enabled && operationKey === null;
               const bindHost = forward?.bindHost ?? tunnel.bindHost;
               const bindPort = forward?.bindPort ?? tunnel.bindPort;
               return (
@@ -334,28 +338,28 @@ export function TunnelDrawer({
                     </div>
                     <span>{routeDescription(tunnel.forwardType)}</span>
                   </div>
-                  <Tooltip title={forward?.status === "failed" ? forward.error || "隧道启动失败" : undefined}>
+                  <Tooltip title={forward?.status === "failed" ? forward.error || "隧道启动失败" : tunnel.enabled ? "已记住启用状态，连接关联 SSH 后自动恢复" : undefined}>
                     <span className={`tunnelStatePill is-${templateState(forward)}`}>
-                      {forward ? forwardStatusLabel(forward.status) : "已停止"}
+                      {forward ? forwardStatusLabel(forward.status) : tunnel.enabled ? "等待 SSH" : "已停止"}
                     </span>
                   </Tooltip>
                   <div className="tunnelRowActions" onDoubleClick={(event) => event.stopPropagation()}>
-                    {forward ? (
-                      <Tooltip title={forward.status === "failed" ? "重试停止异常实例" : "停止隧道"}>
+                    {forward || tunnel.enabled ? (
+                      <Tooltip title="停用隧道并取消自动恢复">
                         <Button
-                          aria-label={forward.status === "failed" ? "重试停止异常实例" : "停止隧道"}
+                          aria-label="停用隧道并取消自动恢复"
                           size="small"
                           className="tunnelRowActionButton is-primary"
                           icon={<StopOutlined />}
-                          loading={operationKey === `stop:${forward.forwardId}`}
-                          disabled={operationKey !== null && operationKey !== `stop:${forward.forwardId}`}
-                          onClick={() => void stopForward(forward)}
+                          loading={operationKey === `stop:${forward?.forwardId ?? tunnel.id}`}
+                          disabled={operationKey !== null && operationKey !== `stop:${forward?.forwardId ?? tunnel.id}`}
+                          onClick={() => void stopForward(forward, tunnel.id)}
                         />
                       </Tooltip>
                     ) : (
-                      <Tooltip title="启动隧道">
+                      <Tooltip title="启用隧道，连接关联 SSH 后自动恢复">
                         <Button
-                          aria-label="启动隧道"
+                          aria-label="启用隧道"
                           size="small"
                           className="tunnelRowActionButton is-primary"
                           icon={<PlayCircleOutlined />}
@@ -542,7 +546,7 @@ export function TunnelDrawer({
 
             <div className="tunnelSecurityNote">
               <span aria-hidden="true"><SafetyCertificateOutlined /></span>
-              <p>隧道仅在本机监听，关闭会话时可选择同步停止。</p>
+              <p>启停状态自动保存；连接关联 SSH 后恢复已启用隧道。</p>
             </div>
           </aside>
 
@@ -606,7 +610,7 @@ export function TunnelDrawer({
               <div className="tunnelListFooter">
                 <span>
                   {activeView === "templates"
-                    ? `共 ${tunnels.length} 个模板 · 双击未运行模板可快速启动`
+                    ? `共 ${tunnels.length} 个模板 · 双击已停止模板可启用`
                     : `共 ${forwards.length} 个运行实例`}
                 </span>
                 <span>监听地址点击后可复制</span>
@@ -850,7 +854,7 @@ function TunnelConfigModal({
 
           <div className="tunnelConfigSecurityNote">
             <SafetyCertificateOutlined />
-            <p>配置仅保存在本机，启动后通过已建立的 SSH 会话转发流量。</p>
+            <p>启用状态保存在本机；手动连接关联 SSH 后自动恢复隧道。</p>
           </div>
         </aside>
 

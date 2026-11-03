@@ -1,3 +1,4 @@
+use super::runtime_connection::connection_record_is_closed;
 use super::runtime_registry::shared_operation_lock;
 use super::*;
 
@@ -12,6 +13,16 @@ impl RemoteRuntime {
             .find_connection_for_session(&tunnel.session_id, origin)
             .await
             .map_err(AppError::Remote)?;
+        self.forward_start_for_tunnel_on_connection(app, tunnel, connection_id)
+            .await
+    }
+
+    pub(crate) async fn forward_start_for_tunnel_on_connection(
+        &self,
+        app: &AppHandle,
+        tunnel: &crate::config::TunnelConfig,
+        connection_id: String,
+    ) -> AppResult<ForwardInfo> {
         match tunnel.forward_type.as_str() {
             "local" => {
                 self.forward_start_local(
@@ -56,6 +67,54 @@ impl RemoteRuntime {
             }
             other => Err(AppError::InvalidInput(format!("不支持的隧道类型: {other}"))),
         }
+    }
+
+    /// Keep startup failures visible without pretending a listener was opened.
+    pub(crate) async fn record_tunnel_start_failure(
+        &self,
+        app: &AppHandle,
+        tunnel: &crate::config::TunnelConfig,
+        connection_id: &str,
+        error: String,
+    ) {
+        let _lifecycle_guard = self.lifecycle_gate.read().await;
+        let connections = self.connections.read().await;
+        let Some(connection) = connections.get(connection_id) else {
+            return;
+        };
+        if connection_record_is_closed(connection) {
+            return;
+        }
+        let info = ForwardInfo {
+            forward_id: Uuid::new_v4().to_string(),
+            tunnel_id: Some(tunnel.id.clone()),
+            session_id: tunnel.session_id.clone(),
+            forward_type: match tunnel.forward_type.as_str() {
+                "remote" => ForwardType::Remote,
+                "dynamic" => ForwardType::Dynamic,
+                _ => ForwardType::Local,
+            },
+            bind_host: tunnel.bind_host.clone(),
+            bind_port: tunnel.bind_port,
+            target_host: tunnel.target_host.clone(),
+            target_port: tunnel.target_port,
+            status: TaskStatus::Failed,
+            started_at: now(),
+            error: Some(error),
+        };
+        self.forwards.write().await.insert(
+            info.forward_id.clone(),
+            ForwardRecord {
+                connection_id: connection_id.to_string(),
+                origin: connection.origin,
+                info: info.clone(),
+                listener_started: false,
+                handle: None,
+                child_tasks: Arc::new(ForwardChildTasks::default()),
+            },
+        );
+        drop(connections);
+        events::emit(app, events::FORWARD_STATUS, info);
     }
 
     pub async fn forward_start_local(
@@ -146,6 +205,7 @@ impl RemoteRuntime {
             connection_id: connection_id.clone(),
             origin,
             info: info.clone(),
+            listener_started: true,
             handle: Some(task),
             child_tasks,
         };
@@ -276,6 +336,7 @@ impl RemoteRuntime {
             connection_id: parent_connection_id.clone(),
             origin,
             info: info.clone(),
+            listener_started: true,
             handle: Some(task),
             child_tasks,
         };
@@ -417,6 +478,7 @@ impl RemoteRuntime {
             connection_id: connection_id.clone(),
             origin: connection.origin,
             info: info.clone(),
+            listener_started: true,
             handle: None,
             child_tasks,
         };
@@ -483,7 +545,7 @@ impl RemoteRuntime {
         }) else {
             return Ok(false);
         };
-        if matches!(record.info.forward_type, ForwardType::Remote) {
+        if record.listener_started && matches!(record.info.forward_type, ForwardType::Remote) {
             let remote_key = format!(
                 "{}:{}",
                 record.connection_id,
@@ -660,7 +722,7 @@ impl RemoteRuntime {
         drop(forwards);
 
         for record in records {
-            if matches!(record.info.forward_type, ForwardType::Remote) {
+            if record.listener_started && matches!(record.info.forward_type, ForwardType::Remote) {
                 if let Err(error) = cancel_remote_forward(
                     &connection.handle,
                     &record.info.bind_host,
@@ -777,6 +839,7 @@ mod tests {
                 started_at: now(),
                 error: None,
             },
+            listener_started: true,
             handle: None,
             child_tasks: Arc::new(ForwardChildTasks::default()),
         }

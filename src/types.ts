@@ -283,6 +283,7 @@ export type SessionInput = Omit<
 
 export interface TunnelConfig {
   id: string;
+  enabled: boolean;
   name: string;
   sessionId: string;
   forwardType: "local" | "remote" | "dynamic";
@@ -294,7 +295,7 @@ export interface TunnelConfig {
   updatedAt: string;
 }
 
-export type TunnelInput = Omit<TunnelConfig, "id" | "createdAt" | "updatedAt">;
+export type TunnelInput = Omit<TunnelConfig, "id" | "enabled" | "createdAt" | "updatedAt">;
 
 export interface ConnectionInfo {
   connectionId: string;

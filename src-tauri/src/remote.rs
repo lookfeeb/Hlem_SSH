@@ -949,6 +949,7 @@ struct ForwardRecord {
     connection_id: String,
     origin: ConnectionOrigin,
     info: ForwardInfo,
+    listener_started: bool,
     handle: Option<JoinHandle<()>>,
     child_tasks: Arc<ForwardChildTasks>,
 }
@@ -1007,6 +1008,7 @@ fn has_active_remote_forward(
 ) -> bool {
     forwards.values().any(|record| {
         record.connection_id == connection_id
+            && record.listener_started
             && matches!(record.info.forward_type, ForwardType::Remote)
             && record.info.bind_host == bind_host
             && record.info.bind_port == bind_port
@@ -1515,6 +1517,7 @@ PROC 42 sshd 1.5 20.0
                 connection_id: "connection-a".to_string(),
                 origin: ConnectionOrigin::Desktop,
                 info: info.clone(),
+                listener_started: true,
                 handle: None,
                 child_tasks: Arc::new(ForwardChildTasks::default()),
             },
@@ -1563,6 +1566,7 @@ PROC 42 sshd 1.5 20.0
                 connection_id: "connection-api".to_string(),
                 origin: ConnectionOrigin::Automation,
                 info: info.clone(),
+                listener_started: true,
                 handle: None,
                 child_tasks: Arc::new(ForwardChildTasks::default()),
             },
@@ -1615,6 +1619,7 @@ PROC 42 sshd 1.5 20.0
                 connection_id: "connection-a".to_string(),
                 origin: ConnectionOrigin::Desktop,
                 info,
+                listener_started: true,
                 handle: None,
                 child_tasks: Arc::new(ForwardChildTasks::default()),
             },
@@ -1639,6 +1644,15 @@ PROC 42 sshd 1.5 20.0
             "0.0.0.0",
             2200
         ));
+        // Failed startup did not open a listener and must not reserve this route.
+        forwards.get_mut("forward-a").unwrap().listener_started = false;
+        assert!(!has_active_remote_forward(
+            &forwards,
+            "connection-a",
+            "0.0.0.0",
+            2200
+        ));
+        forwards.get_mut("forward-a").unwrap().listener_started = true;
         forwards.get_mut("forward-a").unwrap().info.status = TaskStatus::Canceled;
         assert!(!has_active_remote_forward(
             &forwards,

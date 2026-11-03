@@ -6,6 +6,7 @@ mod remote;
 mod sessions;
 mod sftp;
 mod terminal;
+mod tunnels;
 mod vault;
 
 use std::{
@@ -70,6 +71,7 @@ pub use vault::{
     settings_proxy_update, tunnel_create, tunnel_delete, tunnel_update, vault_backup_export,
     vault_backup_import, vault_migrate, vault_needs_migration, vault_skip_migration,
 };
+pub use tunnels::tunnel_set_enabled;
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 

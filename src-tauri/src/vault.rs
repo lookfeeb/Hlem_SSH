@@ -354,6 +354,32 @@ impl VaultStore {
         Ok(self.unlocked()?.data.tunnels.clone())
     }
 
+    pub fn set_tunnel_enabled(
+        &mut self,
+        tunnel_id: &str,
+        enabled: bool,
+    ) -> AppResult<ConfigSnapshot> {
+        if self
+            .unlocked()?
+            .data
+            .tunnels
+            .iter()
+            .any(|tunnel| tunnel.id == tunnel_id && tunnel.enabled == enabled)
+        {
+            return self.snapshot();
+        }
+        self.mutate(|data| {
+            let tunnel = data
+                .tunnels
+                .iter_mut()
+                .find(|tunnel| tunnel.id == tunnel_id)
+                .ok_or_else(|| AppError::NotFound(format!("隧道 {}", tunnel_id)))?;
+            tunnel.enabled = enabled;
+            tunnel.updated_at = crate::config::now();
+            Ok(())
+        })
+    }
+
     pub fn sessions(&self) -> AppResult<Vec<SessionConfig>> {
         Ok(self.unlocked()?.data.sessions.clone())
     }
@@ -1443,6 +1469,51 @@ mod tests {
         let after = store.snapshot().unwrap();
         assert_eq!(after.revision, before.revision);
         assert_eq!(after.data, before.data);
+    }
+
+    #[test]
+    fn tunnel_enabled_state_survives_reopen_and_edit_and_stop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE_NAME);
+        let mut store = VaultStore::new(path.clone());
+        store.create("pass-123456").unwrap();
+        let snapshot = store.create_session(session_input("SSH", None)).unwrap();
+        let session_id = snapshot.data.sessions[0].id.clone();
+        let snapshot = store
+            .create_tunnel(tunnel_input("RDP", session_id.clone()))
+            .unwrap();
+        let tunnel_id = snapshot.data.tunnels[0].id.clone();
+        assert!(!snapshot.data.tunnels[0].enabled);
+        store.set_tunnel_enabled(&tunnel_id, true).unwrap();
+        drop(store);
+
+        let mut store = VaultStore::new(path.clone());
+        assert!(store.unlock("pass-123456").unwrap().data.tunnels[0].enabled);
+        let snapshot = store
+            .update_tunnel(&tunnel_id, tunnel_input("RDP renamed", session_id))
+            .unwrap();
+        assert!(snapshot.data.tunnels[0].enabled);
+        store.set_tunnel_enabled(&tunnel_id, false).unwrap();
+        drop(store);
+
+        let mut store = VaultStore::new(path);
+        let snapshot = store.unlock("pass-123456").unwrap();
+        assert!(!snapshot.data.tunnels[0].enabled);
+        assert_eq!(snapshot.data.tunnels[0].name, "RDP renamed");
+        assert!(store.set_tunnel_enabled("missing", true).is_err());
+        assert_eq!(
+            serde_json::to_value(store.snapshot().unwrap()).unwrap(),
+            serde_json::to_value(snapshot).unwrap()
+        );
+    }
+
+    #[test]
+    fn legacy_tunnel_without_enabled_field_loads_as_stopped() {
+        let tunnel = TunnelConfig::new(tunnel_input("legacy", "ssh".into()));
+        let mut value = serde_json::to_value(tunnel).unwrap();
+        value.as_object_mut().unwrap().remove("enabled");
+        let restored: TunnelConfig = serde_json::from_value(value).unwrap();
+        assert!(!restored.enabled);
     }
 
     #[test]

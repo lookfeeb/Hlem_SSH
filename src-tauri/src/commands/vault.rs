@@ -182,6 +182,7 @@ pub async fn tunnel_update(
 ) -> AppResult<ConfigSnapshot> {
     let ticket = state.config_mutations.ticket();
     let _operation_guard = state.tunnel_operation.lock().await;
+    let _config_guard = state.connection_config_gate.read().await;
     let _mutation_guard = state.config_mutations.lock(ticket).await?;
     with_store(&state, |store| {
         store.validate_tunnel_update(&tunnel_id, &input)
@@ -190,7 +191,26 @@ pub async fn tunnel_update(
         .remote
         .stop_forwards_for_tunnel(&app, &tunnel_id)
         .await?;
-    with_store(&state, |store| store.update_tunnel(&tunnel_id, input))
+    let snapshot = with_store(&state, |store| store.update_tunnel(&tunnel_id, input))?;
+    drop(_mutation_guard);
+    crate::events::emit(&app, crate::events::CONFIG_CHANGED, snapshot.clone());
+    if let Some(tunnel) = snapshot
+        .data
+        .tunnels
+        .iter()
+        .find(|tunnel| tunnel.id == tunnel_id && tunnel.enabled)
+    {
+        if let Some(connection) = state
+            .remote
+            .connection_list()
+            .await
+            .into_iter()
+            .find(|connection| connection.session_id == tunnel.session_id)
+        {
+            super::tunnels::restore_tunnel(&app, &state, tunnel, &connection.connection_id).await?;
+        }
+    }
+    with_store(&state, |store| store.snapshot())
 }
 
 #[tauri::command]

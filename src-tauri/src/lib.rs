@@ -32,7 +32,7 @@ use commands::{
     telemetry_stop, terminal_ack, terminal_close, terminal_open, terminal_resize, terminal_start,
     terminal_write, transfer_cancel, transfer_download, transfer_history_clear_finished,
     transfer_history_snapshot, transfer_pause, transfer_remove, transfer_resume, transfer_retry,
-    transfer_upload, tunnel_create, tunnel_delete, tunnel_update, vault_backup_export,
+    transfer_upload, tunnel_create, tunnel_delete, tunnel_set_enabled, tunnel_update, vault_backup_export,
     vault_backup_import, vault_migrate, vault_needs_migration, vault_skip_migration, AppState,
 };
 use tauri::{
@@ -210,6 +210,7 @@ pub fn run() {
             tunnel_create,
             tunnel_update,
             tunnel_delete,
+            tunnel_set_enabled,
             ssh_connect,
             ssh_disconnect,
             connection_list,

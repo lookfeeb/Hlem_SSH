@@ -283,7 +283,7 @@ impl RemoteRuntime {
             .map(|(_, record)| record)
             .collect();
         for record in forward_records {
-            if matches!(record.info.forward_type, ForwardType::Remote) {
+            if record.listener_started && matches!(record.info.forward_type, ForwardType::Remote) {
                 if let Some(connection) = self
                     .connections
                     .read()

@@ -57,6 +57,8 @@ export const vaultApi = {
   tunnelCreate: (input: TunnelInput) => call<ConfigSnapshot>("tunnel_create", { input }),
   tunnelUpdate: (tunnelId: string, input: TunnelInput) => call<ConfigSnapshot>("tunnel_update", { tunnelId, input }),
   tunnelDelete: (tunnelId: string) => call<ConfigSnapshot>("tunnel_delete", { tunnelId }),
+  tunnelSetEnabled: (tunnelId: string, enabled: boolean) =>
+    call<ConfigSnapshot>("tunnel_set_enabled", { tunnelId, enabled }),
 };
 
 export function emptyPasswordAuth() {

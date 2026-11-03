@@ -246,6 +246,9 @@ pub struct BackupRecord {
 #[serde(rename_all = "camelCase")]
 pub struct TunnelConfig {
     pub id: String,
+    /// User intent, preserved across disconnects and application restarts.
+    #[serde(default)]
+    pub enabled: bool,
     pub name: String,
     pub session_id: String,
     pub forward_type: String,
@@ -436,6 +439,7 @@ impl TunnelConfig {
         let timestamp = now();
         Self {
             id: Uuid::new_v4().to_string(),
+            enabled: false,
             name: input.name.trim().to_string(),
             session_id: input.session_id,
             forward_type: input.forward_type,

@@ -224,7 +224,9 @@ pub async fn ssh_connect(
     state: State<'_, AppState>,
     session_id: String,
 ) -> AppResult<ConnectionInfo> {
-    connect_session_new(&app, &state, &session_id).await
+    let connection = connect_session_new(&app, &state, &session_id).await?;
+    super::tunnels::spawn_tunnel_restore(app, connection.clone());
+    Ok(connection)
 }
 
 #[tauri::command]
