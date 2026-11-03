@@ -1,4 +1,4 @@
-import { Dropdown } from "antd";
+import { Dropdown, message } from "antd";
 import type { MenuProps } from "antd";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -379,12 +379,21 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
 
   async function pasteToTerminal() {
     if (!activeRef.current || !terminalAvailableRef.current) return;
-    const text = await readClipboardText();
-    if (text) {
-      prepareTerminalForInput();
-      sendDataRef.current(text);
+    const terminal = terminalRef.current;
+    const terminalId = terminalIdRef.current;
+    try {
+      const text = await readClipboardText();
+      if (
+        !activeRef.current || !terminalAvailableRef.current ||
+        terminalRef.current !== terminal || terminalIdRef.current !== terminalId
+      ) return;
+      // Use xterm's paste handling for newline normalization and bracketed paste.
+      if (text) terminal?.paste(text);
+    } catch (error) {
+      message.error(`粘贴失败：${getErrorMessage(error)}`);
+    } finally {
+      if (activeRef.current && terminalRef.current === terminal) terminal?.focus();
     }
-    terminalRef.current?.focus();
   }
 
   async function copySelection() {

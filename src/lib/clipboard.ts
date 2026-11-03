@@ -1,5 +1,17 @@
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { isTauriRuntime } from "../api/runtime";
+
 export async function writeClipboardText(text: string): Promise<boolean> {
   if (!text) return false;
+  if (isTauriRuntime()) {
+    try {
+      await writeText(text);
+      return true;
+    } catch (error) {
+      console.warn("[helm] native clipboard write failed:", error);
+      return false;
+    }
+  }
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
@@ -28,12 +40,7 @@ export async function writeClipboardText(text: string): Promise<boolean> {
 }
 
 export async function readClipboardText(): Promise<string> {
-  try {
-    if (navigator.clipboard?.readText) {
-      return await navigator.clipboard.readText();
-    }
-  } catch (error) {
-    console.debug("[helm] navigator clipboard read failed:", error);
-  }
-  return "";
+  if (isTauriRuntime()) return readText();
+  if (navigator.clipboard?.readText) return navigator.clipboard.readText();
+  throw new Error("当前环境不支持读取剪贴板");
 }

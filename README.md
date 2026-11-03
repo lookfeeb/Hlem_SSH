@@ -3,7 +3,7 @@
 > 基于 **Tauri 2 + React 19 + Rust** 的现代 SSH / SFTP 桌面工作台
 
 [![Windows Release](https://github.com/user/Helm/actions/workflows/release.yml/badge.svg)](https://github.com/user/Helm/actions/workflows/release.yml)
-![Version](https://img.shields.io/badge/version-0.0.48-blue)
+![Version](https://img.shields.io/badge/version-0.0.50-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64%20|%20x86%20|%20ARM64-green)
 
 ---

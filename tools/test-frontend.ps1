@@ -30,6 +30,7 @@ $sftpTests = @(
   "transferRecords.test.ts"
 )
 $terminalTests = @(
+  "clipboard.test.ts",
   "sessionConnectionState.test.ts",
   "sshConnectionState.test.ts",
   "terminalRegistry.test.ts",
@@ -68,7 +69,14 @@ try {
   $compiledTests = $testFiles | ForEach-Object {
     Join-Path $tempDirectory ("tests\" + [System.IO.Path]::ChangeExtension($_, ".js"))
   }
-  & node --test @compiledTests
+  # Compiled tests run outside the repo; resolve their runtime dependencies here.
+  $previousNodePath = $env:NODE_PATH
+  try {
+    $env:NODE_PATH = Join-Path $projectRoot "node_modules"
+    & node --test @compiledTests
+  } finally {
+    $env:NODE_PATH = $previousNodePath
+  }
   if ($LASTEXITCODE -ne 0) {
     throw "前端测试失败，退出码：$LASTEXITCODE"
   }

@@ -9,10 +9,11 @@ import type { ConfigSnapshot, ForwardInfo, TunnelConfig, TunnelInput } from "../
 
 type UseTunnelRuntimeOptions = {
   appReady: boolean;
+  panelOpen: boolean;
   applyConfigSnapshot: (snapshot: ConfigSnapshot) => void;
 };
 
-export function useTunnelRuntime({ appReady, applyConfigSnapshot }: UseTunnelRuntimeOptions) {
+export function useTunnelRuntime({ appReady, panelOpen, applyConfigSnapshot }: UseTunnelRuntimeOptions) {
   const [forwards, setForwards] = useState<ForwardInfo[]>([]);
   const mountedRef = useMountedRef();
   const eventVersionRef = useRef(0);
@@ -22,7 +23,6 @@ export function useTunnelRuntime({ appReady, applyConfigSnapshot }: UseTunnelRun
   useEffect(() => {
     if (!appReady) return;
     let disposed = false;
-    let listenerReady = false;
     let unlisten: (() => void) | null = null;
     void remoteApi.onForwardStatus((payload) => {
       if (disposed) return;
@@ -34,11 +34,10 @@ export function useTunnelRuntime({ appReady, applyConfigSnapshot }: UseTunnelRun
         return;
       }
       unlisten = cleanup;
-      listenerReady = true;
     }).catch((error) => {
       if (!disposed) console.warn("[helm] failed to subscribe forward status:", getErrorMessage(error));
     }).finally(() => {
-      if (!disposed && listenerReady) void synchronizeForwards();
+      if (!disposed) void synchronizeForwards();
     });
     return () => {
       disposed = true;
@@ -46,6 +45,20 @@ export function useTunnelRuntime({ appReady, applyConfigSnapshot }: UseTunnelRun
       unlisten?.();
     };
   }, [appReady]);
+
+  useEffect(() => {
+    if (!appReady || !panelOpen) return;
+    const refresh = () => {
+      if (document.visibilityState !== "hidden") void synchronizeForwards();
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [appReady, panelOpen]);
 
   async function synchronizeForwards() {
     const requestId = ++syncRequestRef.current;
@@ -93,19 +106,32 @@ export function useTunnelRuntime({ appReady, applyConfigSnapshot }: UseTunnelRun
   }
 
   async function startTunnel(tunnel: TunnelConfig) {
-    await (
-      tunnel.forwardType === "local"
-        ? remoteApi.startLocalForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort, tunnel.targetHost, tunnel.targetPort, tunnel.id)
-        : tunnel.forwardType === "remote"
-          ? remoteApi.startRemoteForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort, tunnel.targetHost, tunnel.targetPort, tunnel.id)
-          : remoteApi.startDynamicForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort, tunnel.id)
-    );
-    if (mountedRef.current) await synchronizeForwards();
+    const epoch = stateEpochRef.current;
+    const eventVersion = eventVersionRef.current;
+    try {
+      const forward = await (
+        tunnel.forwardType === "local"
+          ? remoteApi.startLocalForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort, tunnel.targetHost, tunnel.targetPort, tunnel.id)
+          : tunnel.forwardType === "remote"
+            ? remoteApi.startRemoteForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort, tunnel.targetHost, tunnel.targetPort, tunnel.id)
+            : remoteApi.startDynamicForward(tunnel.sessionId, tunnel.bindHost, tunnel.bindPort, tunnel.id)
+      );
+      if (mountedRef.current && epoch === stateEpochRef.current && eventVersion === eventVersionRef.current) {
+        eventVersionRef.current += 1;
+        setForwards((current) => applyForwardStatus(current, forward));
+      }
+    } finally {
+      if (mountedRef.current && epoch === stateEpochRef.current) await synchronizeForwards();
+    }
   }
 
   async function stopTunnel(forwardId: string) {
-    await remoteApi.stopForward(forwardId);
-    if (mountedRef.current) await synchronizeForwards();
+    const epoch = stateEpochRef.current;
+    try {
+      await remoteApi.stopForward(forwardId);
+    } finally {
+      if (mountedRef.current && epoch === stateEpochRef.current) await synchronizeForwards();
+    }
   }
 
   return {

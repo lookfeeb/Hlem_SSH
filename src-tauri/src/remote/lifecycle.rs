@@ -85,7 +85,5 @@ pub(super) async fn cancel_forward_record(app: &AppHandle, mut record: ForwardRe
     abort_forward_tasks(&mut record).await;
     record.info.status = TaskStatus::Canceled;
     record.info.error = Some("已停止".to_string());
-    if record.origin.notifies_desktop() {
-        events::emit(app, events::FORWARD_STATUS, record.info);
-    }
+    events::emit(app, events::FORWARD_STATUS, record.info);
 }

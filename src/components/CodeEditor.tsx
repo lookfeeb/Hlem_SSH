@@ -36,9 +36,10 @@ import { c, cpp, java, csharp, kotlin, scala } from "@codemirror/legacy-modes/mo
 import { EditorSelection, Extension } from "@codemirror/state";
 import { EditorView, keymap } from "@codemirror/view";
 import { searchKeymap } from "@codemirror/search";
-import { Button, Input, Space, Tooltip } from "antd";
+import { Button, Input, Space, Tooltip, message } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { readClipboardText, writeClipboardText } from "../lib/clipboard";
+import { getErrorMessage } from "../lib/configMapping";
 import { detectFileLanguage, type FileLanguageId } from "../lib/fileLanguage";
 import { useTimeoutRegistry } from "../lib/reactLifecycle";
 
@@ -220,14 +221,18 @@ export function CodeEditor({
   async function pasteEditorText() {
     const view = viewRef.current;
     if (!view || readOnly) return;
-    const text = await readClipboardText();
-    if (!text) return;
-    const selection = view.state.selection.main;
-    view.dispatch({
-      changes: { from: selection.from, to: selection.to, insert: text },
-      selection: EditorSelection.cursor(selection.from + text.length),
-    });
-    view.focus();
+    try {
+      const text = await readClipboardText();
+      if (!text || viewRef.current !== view || view.state.readOnly) return;
+      const selection = view.state.selection.main;
+      view.dispatch({
+        changes: { from: selection.from, to: selection.to, insert: text },
+        selection: EditorSelection.cursor(selection.from + text.length),
+      });
+      view.focus();
+    } catch (error) {
+      message.error(`粘贴失败：${getErrorMessage(error)}`);
+    }
   }
 
   function selectAllText() {

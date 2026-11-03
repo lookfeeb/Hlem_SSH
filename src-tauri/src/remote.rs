@@ -1531,7 +1531,7 @@ PROC 42 sshd 1.5 20.0
     }
 
     #[tokio::test]
-    async fn forward_lookup_is_scoped_to_connection_origin() {
+    async fn forward_lookup_keeps_api_scope_but_desktop_sees_all_origins() {
         let runtime = RemoteRuntime::default();
         let info = ForwardInfo {
             forward_id: "forward-api".to_string(),
@@ -1569,7 +1569,17 @@ PROC 42 sshd 1.5 20.0
                 .forward_id,
             info.forward_id
         );
-        assert!(runtime.forward_list().await.is_empty());
+        assert_eq!(
+            runtime
+                .desktop_forward_for_tunnel("tunnel-a")
+                .await
+                .unwrap()
+                .forward_id,
+            info.forward_id
+        );
+        let visible = runtime.forward_list().await;
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].forward_id, info.forward_id);
     }
 
     #[test]

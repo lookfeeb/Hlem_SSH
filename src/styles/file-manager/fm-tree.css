@@ -215,12 +215,27 @@
 
 /* ─── File column name header with path hint ────────────────────────────── */
 .fileColumnNameHeader {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.fileColumnNameLabel {
+  flex: 0 0 auto;
 }
 
 .fileColumnPathHint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
   font-weight: 500;
   color: #e85d04;
@@ -235,6 +250,16 @@
 
 .fileTableSurface .ant-table-column-sorters::after {
   display: none;
+}
+
+.fileTableSurface .ant-table-column-sorters,
+.fileTableSurface .ant-table-column-title {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fileTableSurface .ant-table-column-title {
+  overflow: hidden;
 }
 
 .fileTableSurface .ant-table-measure-row {

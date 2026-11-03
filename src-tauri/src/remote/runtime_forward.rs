@@ -117,9 +117,7 @@ impl RemoteRuntime {
             if start_rx.await.is_err() {
                 return;
             }
-            if origin.notifies_desktop() {
-                events::emit(&app_handle, events::FORWARD_STATUS, event_info.clone());
-            }
+            events::emit(&app_handle, events::FORWARD_STATUS, event_info.clone());
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
@@ -254,9 +252,7 @@ impl RemoteRuntime {
             if start_rx.await.is_err() {
                 return;
             }
-            if origin.notifies_desktop() {
-                events::emit(&app_handle, events::FORWARD_STATUS, event_info.clone());
-            }
+            events::emit(&app_handle, events::FORWARD_STATUS, event_info.clone());
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
@@ -443,24 +439,18 @@ impl RemoteRuntime {
             .await
             .insert(info.forward_id.clone(), record);
         drop(connections);
-        if connection.origin.notifies_desktop() {
-            events::emit(app, events::FORWARD_STATUS, info.clone());
-        }
+        events::emit(app, events::FORWARD_STATUS, info.clone());
         Ok(info)
     }
 
-    pub async fn forward_stop_for_origin(
-        &self,
-        app: &AppHandle,
-        forward_id: &str,
-        origin: ConnectionOrigin,
-    ) -> AppResult<()> {
+    // The desktop manages all listeners, including those started through the API.
+    // API stop operations remain scoped through stop_forwards_for_tunnel_origin.
+    pub async fn forward_stop(&self, app: &AppHandle, forward_id: &str) -> AppResult<()> {
         let tunnel_id = self
             .forwards
             .read()
             .await
             .get(forward_id)
-            .filter(|record| record.origin == origin)
             .and_then(|record| record.info.tunnel_id.clone());
         let tunnel_lock = match tunnel_id.as_deref() {
             Some(tunnel_id) => Some(self.tunnel_forward_lock(tunnel_id).await),
@@ -470,10 +460,7 @@ impl RemoteRuntime {
             Some(lock) => Some(lock.lock().await),
             None => None,
         };
-        if !self
-            .forward_stop_if_present(app, forward_id, Some(origin))
-            .await?
-        {
+        if !self.forward_stop_if_present(app, forward_id, None).await? {
             return Err(AppError::missing_forward(forward_id));
         }
         Ok(())
@@ -523,14 +510,11 @@ impl RemoteRuntime {
                     record.info.error = Some(error);
                     record.info.status = TaskStatus::Failed;
                     let failed = record.info.clone();
-                    let notify_desktop = record.origin.notifies_desktop();
                     self.forwards
                         .write()
                         .await
                         .insert(forward_id.to_string(), record);
-                    if notify_desktop {
-                        events::emit(app, events::FORWARD_STATUS, failed);
-                    }
+                    events::emit(app, events::FORWARD_STATUS, failed);
                     return Err(AppError::Remote(
                         "取消远程端口转发失败，可重试停止".to_string(),
                     ));
@@ -552,7 +536,6 @@ impl RemoteRuntime {
             .read()
             .await
             .values()
-            .filter(|record| record.origin == ConnectionOrigin::Desktop)
             .map(|record| record.info.clone())
             .collect()
     }
@@ -562,6 +545,18 @@ impl RemoteRuntime {
         tunnel_id: &str,
         origin: ConnectionOrigin,
     ) -> Option<ForwardInfo> {
+        self.find_forward_for_tunnel(tunnel_id, Some(origin)).await
+    }
+
+    pub async fn desktop_forward_for_tunnel(&self, tunnel_id: &str) -> Option<ForwardInfo> {
+        self.find_forward_for_tunnel(tunnel_id, None).await
+    }
+
+    async fn find_forward_for_tunnel(
+        &self,
+        tunnel_id: &str,
+        origin: Option<ConnectionOrigin>,
+    ) -> Option<ForwardInfo> {
         self.refresh_finished_forward_records().await;
         self.forwards
             .read()
@@ -569,7 +564,7 @@ impl RemoteRuntime {
             .values()
             .find(|record| {
                 record.info.tunnel_id.as_deref() == Some(tunnel_id)
-                    && record.origin == origin
+                    && origin.is_none_or(|origin| record.origin == origin)
                     && is_active_forward_status(&record.info.status)
             })
             .map(|record| record.info.clone())
@@ -733,11 +728,9 @@ async fn mark_forward_failed(
         }
         record.info.status = TaskStatus::Failed;
         record.info.error = Some(error);
-        (record.info.clone(), record.origin.notifies_desktop())
+        record.info.clone()
     };
-    if failed.1 {
-        events::emit(app, events::FORWARD_STATUS, failed.0);
-    }
+    events::emit(app, events::FORWARD_STATUS, failed);
 }
 
 fn normalize_remote_forward_port(requested_port: u16, returned_port: u32) -> AppResult<u16> {
@@ -795,6 +788,57 @@ mod tests {
         assert_eq!(normalize_remote_forward_port(0, 32000).unwrap(), 32000);
         assert!(normalize_remote_forward_port(0, 0).is_err());
         assert!(normalize_remote_forward_port(0, u16::MAX as u32 + 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn desktop_does_not_reuse_an_unexpectedly_finished_api_listener() {
+        let runtime = RemoteRuntime::default();
+        let mut record = test_forward_record("api-a", "tunnel-a", ConnectionOrigin::Automation);
+        let task = tokio::spawn(async {});
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        record.handle = Some(task);
+        runtime
+            .forwards
+            .write()
+            .await
+            .insert("api-a".into(), record);
+
+        assert!(runtime
+            .desktop_forward_for_tunnel("tunnel-a")
+            .await
+            .is_none());
+        let visible = runtime.forward_list().await;
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].status, TaskStatus::Failed);
+        assert!(visible[0].error.is_some());
+    }
+
+    #[tokio::test]
+    async fn stopping_forward_tasks_releases_all_bound_sockets_before_returning() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let child_listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let child_address = child_listener.local_addr().unwrap();
+        let mut record = test_forward_record("api-a", "tunnel-a", ConnectionOrigin::Automation);
+        record.handle = Some(tokio::spawn(async move {
+            let _ = listener.accept().await;
+        }));
+        record.child_tasks.register(tokio::spawn(async move {
+            let _ = child_listener.accept().await;
+        }));
+        assert!(TcpListener::bind(address).await.is_err());
+        assert!(TcpListener::bind(child_address).await.is_err());
+
+        abort_forward_tasks(&mut record).await;
+
+        let _restarted = TcpListener::bind(address)
+            .await
+            .expect("listener port released");
+        let _child_restarted = TcpListener::bind(child_address)
+            .await
+            .expect("child socket released");
     }
 
     #[test]

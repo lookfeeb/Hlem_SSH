@@ -186,6 +186,7 @@ function App() {
     stopTunnel,
   } = useTunnelRuntime({
     appReady,
+    panelOpen: tunnelOpen,
     applyConfigSnapshot,
   });
   const {

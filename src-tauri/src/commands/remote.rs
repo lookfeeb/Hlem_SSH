@@ -69,11 +69,7 @@ pub async fn forward_start_local(
 ) -> AppResult<ForwardInfo> {
     let _operation_guard = state.tunnel_operation.lock().await;
     if let Some(tunnel_id) = tunnel_id.as_deref() {
-        if let Some(existing) = state
-            .remote
-            .forward_for_tunnel(tunnel_id, crate::remote::ConnectionOrigin::Desktop)
-            .await
-        {
+        if let Some(existing) = state.remote.desktop_forward_for_tunnel(tunnel_id).await {
             return Ok(existing);
         }
     }
@@ -110,11 +106,7 @@ pub async fn forward_start_remote(
 ) -> AppResult<ForwardInfo> {
     let _operation_guard = state.tunnel_operation.lock().await;
     if let Some(tunnel_id) = tunnel_id.as_deref() {
-        if let Some(existing) = state
-            .remote
-            .forward_for_tunnel(tunnel_id, crate::remote::ConnectionOrigin::Desktop)
-            .await
-        {
+        if let Some(existing) = state.remote.desktop_forward_for_tunnel(tunnel_id).await {
             return Ok(existing);
         }
     }
@@ -147,11 +139,7 @@ pub async fn forward_start_dynamic(
 ) -> AppResult<ForwardInfo> {
     let _operation_guard = state.tunnel_operation.lock().await;
     if let Some(tunnel_id) = tunnel_id.as_deref() {
-        if let Some(existing) = state
-            .remote
-            .forward_for_tunnel(tunnel_id, crate::remote::ConnectionOrigin::Desktop)
-            .await
-        {
+        if let Some(existing) = state.remote.desktop_forward_for_tunnel(tunnel_id).await {
             return Ok(existing);
         }
     }
@@ -177,14 +165,12 @@ pub async fn forward_stop(
 ) -> AppResult<()> {
     let _operation_guard = state.tunnel_operation.lock().await;
     ensure_vault_unlocked(&state)?;
-    state
-        .remote
-        .forward_stop_for_origin(&app, &forward_id, crate::remote::ConnectionOrigin::Desktop)
-        .await
+    state.remote.forward_stop(&app, &forward_id).await
 }
 
 #[tauri::command]
 pub async fn forward_list(state: State<'_, AppState>) -> AppResult<Vec<ForwardInfo>> {
+    let _operation_guard = state.tunnel_operation.lock().await;
     ensure_vault_unlocked(&state)?;
     Ok(state.remote.forward_list().await)
 }

@@ -94,7 +94,7 @@ const baseColumns: ColumnsType<RemoteFileEntry> = [
       return (
         <span className={`fileName fileName-${meta.category}`} title={entry.path || name}>
           {meta.icon}
-          {name}
+          <span className="fileNameText">{name}</span>
         </span>
       );
     },
@@ -136,6 +136,7 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   owner: 96,
 };
 const MIN_COLUMN_WIDTH = 64;
+const NAME_COLUMN_MIN_WIDTH = 112;
 const TYPE_COLUMN_MIN_WIDTH = 98;
 const TYPE_COLUMN_MAX_WIDTH = 150;
 const TYPE_COLUMN_LABEL_MIN_CHARS = 5;
@@ -171,6 +172,7 @@ function normalizeColumnWidths(value: unknown): Record<string, number> {
 }
 
 function columnMinWidth(key: string) {
+  if (key === "name") return NAME_COLUMN_MIN_WIDTH;
   return key === "type" ? TYPE_COLUMN_MIN_WIDTH : MIN_COLUMN_WIDTH;
 }
 
@@ -548,6 +550,10 @@ function FileManagerView({
   const filesMatchCurrentPath = Boolean(
     session.filesPath && normalizePath(session.filesPath) === path,
   );
+  const headerEntry = useMemo(() => {
+    if (!filesMatchCurrentPath || selectedRowKeys.length !== 1) return undefined;
+    return files.find((entry) => (entry.path || joinPath(path, entry.name)) === selectedRowKeys[0]);
+  }, [files, filesMatchCurrentPath, path, selectedRowKeys]);
   const directoryChanging = canUseFiles && (filesLoading || !filesMatchCurrentPath);
   const tableLoading = searching || refreshing || directoryChanging;
   const treeData = useMemo(() => buildTreeData(directoryEntries, path, new Set(directoryLoadingKeys)), [directoryEntries, path, directoryLoadingKeys]);
@@ -638,17 +644,19 @@ function FileManagerView({
           onHeaderCell: () => headerCellProps,
         };
         if (key === "name") {
-          const dirName = path === "/" ? "/" : getBaseName(path) || "/";
+          const label = !headerEntry || headerEntry.fileType === "directory" ? "目录名" : "文件名";
+          const name = headerEntry?.name ?? (getBaseName(path) || "/");
+          const fullPath = headerEntry ? headerEntry.path || joinPath(path, headerEntry.name) : path;
           col.title = (
             <span className="fileColumnNameHeader">
-              文件名
-              <span className="fileColumnPathHint">{dirName}</span>
+              <span className="fileColumnNameLabel">{label}</span>
+              <span className="fileColumnPathHint" title={fullPath}>{name}</span>
             </span>
           );
         }
         return col;
       }),
-    [effectiveColumnWidths, handleColumnResizeStart, path, quickCommandHiddenColumnKeys],
+    [effectiveColumnWidths, handleColumnResizeStart, headerEntry, path, quickCommandHiddenColumnKeys],
   );
 
   const tableColumnWidth = useMemo(
@@ -1496,7 +1504,7 @@ function FileManagerView({
             }}
           >
             <Table
-              rowKey={(entry) => entry.path || `${path}/${entry.name}`}
+              rowKey={(entry) => entry.path || joinPath(path, entry.name)}
               size="small"
               columns={resizableColumns}
               components={tableComponents}
@@ -1515,6 +1523,12 @@ function FileManagerView({
               rowClassName={(entry) => (focusedPath && entry.path === focusedPath ? "fileTableRow-focused" : "")}
               pagination={false}
               onRow={(entry) => ({
+                onClick: (event) => {
+                  if (!canUseFiles) return;
+                  // Checkbox clicks keep Ant Design's multi-selection behavior.
+                  if (event.target instanceof Element && event.target.closest(".ant-table-selection-column")) return;
+                  setSelectedRowKeys([entry.path || joinPath(path, entry.name)]);
+                },
                 onDoubleClick: () => openDirectory(entry),
                 onContextMenu: (event) => {
                   if (!canUseFiles) return;
