@@ -372,7 +372,10 @@ pub(super) async fn ensure_api_session_ready(
     require_sftp: bool,
 ) -> Result<u128, (StatusCode, Json<ApiError>)> {
     verify_session_access_and_exists(state, session_id)?;
-    let (connected, sftp_available) = state.remote.api_session_status(session_id).await;
+    let (connected, sftp_available) = state
+        .remote
+        .api_session_status_for(session_id, require_sftp)
+        .await;
     let mut connection_ms = 0;
     if !connected {
         let connection_started = std::time::Instant::now();

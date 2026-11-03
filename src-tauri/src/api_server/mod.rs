@@ -28,6 +28,7 @@ use tokio::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::config_mutation::ConfigMutationCoordinator;
+use crate::errors::{AppError, AppResult};
 use crate::events as app_events;
 use crate::remote::RemoteRuntime;
 use crate::vault::VaultStore;
@@ -156,12 +157,15 @@ pub struct ApiLogEntry {
     pub response: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiServerInfo {
     pub running: bool,
     pub port: u16,
     pub api_key: String,
+    pub starting: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 pub struct ApiServerHandle {
@@ -222,10 +226,16 @@ impl ApiServerHandle {
         self.server_task.is_finished()
     }
 
-    pub async fn shutdown(self) {
+    pub fn request_shutdown(&self) {
         self.shutdown_tx.send_replace(true);
-        self.jobs.shutdown().await;
+    }
+
+    pub async fn shutdown(self) {
+        // Axum drops its listener as soon as this signal arrives. Drain jobs,
+        // HTTP connections and the log writer together, not in serial windows.
+        self.request_shutdown();
         tokio::join!(
+            self.jobs.shutdown(),
             shutdown_task(self.server_task, "API server"),
             shutdown_task(self.log_task, "API log flusher")
         );
@@ -644,7 +654,20 @@ fn contains_sensitive_log_marker(value: &str) -> bool {
 
 // ─── Server startup ────────────────────────────────────────────────────────────
 
-pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHandle, String> {
+pub(super) async fn bind_api_listener(port: u16) -> AppResult<TcpListener> {
+    TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|error| {
+            let message = format!("无法绑定 AI API 端口 {port}: {error}");
+            if error.kind() == std::io::ErrorKind::AddrInUse {
+                AppError::ApiPortInUse(message)
+            } else {
+                AppError::Remote(message)
+            }
+        })
+}
+
+pub async fn start_server(options: ApiServerStartOptions) -> AppResult<ApiServerHandle> {
     let ApiServerStartOptions {
         app,
         remote,
@@ -659,6 +682,10 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         connection_config_gate,
         config_mutations,
     } = options;
+    // Fail before loading logs and constructing routes when an outgoing process
+    // still owns the port. Autostart can then retry without rebuilding the server.
+    let listener = bind_api_listener(port).await?;
+    let actual_port = listener.local_addr()?.port();
     let existing_logs = load_logs_from_file(&log_file).await;
     let logs = Arc::new(RwLock::new(existing_logs));
     let log_dirty = Arc::new(Notify::new());
@@ -793,15 +820,6 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         .layer(cors)
         .with_state(state);
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-        .await
-        .map_err(|e| format!("无法绑定端口 {}: {}", port, e))?;
-
-    let actual_port = listener
-        .local_addr()
-        .map_err(|e| format!("获取端口失败: {}", e))?
-        .port();
-
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let log_task = {
@@ -836,15 +854,15 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
         if let Err(error) = &result {
             eprintln!("[helm] api server stopped with error: {error}");
         }
-        // The listener can terminate without a command-driven shutdown (for
-        // example after an accept-loop failure). Wake the log flusher and tear
-        // down automation resources even if no later status query observes it.
+        // Unexpected failure owns emergency cleanup. On explicit shutdown the
+        // handle owns cleanup; doing it here too repeats SSH teardown and races
+        // two consumers draining the same job handles.
         server_shutdown.send_replace(true);
-        server_jobs.shutdown().await;
-        server_remote
-            .shutdown_automation_connections(&server_app, None)
-            .await;
         if result.is_err() {
+            server_jobs.shutdown().await;
+            server_remote
+                .shutdown_automation_connections(&server_app, None)
+                .await;
             crate::events::emit(
                 &server_app,
                 crate::events::API_STATUS,
@@ -852,6 +870,7 @@ pub async fn start_server(options: ApiServerStartOptions) -> Result<ApiServerHan
                     running: false,
                     port: 0,
                     api_key: String::new(),
+                    ..Default::default()
                 },
             );
         }
@@ -1103,5 +1122,73 @@ mod tests {
 
         let rebound = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
         drop(rebound);
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_accepting_before_an_in_flight_request_finishes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::sync::Notify;
+        use tokio::time::{timeout, Duration};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let entered = Arc::new(Notify::new());
+        let finish = Arc::new(Notify::new());
+        let route_entered = entered.clone();
+        let route_finish = finish.clone();
+        let router = Router::new().route(
+            "/",
+            axum::routing::get(move || {
+                let entered = route_entered.clone();
+                let finish = route_finish.clone();
+                async move {
+                    entered.notify_one();
+                    finish.notified().await;
+                    "done"
+                }
+            }),
+        );
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = tokio::spawn(serve_router_until_shutdown(listener, router, shutdown_rx));
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        shutdown_tx.send_replace(true);
+        // Windows can take about two seconds to report ConnectionRefused even
+        // for an already-closed loopback port. This bounds the client probe,
+        // while the blocked handler verifies listener shutdown precedes draining.
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    Err(error) => {
+                        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+                        break;
+                    }
+                    Ok(connection) => drop(connection),
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("listener must stop before request draining");
+        assert!(!server.is_finished());
+        finish.notify_one();
+        let mut response = Vec::new();
+        timeout(Duration::from_secs(2), client.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&response).ends_with("done"));
+        timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }

@@ -1,3 +1,4 @@
+import "../styles/modals/modal-tunnel.css";
 import {
   ApartmentOutlined,
   ArrowLeftOutlined,

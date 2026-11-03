@@ -316,7 +316,10 @@ fn beijing_now() -> DateTime<FixedOffset> {
 }
 
 pub fn extract_backup_payload(bytes: &[u8]) -> AppResult<Vec<u8>> {
-    if serde_json::from_slice::<serde_json::Value>(bytes).is_ok() {
+    // The crypto reader performs format/authentication checks once after extraction.
+    if bytes.starts_with(b"RPVAULT\0")
+        || bytes.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'{')
+    {
         return Ok(bytes.to_vec());
     }
     let mut archive = ZipArchive::new(Cursor::new(bytes))

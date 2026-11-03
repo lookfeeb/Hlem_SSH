@@ -3,8 +3,10 @@
 > 基于 **Tauri 2 + React 19 + Rust** 的现代 SSH / SFTP 桌面工作台
 
 [![Windows Release](https://github.com/user/Helm/actions/workflows/release.yml/badge.svg)](https://github.com/user/Helm/actions/workflows/release.yml)
-![Version](https://img.shields.io/badge/version-0.0.50-blue)
+![Version](https://img.shields.io/badge/version-0.0.51-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64%20|%20x86%20|%20ARM64-green)
+
+**0.0.51 升级说明**：本版工作区和备份导入仅接受 RPVAULT v2 二进制格式，已移除 v1 格式迁移与旧签名兼容。请先确认工作区已完成 v2 迁移；仅支持旧 `.sig` 的客户端需手动下载安装器。既有迁移备份不会被删除，但 v1 备份不能直接导入本版。性能改动与验证记录见 [性能说明](docs/performance.md)。
 
 ---
 
@@ -633,7 +635,7 @@ graph LR
     end
 
     subgraph Release["发布"]
-        Sign[RSA-PSS 签名<br/>生成 latest.json + .sig]
+        Sign[RSA-PSS 签名<br/>生成 latest.json + .sig.bin]
         SHA[SHA256SUMS.txt]
         Notes[自动生成 Release Notes]
         Tag[创建 Git Tag]
@@ -673,7 +675,7 @@ sequenceDiagram
     participant User as 用户
 
     App->>GH: GET latest.json
-    App->>GH: GET latest.json.sig
+    App->>GH: GET latest.json.sig.bin
     App->>App: RSA-PSS 验签 (公钥编译时嵌入)
     App->>App: 比较 appVersion vs 当前版本
 

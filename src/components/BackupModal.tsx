@@ -1,3 +1,4 @@
+import "../styles/modals/modal-backup.css";
 import {
   CheckCircleOutlined,
   CloudUploadOutlined,

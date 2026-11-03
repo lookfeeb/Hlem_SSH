@@ -8,22 +8,10 @@ export default defineConfig({
     exclude: ["@tauri-apps/api"],
   },
   build: {
+    manifest: true,
     chunkSizeWarningLimit: 1200,
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (id.includes("node_modules")) {
-            if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) {
-              return "react";
-            }
-            if (id.includes("/antd/") || id.includes("/@ant-design/") || id.includes("/rc-")) {
-              return "antd";
-            }
-          }
-          return undefined;
-        },
-      },
-    },
+    // Let the bundler follow lazy entry boundaries. A global antd chunk pulled
+    // controls used only by settings, tables and editors into the boot path.
   },
   server: {
     host: "127.0.0.1",

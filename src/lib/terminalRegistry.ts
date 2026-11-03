@@ -1,7 +1,7 @@
 import type { TerminalEntry } from "../types";
 
 export type TerminalSink = {
-  writeEntry: (entry: TerminalEntry) => void;
+  writeEntry: (entry: TerminalEntry, onConsumed?: () => void) => void;
   clear?: () => void;
   reset?: () => void;
 };
@@ -10,7 +10,8 @@ const sinks = new Map<string, TerminalSink>();
 const replayEntries = new Map<string, TerminalReplayBuffer>();
 
 type TerminalReplayBuffer = {
-  entries: TerminalEntry[];
+  entries: Array<TerminalEntry | undefined>;
+  head: number;
   bytes: number;
 };
 
@@ -27,13 +28,14 @@ export function registerTerminalSink(terminalId: string, sink: TerminalSink) {
   };
 }
 
-export function writeTerminalEntryDirect(terminalId: string, entry: TerminalEntry) {
+export function writeTerminalEntryDirect(terminalId: string, entry: TerminalEntry, onConsumed?: () => void) {
   appendTerminalReplayEntry(terminalId, entry);
   const sink = sinks.get(terminalId);
   if (sink) {
-    sink.writeEntry(entry);
+    sink.writeEntry(entry, onConsumed);
     return true;
   }
+  onConsumed?.();
   return false;
 }
 
@@ -55,29 +57,35 @@ export function clearAllTerminalDirect() {
 function replayTerminalEntries(terminalId: string, sink: TerminalSink) {
   const replay = replayEntries.get(terminalId);
   if (!replay?.entries.length) return;
-  for (const entry of replay.entries) {
-    sink.writeEntry(entry);
+  for (let index = replay.head; index < replay.entries.length; index += 1) {
+    const entry = replay.entries[index];
+    if (entry) sink.writeEntry(entry);
   }
 }
 
 function appendTerminalReplayEntry(terminalId: string, entry: TerminalEntry) {
-  const replay = replayEntries.get(terminalId) ?? { entries: [], bytes: 0 };
+  const replay = replayEntries.get(terminalId) ?? { entries: [], head: 0, bytes: 0 };
   const last = replay.entries[replay.entries.length - 1];
-  if (!(last && entry.kind !== "output" && last.kind === entry.kind && last.content === entry.content)) {
+  if (!(last && !entry.dataBytes && entry.kind !== "output" && last.kind === entry.kind && last.content === entry.content)) {
     replay.entries.push(entry);
     replay.bytes += terminalEntryReplayBytes(entry);
   }
 
   while (
-    replay.entries.length > 1 &&
-    (replay.bytes > MAX_TERMINAL_REPLAY_BYTES || replay.entries.length > MAX_TERMINAL_REPLAY_ENTRIES)
+    replay.entries.length - replay.head > 1 &&
+    (replay.bytes > MAX_TERMINAL_REPLAY_BYTES || replay.entries.length - replay.head > MAX_TERMINAL_REPLAY_ENTRIES)
   ) {
-    const removed = replay.entries.shift();
+    const removed = replay.entries[replay.head];
+    replay.entries[replay.head++] = undefined;
     if (removed) replay.bytes -= terminalEntryReplayBytes(removed);
+  }
+  if (replay.head >= MAX_TERMINAL_REPLAY_ENTRIES) {
+    replay.entries = replay.entries.slice(replay.head);
+    replay.head = 0;
   }
   replayEntries.set(terminalId, replay);
 }
 
 function terminalEntryReplayBytes(entry: TerminalEntry) {
-  return (entry.content.length + (entry.dataBase64?.length ?? 0)) * 2;
+  return entry.content.length * 2 + (entry.dataBytes?.byteLength ?? 0);
 }

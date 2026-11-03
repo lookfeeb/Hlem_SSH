@@ -1,19 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { appApi } from "../api/appApi";
-import { call } from "../api/bridge";
-import { isTauriRuntime } from "../api/runtime";
 import { vaultApi } from "../api/vaultApi";
 import { getErrorMessage } from "../lib/configMapping";
-import { useAnimationFrameRegistry, useMountedRef } from "../lib/reactLifecycle";
+import { useMountedRef } from "../lib/reactLifecycle";
 import type { AppInfo, ConfigSnapshot } from "../types";
+import { recordPerformance } from "../lib/performanceMetrics";
+import { recordStartupPhase } from "../lib/startup";
 
 type UseAppBootstrapOptions = {
   enabled: boolean;
   applySnapshot: (snapshot: ConfigSnapshot, preferredSessionId?: string, preserveRuntime?: boolean) => void;
-  onFrontendReady: () => Promise<void> | void;
 };
 
-export function useAppBootstrap({ enabled, applySnapshot, onFrontendReady }: UseAppBootstrapOptions) {
+export function useAppBootstrap({ enabled, applySnapshot }: UseAppBootstrapOptions) {
   const [appReady, setAppReady] = useState(false);
   const [migrationNeeded, setMigrationNeeded] = useState(false);
   const [migrationBusy, setMigrationBusy] = useState(false);
@@ -22,15 +21,20 @@ export function useAppBootstrap({ enabled, applySnapshot, onFrontendReady }: Use
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const mountedRef = useMountedRef();
   const initializationStartedRef = useRef(false);
-  const requestSafeAnimationFrame = useAnimationFrameRegistry();
+  useLayoutEffect(() => recordStartupPhase("app-committed"), []);
+  useLayoutEffect(() => {
+    if (appReady) recordStartupPhase("workspace-ready");
+  }, [appReady]);
 
   useEffect(() => {
     if (!enabled || initializationStartedRef.current) return;
     initializationStartedRef.current = true;
+    recordStartupPhase("listeners-ready");
     void initializeApp();
   }, [enabled]);
 
   async function initializeApp() {
+    const started = performance.now();
     try {
       setBootstrapError(undefined);
       const needsMigration = await vaultApi.needsMigration();
@@ -43,12 +47,12 @@ export function useAppBootstrap({ enabled, applySnapshot, onFrontendReady }: Use
       if (!mountedRef.current) return;
       applySnapshot(snapshot);
       setAppReady(true);
+      recordPerformance("startup:config-ready", started);
     } catch (error) {
       const message = getErrorMessage(error);
       console.error("[helm] failed to load config snapshot:", message);
       if (mountedRef.current) setBootstrapError(message);
     } finally {
-      signalFrontendReady();
       void initializeAppMetadata();
     }
   }
@@ -85,20 +89,6 @@ export function useAppBootstrap({ enabled, applySnapshot, onFrontendReady }: Use
     } catch (error) {
       console.warn("[helm] failed to load app info:", getErrorMessage(error));
     }
-  }
-
-  function signalFrontendReady() {
-    if (!isTauriRuntime()) return;
-    requestSafeAnimationFrame(() => {
-      requestSafeAnimationFrame(() => {
-        if (!mountedRef.current) return;
-        void call<void>("frontend_ready")
-          .then(() => onFrontendReady())
-          .catch((error) => {
-            console.warn("[helm] failed to finish frontend ready handshake:", getErrorMessage(error));
-          });
-      });
-    });
   }
 
   return {

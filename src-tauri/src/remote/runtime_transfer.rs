@@ -1,4 +1,6 @@
+use super::transfer::ensure_transfer_not_canceled;
 use super::*;
+use tokio::sync::OwnedSemaphorePermit;
 
 impl RemoteRuntime {
     pub async fn transfer_upload(
@@ -67,6 +69,7 @@ impl RemoteRuntime {
             return Ok(record.info.clone());
         }
         record.paused.store(true, Ordering::Relaxed);
+        record.control_notify.notify_one();
         record.info.status = TaskStatus::Paused;
         record.info.speed_kbps = 0.0;
         record.info.updated_at = now();
@@ -91,7 +94,12 @@ impl RemoteRuntime {
             return Ok(record.info.clone());
         }
         record.paused.store(false, Ordering::Relaxed);
-        record.info.status = TaskStatus::Running;
+        record.control_notify.notify_one();
+        record.info.status = if record.started {
+            TaskStatus::Running
+        } else {
+            TaskStatus::Queued
+        };
         record.info.updated_at = now();
         let info = record.info.clone();
         events::emit(app, events::TRANSFER_PROGRESS, info.clone());
@@ -169,6 +177,7 @@ impl RemoteRuntime {
                 return Ok(record.info.clone());
             }
             record.cancel.store(true, Ordering::Relaxed);
+            record.control_notify.notify_one();
             record.info.status = TaskStatus::Canceled;
             record.info.speed_kbps = 0.0;
             record.info.error = Some(reason.to_string());
@@ -211,12 +220,6 @@ impl RemoteRuntime {
         // Waiting for capacity must not hold the lifecycle read lock; otherwise
         // SFTP shutdown cannot acquire the write lock to cancel active work.
         drop(lifecycle_guard);
-        let permit = sftp_record
-            .transfer_slots
-            .clone()
-            .acquire_many_owned(worker_parts as u32)
-            .await
-            .map_err(remote_error)?;
         if sftp_record.closed.load(Ordering::Acquire) {
             return Err(AppError::missing_sftp(&request.sftp_id));
         }
@@ -242,6 +245,9 @@ impl RemoteRuntime {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
+        let control_notify = Arc::new(Notify::new());
+        let task_control_notify = control_notify.clone();
+        let transfer_slots = sftp_record.transfer_slots.clone();
         let runtime = self.clone();
         let app_handle = app.clone();
         let task_info = info.clone();
@@ -258,18 +264,29 @@ impl RemoteRuntime {
             if start_receiver.await.is_err() {
                 return;
             }
-            let result = run_transfer(
-                &runtime,
-                &app_handle,
-                task_info.clone(),
-                task_request,
-                task_source,
-                task_staging_path,
-                worker_parts,
-                permit,
-                task_cancel,
-                task_paused,
-            )
+            let result = async {
+                let permit = acquire_transfer_capacity(
+                    transfer_slots,
+                    worker_parts as u32,
+                    &task_cancel,
+                    &task_paused,
+                    &task_control_notify,
+                )
+                .await?;
+                run_transfer(
+                    &runtime,
+                    &app_handle,
+                    task_info.clone(),
+                    task_request,
+                    task_source,
+                    task_staging_path,
+                    worker_parts,
+                    permit,
+                    task_cancel,
+                    task_paused,
+                )
+                .await
+            }
             .await;
             if let Err(error) = result {
                 runtime
@@ -285,6 +302,8 @@ impl RemoteRuntime {
             cleanup_sftp,
             cancel,
             paused,
+            control_notify,
+            started: false,
             handle: Some(task),
         };
         let sftp_sessions = self.sftp_sessions.read().await;
@@ -300,6 +319,23 @@ impl RemoteRuntime {
             return Err(AppError::missing_sftp(&info.sftp_id));
         }
         let mut transfers = self.transfers.write().await;
+        if transfers
+            .values()
+            .filter(|existing| {
+                existing.info.sftp_id == info.sftp_id
+                    && accepts_transfer_activity(&existing.info.status)
+            })
+            .count()
+            >= MAX_PENDING_TRANSFERS_PER_SFTP
+        {
+            drop(transfers);
+            drop(sftp_sessions);
+            abort_and_join_transfer_task(record.handle.take(), &info.transfer_id).await;
+            crate::errors::forget_resource_label(&info.transfer_id);
+            return Err(AppError::InvalidInput(
+                "传输队列已满，请等待现有任务完成后重试".to_string(),
+            ));
+        }
         if transfers.values().any(|existing| {
             existing.staging_path == staging_path
                 && accepts_transfer_activity(&existing.info.status)
@@ -360,9 +396,10 @@ impl RemoteRuntime {
 
     pub(super) async fn mark_transfer_running(&self, app: &AppHandle, transfer_id: &str) {
         if let Some(record) = self.transfers.write().await.get_mut(transfer_id) {
-            if !accepts_transfer_start(&record.info.status) {
+            if !accepts_transfer_activity(&record.info.status) {
                 return;
             }
+            record.started = true;
             let paused = record.paused.load(Ordering::Relaxed);
             record.info.status = if paused {
                 TaskStatus::Paused
@@ -471,6 +508,33 @@ impl RemoteRuntime {
     }
 }
 
+async fn acquire_transfer_capacity(
+    slots: Arc<Semaphore>,
+    parts: u32,
+    cancel: &AtomicBool,
+    paused: &AtomicBool,
+    control: &Notify,
+) -> AppResult<OwnedSemaphorePermit> {
+    loop {
+        let changed = control.notified();
+        ensure_transfer_not_canceled(cancel)?;
+        if paused.load(Ordering::Relaxed) {
+            changed.await;
+            continue;
+        }
+        tokio::select! {
+            biased;
+            _ = changed => continue,
+            permit = slots.clone().acquire_many_owned(parts) => {
+                let permit = permit.map_err(remote_error)?;
+                ensure_transfer_not_canceled(cancel)?;
+                if paused.load(Ordering::Relaxed) { continue; }
+                return Ok(permit);
+            }
+        }
+    }
+}
+
 fn transfer_worker_parts(request: &TransferRequest, bytes_total: u64) -> u64 {
     if request.resume || bytes_total == 0 {
         return 1;
@@ -529,10 +593,6 @@ async fn cancel_and_join_transfer_task(handle: Option<JoinHandle<()>>, transfer_
     }
 }
 
-fn accepts_transfer_start(status: &TaskStatus) -> bool {
-    matches!(status, TaskStatus::Queued | TaskStatus::Running)
-}
-
 fn accepts_transfer_activity(status: &TaskStatus) -> bool {
     matches!(
         status,
@@ -555,6 +615,54 @@ fn is_removable_transfer_state(status: &TaskStatus) -> bool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn queued_transfer_can_cancel_without_a_free_slot() {
+        let slots = Arc::new(Semaphore::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let control = Arc::new(Notify::new());
+        let worker = {
+            let (cancel, paused, control) = (cancel.clone(), paused.clone(), control.clone());
+            tokio::spawn(async move {
+                acquire_transfer_capacity(slots, 4, &cancel, &paused, &control).await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(!worker.is_finished());
+        cancel.store(true, Ordering::Relaxed);
+        control.notify_one();
+        assert!(timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn queued_pause_releases_queue_position_and_resume_obeys_capacity() {
+        let slots = Arc::new(Semaphore::new(4));
+        let occupied = slots.clone().acquire_many_owned(4).await.unwrap();
+        let cancel = AtomicBool::new(false);
+        let paused = AtomicBool::new(true);
+        let control = Notify::new();
+        let acquire = acquire_transfer_capacity(slots.clone(), 4, &cancel, &paused, &control);
+        tokio::pin!(acquire);
+        drop(occupied);
+        assert!(timeout(Duration::from_millis(20), &mut acquire)
+            .await
+            .is_err());
+        assert_eq!(slots.available_permits(), 4);
+        paused.store(false, Ordering::Relaxed);
+        control.notify_one();
+        let permit = timeout(Duration::from_secs(1), &mut acquire)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(slots.available_permits(), 0);
+        drop(permit);
+        assert_eq!(slots.available_permits(), 4);
+    }
+
     #[test]
     fn terminal_transfer_states_reject_late_activity_callbacks() {
         for status in [
@@ -562,10 +670,9 @@ mod tests {
             TaskStatus::Failed,
             TaskStatus::Canceled,
         ] {
-            assert!(!accepts_transfer_start(&status));
             assert!(!accepts_transfer_activity(&status));
         }
-        assert!(accepts_transfer_start(&TaskStatus::Queued));
+        assert!(accepts_transfer_activity(&TaskStatus::Queued));
         assert!(accepts_transfer_activity(&TaskStatus::Paused));
     }
 

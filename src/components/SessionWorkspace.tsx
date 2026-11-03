@@ -7,6 +7,7 @@ import { TelemetrySidebar, type TelemetrySidebarHandle } from "./TelemetrySideba
 import { TerminalPanel } from "./TerminalPanel";
 
 export interface SessionWorkspaceActions {
+  updateTerminalCwd: (terminalId: string, cwd: string) => void;
   sendTerminalData: (sessionId: string, terminalId: string | null | undefined, data: string) => Promise<void>;
   sendTerminalCommand: (sessionId: string, terminalId: string | null | undefined, command: string) => Promise<void>;
   resizeTerminal: (terminalId: string | null | undefined, cols: number, rows: number) => Promise<void>;
@@ -73,6 +74,7 @@ function SessionWorkspaceView({
               onSendData={(data) => void actions().sendTerminalData(session.id, session.terminalId, data)}
               onResize={(cols, rows) => void actions().resizeTerminal(session.terminalId, cols, rows)}
               onClear={() => actions().clearTerminal(session.id)}
+              onCwd={(cwd) => { if (session.terminalId) actions().updateTerminalCwd(session.terminalId, cwd); }}
             />
           }
           bottom={

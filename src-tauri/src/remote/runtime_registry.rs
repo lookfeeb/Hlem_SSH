@@ -45,18 +45,6 @@ impl RemoteRuntime {
             .cloned()
     }
 
-    pub(super) async fn terminal_writer(
-        &self,
-        terminal_id: &str,
-    ) -> AppResult<Arc<Mutex<TerminalWriter>>> {
-        self.terminals
-            .read()
-            .await
-            .get(terminal_id)
-            .map(|record| record.writer.clone())
-            .ok_or_else(|| AppError::missing_terminal(terminal_id))
-    }
-
     pub(super) async fn sftp_session(&self, sftp_id: &str) -> AppResult<Arc<SftpSession>> {
         let record = self
             .sftp_sessions
@@ -196,11 +184,13 @@ impl RemoteRuntime {
             .map(|(id, _)| id.clone())
             .collect();
         for id in terminal_ids {
-            if let Some(record) = self.terminals.write().await.remove(&id) {
+            let record = self.terminals.write().await.remove(&id);
+            if let Some(record) = record {
                 let terminal_id = record.info.terminal_id.clone();
+                let gate = record.output_gate.clone();
                 close_terminal_record_best_effort(record, &terminal_id, "connection cleanup").await;
                 crate::errors::forget_resource_label(&terminal_id);
-                emit_terminal_closed(app, terminal_id);
+                emit_terminal_closed(app, terminal_id, &gate).await;
             }
         }
 
@@ -232,9 +222,10 @@ impl RemoteRuntime {
             .collect();
         for record in terminal_records {
             let terminal_id = record.info.terminal_id.clone();
+            let gate = record.output_gate.clone();
             close_terminal_record_best_effort(record, &terminal_id, "orphan cleanup").await;
             crate::errors::forget_resource_label(&terminal_id);
-            emit_terminal_closed(app, terminal_id);
+            emit_terminal_closed(app, terminal_id, &gate).await;
         }
 
         let sftp_records: Vec<(String, SftpRecord)> =

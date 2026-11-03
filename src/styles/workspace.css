@@ -589,14 +589,13 @@
   contain: layout;
   isolation: isolate;
   background: var(--bg-base);
-  transform: translateZ(0);
-  backface-visibility: hidden;
-  will-change: transform;
+  visibility: hidden;
   pointer-events: none;
   z-index: 0;
 }
 
 .sessionWorkspaceSlot-active {
+  visibility: visible;
   pointer-events: auto;
   z-index: 1;
 }

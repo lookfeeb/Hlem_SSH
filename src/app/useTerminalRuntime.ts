@@ -1,7 +1,7 @@
 import { useRef, type MutableRefObject } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { remoteApi } from "../api/remoteApi";
-import { extractPromptCwd, shouldSkipTerminalEntry, stripCwdMarkers } from "./appHelpers";
+import { shouldSkipTerminalEntry } from "./appHelpers";
 import { getErrorMessage } from "../lib/configMapping";
 import { normalizePath as normalizeRemotePath } from "../lib/path";
 import { useMountedRef } from "../lib/reactLifecycle";
@@ -12,7 +12,7 @@ import {
   forgetTerminalDirect,
   writeTerminalEntryDirect,
 } from "../lib/terminalRegistry";
-import type { RemoteSession, TerminalClosedEvent, TerminalEntry, TerminalOutputEvent } from "../types";
+import type { RemoteSession, TerminalClosedEvent, TerminalOutputEvent } from "../types";
 
 type UseTerminalRuntimeOptions = {
   sessionsRef: MutableRefObject<RemoteSession[]>;
@@ -48,24 +48,11 @@ export function useTerminalRuntime({
   }
 
   function handleTerminalOutput(payload: TerminalOutputEvent) {
-    const { data: dataForPath, cwd } = stripCwdMarkers(payload.data);
-    const promptCwd = extractTerminalPromptCwd(payload.terminalId, dataForPath);
-    if (cwd || promptCwd) updateTerminalCwd(payload.terminalId, cwd ?? promptCwd ?? "");
-    if (!payload.data) return;
-    writeTerminalEntryDirect(payload.terminalId, createTerminalOutputEntry(payload, payload.data));
-  }
-
-  function createTerminalOutputEntry(payload: TerminalOutputEvent, content: string): TerminalEntry {
-    return {
-      ...createTerminalEntry(payload.kind, content),
-      dataBase64: content === payload.data ? payload.dataBase64 : undefined,
-    };
-  }
-
-  function extractTerminalPromptCwd(terminalId: string, data: string) {
-    const session = sessionsRef.current.find((item) => item.terminalId === terminalId);
-    if (!session) return null;
-    return extractPromptCwd(data, session.username, session.loginPath);
+    if (!payload.data && !payload.dataBytes?.length) { payload.onConsumed?.(); return; }
+    writeTerminalEntryDirect(payload.terminalId, {
+      ...createTerminalEntry(payload.kind, payload.data),
+      dataBytes: payload.dataBytes,
+    }, payload.onConsumed);
   }
 
   function resetTerminalRuntime() {
@@ -172,6 +159,7 @@ export function useTerminalRuntime({
     handleTerminalClosed,
     sendTerminalData,
     sendTerminalCommand,
+    updateTerminalCwd,
     resizeTerminal,
     clearTerminal,
   };

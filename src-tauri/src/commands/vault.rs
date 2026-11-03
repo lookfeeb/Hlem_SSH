@@ -14,8 +14,9 @@ use crate::config::{AppProxyOptions, BackupSettings, ConfigSnapshot, QuickComman
 use crate::vault::{AiApiSettingsUpdate, VaultStore, AUTO_PASSWORD};
 
 #[tauri::command]
-pub fn vault_needs_migration(state: State<'_, AppState>) -> bool {
-    state.needs_migration()
+pub async fn vault_needs_migration(state: State<'_, AppState>) -> AppResult<bool> {
+    state.initialize_vault().await?;
+    Ok(state.needs_migration())
 }
 
 #[tauri::command]
@@ -51,7 +52,8 @@ pub async fn vault_skip_migration(state: State<'_, AppState>) -> AppResult<Confi
 }
 
 #[tauri::command]
-pub fn config_snapshot(state: State<'_, AppState>) -> AppResult<ConfigSnapshot> {
+pub async fn config_snapshot(state: State<'_, AppState>) -> AppResult<ConfigSnapshot> {
+    state.initialize_vault().await?;
     with_store(&state, |store| store.snapshot())
 }
 

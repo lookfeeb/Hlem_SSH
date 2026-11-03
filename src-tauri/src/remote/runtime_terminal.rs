@@ -1,5 +1,35 @@
 use super::*;
 
+const TERMINAL_BATCH_BYTES: usize = 64 * 1024;
+
+#[derive(Default)]
+struct TerminalOutputBatch {
+    pending: Option<PendingTerminalOutput>,
+}
+
+impl TerminalOutputBatch {
+    fn push(&mut self, kind: &str, data: &[u8]) -> Vec<PendingTerminalOutput> {
+        let mut ready = Vec::new();
+        if self.pending.as_ref().is_some_and(|pending| {
+            pending.kind != kind || pending.data.len() + data.len() > TERMINAL_BATCH_BYTES
+        }) {
+            ready.extend(self.pending.take());
+        }
+        if data.is_empty() {
+            return ready;
+        }
+        let pending = self.pending.get_or_insert_with(|| PendingTerminalOutput {
+            kind: kind.to_string(),
+            data: Vec::new(),
+        });
+        pending.data.extend_from_slice(data);
+        if pending.data.len() >= TERMINAL_BATCH_BYTES {
+            ready.extend(self.pending.take());
+        }
+        ready
+    }
+}
+
 impl RemoteRuntime {
     pub async fn open_terminal(
         &self,
@@ -33,6 +63,7 @@ impl RemoteRuntime {
         }
         let writer = Arc::new(Mutex::new(write_half));
         let output_gate = Arc::new(Mutex::new(TerminalOutputGate::default()));
+        let flow = output_gate.lock().await.flow.clone();
         let reader = Arc::new(StdMutex::new(None));
         let closed = Arc::new(AtomicBool::new(false));
         let info = TerminalInfo {
@@ -75,50 +106,82 @@ impl RemoteRuntime {
         let reader_handle = connection.handle.clone();
         let reader_runtime = self.clone();
         let reader_output_gate = output_gate.clone();
+        let reader_flow = flow.clone();
         let (reader_start_sender, reader_start_receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
             if reader_start_receiver.await.is_err() {
                 return;
             }
-            while let Some(message) = read_half.wait().await {
+            let mut batch = TerminalOutputBatch::default();
+            let mut last_data = Instant::now() - Duration::from_millis(8);
+            let mut flush_tick = tokio::time::interval(Duration::from_millis(8));
+            flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            'read: loop {
+                let message = tokio::select! {
+                    _ = flush_tick.tick(), if batch.pending.is_some() => {
+                        if let Some(output) = batch.pending.take() {
+                            if emit_or_buffer_terminal_output(&reader_output_gate, output).await.is_err() { break 'read; }
+                        }
+                        continue;
+                    },
+                    message = read_half.wait() => message,
+                };
+                let Some(message) = message else {
+                    break;
+                };
                 if task_closed.load(Ordering::Acquire) {
                     return;
                 }
                 match message {
-                    ChannelMsg::Data { data } => {
-                        emit_or_buffer_terminal_output(
-                            &app_handle,
-                            &reader_output_gate,
-                            &closed_terminal_id,
-                            "output",
-                            &data,
-                        )
-                        .await;
-                    }
-                    ChannelMsg::ExtendedData { data, .. } => {
-                        emit_or_buffer_terminal_output(
-                            &app_handle,
-                            &reader_output_gate,
-                            &closed_terminal_id,
-                            "error",
-                            &data,
-                        )
-                        .await;
+                    ChannelMsg::Data { .. } | ChannelMsg::ExtendedData { .. } => {
+                        let (kind, data) = match message {
+                            ChannelMsg::Data { data } => ("output", data),
+                            ChannelMsg::ExtendedData { data, .. } => ("error", data),
+                            _ => unreachable!(),
+                        };
+                        let urgent = reader_flow.urgent.swap(false, Ordering::AcqRel)
+                            || last_data.elapsed() >= Duration::from_millis(8);
+                        last_data = Instant::now();
+                        let mut ready = batch.push(kind, &data);
+                        if urgent {
+                            ready.extend(batch.pending.take());
+                        }
+                        for output in ready {
+                            if emit_or_buffer_terminal_output(&reader_output_gate, output)
+                                .await
+                                .is_err()
+                            {
+                                break 'read;
+                            }
+                        }
                     }
                     ChannelMsg::ExitStatus { exit_status } => {
-                        events::emit(
-                            &app_handle,
-                            events::TERMINAL_OUTPUT,
-                            TerminalOutputPayload {
-                                terminal_id: closed_terminal_id.clone(),
-                                kind: "system".to_string(),
-                                data: format!("进程退出，状态码 {exit_status}"),
-                                data_base64: String::new(),
+                        if let Some(output) = batch.pending.take() {
+                            if emit_or_buffer_terminal_output(&reader_output_gate, output)
+                                .await
+                                .is_err()
+                            {
+                                break 'read;
+                            }
+                        }
+                        if emit_or_buffer_terminal_output(
+                            &reader_output_gate,
+                            PendingTerminalOutput {
+                                kind: "system".into(),
+                                data: format!("进程退出，状态码 {exit_status}").into_bytes(),
                             },
-                        );
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break 'read;
+                        }
                     }
                     _ => {}
                 }
+            }
+            if let Some(output) = batch.pending.take() {
+                let _ = emit_or_buffer_terminal_output(&reader_output_gate, output).await;
             }
             let removed = terminals
                 .write()
@@ -128,7 +191,7 @@ impl RemoteRuntime {
             if removed {
                 task_closed.store(true, Ordering::Release);
                 crate::errors::forget_resource_label(&closed_terminal_id);
-                emit_terminal_closed(&app_handle, closed_terminal_id);
+                emit_terminal_closed(&app_handle, closed_terminal_id, &reader_output_gate).await;
             }
 
             // 终端 reader 退出后，判断 SSH handle 是否也已经死亡（被 russh 内部
@@ -181,6 +244,7 @@ impl RemoteRuntime {
             info: info.clone(),
             writer: writer.clone(),
             output_gate: output_gate.clone(),
+            flow,
             reader: reader.clone(),
             closed: closed.clone(),
         };
@@ -221,7 +285,11 @@ impl RemoteRuntime {
         Ok(info)
     }
 
-    pub async fn terminal_start(&self, app: &AppHandle, terminal_id: &str) -> AppResult<()> {
+    pub async fn terminal_start(
+        &self,
+        terminal_id: &str,
+        channel: tauri::ipc::Channel<tauri::ipc::Response>,
+    ) -> AppResult<()> {
         let record = self
             .terminals
             .read()
@@ -235,18 +303,33 @@ impl RemoteRuntime {
         // 以及其他会话看到的都只会是远端交互式 shell 实际发送的内容。
         let mut output_gate = record.output_gate.lock().await;
         if output_gate.streaming {
-            return Ok(());
+            return Err(AppError::InvalidInput("终端输出通道已经启动".into()));
         }
+        output_gate.channel = Some(channel);
         for output in output_gate.start() {
-            emit_terminal_output(app, terminal_id, &output.kind, &output.data);
+            output_gate
+                .flow
+                .send(
+                    output_gate.channel.as_ref().unwrap(),
+                    &output.kind,
+                    &output.data,
+                )
+                .await?;
         }
         Ok(())
     }
 
     pub async fn terminal_write(&self, terminal_id: &str, data: String) -> AppResult<()> {
-        let writer = self.terminal_writer(terminal_id).await?;
+        let (writer, flow) = self
+            .terminals
+            .read()
+            .await
+            .get(terminal_id)
+            .map(|record| (record.writer.clone(), record.flow.clone()))
+            .ok_or_else(|| AppError::missing_terminal(terminal_id))?;
         timeout(CHANNEL_SHUTDOWN_TIMEOUT, async {
             let writer = writer.lock().await;
+            flow.urgent.store(true, Ordering::Release);
             let mut stream = writer.make_writer();
             stream
                 .write_all(data.as_bytes())
@@ -256,6 +339,14 @@ impl RemoteRuntime {
         })
         .await
         .map_err(|_| AppError::Remote("写入终端超时（连接可能已断开）".to_string()))??;
+        Ok(())
+    }
+
+    pub async fn terminal_ack(&self, terminal_id: &str, consumed: u64) -> AppResult<()> {
+        // Late acknowledgments after EOF/close are harmless.
+        if let Some(record) = self.terminals.read().await.get(terminal_id) {
+            record.flow.acknowledge(consumed)?;
+        }
         Ok(())
     }
 
@@ -292,9 +383,10 @@ impl RemoteRuntime {
             .await
             .remove(terminal_id)
             .ok_or_else(|| AppError::missing_terminal(terminal_id))?;
+        let gate = record.output_gate.clone();
         let result = close_terminal_record(record).await;
         crate::errors::forget_resource_label(terminal_id);
-        emit_terminal_closed(app, terminal_id.to_string());
+        emit_terminal_closed(app, terminal_id.to_string(), &gate).await;
         result
     }
 
@@ -324,21 +416,46 @@ impl RemoteRuntime {
 }
 
 async fn emit_or_buffer_terminal_output(
-    app: &AppHandle,
     output_gate: &Arc<Mutex<TerminalOutputGate>>,
-    terminal_id: &str,
-    kind: &str,
-    data: &[u8],
-) {
+    output: PendingTerminalOutput,
+) -> AppResult<()> {
     let mut output_gate = output_gate.lock().await;
-    if let Some(output) = output_gate.route(kind, data) {
-        emit_terminal_output(app, terminal_id, &output.kind, &output.data);
+    if let Some(channel) = &output_gate.channel {
+        output_gate
+            .flow
+            .send(channel, &output.kind, &output.data)
+            .await?;
+    } else if !output_gate.streaming {
+        output_gate.push_pending(output);
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_batch_preserves_bytes_and_stream_order() {
+        let mut batch = TerminalOutputBatch::default();
+        let text = "中文\u{1b}[31m".as_bytes();
+        assert!(batch.push("output", &text[..1]).is_empty());
+        assert!(batch.push("output", &text[1..]).is_empty());
+        let output = batch.push("error", b"error");
+        assert_eq!(output[0].data, text);
+        assert_eq!(output[0].kind, "output");
+        assert_eq!(batch.pending.take().unwrap().data, b"error");
+    }
+
+    #[test]
+    fn output_batch_flushes_at_byte_limit() {
+        let mut batch = TerminalOutputBatch::default();
+        let data = vec![b'x'; TERMINAL_BATCH_BYTES];
+        let output = batch.push("output", &data);
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].data, data);
+        assert!(batch.pending.is_none());
+    }
 
     #[test]
     fn terminal_output_gate_preserves_startup_output_order() {

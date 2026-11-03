@@ -3,6 +3,7 @@ import {
   CloseOutlined,
   FullscreenExitOutlined,
   LeftOutlined,
+  LoadingOutlined,
   MinusOutlined,
   ProfileOutlined,
   RightOutlined,
@@ -27,6 +28,8 @@ interface TopBarProps {
   connectingSessionIds: ReadonlySet<string>;
   transfers: TransferInfo[];
   apiServerRunning: boolean;
+  apiServerStarting?: boolean;
+  apiServerError?: string | null;
   apiConfigured: boolean;
   onApiServerStart: () => void;
 }
@@ -44,6 +47,8 @@ export function TopBar({
   connectingSessionIds,
   transfers,
   apiServerRunning,
+  apiServerStarting = false,
+  apiServerError,
   apiConfigured,
   onApiServerStart,
 }: TopBarProps) {
@@ -223,11 +228,11 @@ export function TopBar({
         </span>
         <Space size={6} className="brandActions">
           {apiConfigured && (
-            <Tooltip title={apiServerRunning ? "AI API 运行中" : "AI API 已停止"} placement="bottom">
+            <Tooltip title={apiServerRunning ? "AI API 运行中" : apiServerStarting ? "AI API 正在启动" : apiServerError ? `AI API 启动失败：${apiServerError}` : "AI API 已停止"} placement="bottom">
               <Button
                 aria-label="AI API"
-                className={`brandApiButton${apiServerRunning ? " brandApiButton-running" : " brandApiButton-stopped"}`}
-                icon={<ThunderboltOutlined />}
+                className={`brandApiButton${apiServerRunning ? " brandApiButton-running" : apiServerStarting ? " brandApiButton-starting" : " brandApiButton-stopped"}`}
+                icon={apiServerStarting ? <LoadingOutlined /> : <ThunderboltOutlined />}
                 size="small"
                 onClick={onApiServerStart}
               />

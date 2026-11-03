@@ -11,19 +11,16 @@ import type {
   SftpChangedEvent,
   SftpInfo,
   TelemetryJobInfo,
-  TerminalClosedEvent,
   TelemetrySnapshotEvent,
   TerminalInfo,
-  TerminalOutputEvent,
   TransferHistorySnapshot,
   TransferInfo,
 } from "../types";
 import { call, listenEvent } from "./bridge";
+import { startTerminalStream, onTerminalOutput, onTerminalClosed } from "./terminalStream";
 
 const EVENT_NAMES = {
   sshStatus: "ssh://status",
-  terminalOutput: "terminal://output",
-  terminalClosed: "terminal://closed",
   sftpChanged: "sftp://changed",
   telemetrySnapshot: "telemetry://snapshot",
   transferProgress: "transfer://progress",
@@ -41,7 +38,7 @@ export const remoteApi = {
     call<ConfigSnapshot>("ssh_trust_host_key", { sessionId, host, port, algorithm, fingerprint }),
   openTerminal: (connectionId: string, cols = 100, rows = 30) =>
     call<TerminalInfo>("terminal_open", { connectionId, cols, rows }),
-  startTerminal: (terminalId: string) => call<void>("terminal_start", { terminalId }),
+  startTerminal: startTerminalStream,
   writeTerminal: (terminalId: string, data: string) => call<void>("terminal_write", { terminalId, data }),
   resizeTerminal: (terminalId: string, cols: number, rows: number) =>
     call<void>("terminal_resize", { terminalId, cols, rows }),
@@ -149,8 +146,8 @@ export const remoteApi = {
   onForwardStatus: (handler: (payload: ForwardStatusEvent) => void) => listenEvent(EVENT_NAMES.forwardStatus, handler),
   onSshStatus: (handler: (payload: ConnectionInfo) => void) => listenEvent(EVENT_NAMES.sshStatus, handler),
   onSftpChanged: (handler: (payload: SftpChangedEvent) => void) => listenEvent(EVENT_NAMES.sftpChanged, handler),
-  onTerminalOutput: (handler: (payload: TerminalOutputEvent) => void) => listenEvent(EVENT_NAMES.terminalOutput, handler),
-  onTerminalClosed: (handler: (payload: TerminalClosedEvent) => void) => listenEvent(EVENT_NAMES.terminalClosed, handler),
+  onTerminalOutput,
+  onTerminalClosed,
   onTelemetrySnapshot: (handler: (payload: TelemetrySnapshotEvent) => void) =>
     listenEvent(EVENT_NAMES.telemetrySnapshot, handler),
   onTransferProgress: (handler: (payload: TransferInfo) => void) => listenEvent(EVENT_NAMES.transferProgress, handler),

@@ -1,4 +1,5 @@
 mod api_server_cmd;
+mod api_startup;
 mod backup;
 mod desktop;
 mod remote;
@@ -60,7 +61,7 @@ pub use sftp::{
     transfer_pause, transfer_remove, transfer_resume, transfer_retry, transfer_upload,
 };
 pub use terminal::{
-    ssh_exec, ssh_exec_on_connection, terminal_close, terminal_open, terminal_resize,
+    ssh_exec, ssh_exec_on_connection, terminal_ack, terminal_close, terminal_open, terminal_resize,
     terminal_start, terminal_write,
 };
 pub use vault::{
@@ -95,6 +96,7 @@ pub struct AppState {
     pub(super) remote: RemoteRuntime,
     pub(super) api_server: TokioMutex<Option<ApiServerHandle>>,
     pub(super) api_server_operation: TokioMutex<()>,
+    api_startup: api_startup::ApiStartup,
     pub(super) backup_operation: Arc<TokioMutex<()>>,
     pub(super) tunnel_operation: Arc<TokioMutex<()>>,
     pub(super) connection_config_gate: Arc<TokioRwLock<()>>,
@@ -102,6 +104,7 @@ pub struct AppState {
     pub(super) frontend_ready: AtomicBool,
     pub(super) data_dir: PathBuf,
     pub(super) needs_migration: AtomicBool,
+    vault_initialization: tokio::sync::OnceCell<Result<(), String>>,
     pub(super) auto_backup_scheduler_started: Arc<AtomicBool>,
     pub(super) shutdown_tx: watch::Sender<bool>,
     shutdown_phase: AtomicU8,
@@ -113,14 +116,7 @@ impl AppState {
             .parent()
             .unwrap_or(vault_path.as_path())
             .to_path_buf();
-        let (vault, needs_migration) = {
-            let mut store = VaultStore::new(vault_path);
-            let result = store
-                .auto_open()
-                .unwrap_or(crate::vault::AutoOpenResult::NeedsMigration);
-            let needs_migration = result == crate::vault::AutoOpenResult::NeedsMigration;
-            (Arc::new(Mutex::new(store)), needs_migration)
-        };
+        let vault = Arc::new(Mutex::new(VaultStore::new(vault_path)));
         let remote =
             RemoteRuntime::with_transfer_history_path(data_dir.join(TRANSFER_HISTORY_FILE_NAME));
         let (shutdown_tx, _) = watch::channel(false);
@@ -129,17 +125,46 @@ impl AppState {
             remote,
             api_server: TokioMutex::new(None),
             api_server_operation: TokioMutex::new(()),
+            api_startup: api_startup::ApiStartup::default(),
             backup_operation: Arc::new(TokioMutex::new(())),
             tunnel_operation: Arc::new(TokioMutex::new(())),
             connection_config_gate: Arc::new(TokioRwLock::new(())),
             config_mutations: ConfigMutationCoordinator::default(),
             frontend_ready: AtomicBool::new(false),
             data_dir,
-            needs_migration: AtomicBool::new(needs_migration),
+            needs_migration: AtomicBool::new(false),
+            vault_initialization: tokio::sync::OnceCell::new(),
             auto_backup_scheduler_started: Arc::new(AtomicBool::new(false)),
             shutdown_tx,
             shutdown_phase: AtomicU8::new(SHUTDOWN_NOT_STARTED),
         }
+    }
+
+    pub(super) async fn initialize_vault(&self) -> AppResult<()> {
+        self.vault_initialization
+            .get_or_init(|| async {
+                let started = std::time::Instant::now();
+                let vault = self.vault.clone();
+                let needs_migration = tauri::async_runtime::spawn_blocking(move || {
+                    let mut store = vault.lock().map_err(|_| "工作区状态锁已损坏".to_string())?;
+                    store
+                        .auto_open()
+                        .map(|result| result == crate::vault::AutoOpenResult::NeedsMigration)
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| error.to_string())??;
+                self.needs_migration
+                    .store(needs_migration, Ordering::Release);
+                log::info!(
+                    "Startup vault ready: duration_ms={}",
+                    started.elapsed().as_millis()
+                );
+                Ok(())
+            })
+            .await
+            .clone()
+            .map_err(AppError::Io)
     }
 
     fn ensure_vault_unlocked(&self) -> AppResult<()> {
@@ -202,6 +227,12 @@ impl AppState {
 
     pub(super) async fn shutdown_runtime(&self, app: &AppHandle) {
         self.request_shutdown();
+        self.api_startup.cancel();
+        // Release listening as early as possible, before waiting for lifecycle
+        // operations and unrelated backup/SSH cleanup to finish.
+        if let Some(handle) = self.api_server.lock().await.as_ref() {
+            handle.request_shutdown();
+        }
 
         // Stop accepting API work before draining shared operations and remote
         // resources. Keep the operation guard so a queued start cannot race the
@@ -235,13 +266,25 @@ pub fn resolve_vault_path(app: &AppHandle) -> AppResult<PathBuf> {
 }
 
 #[tauri::command]
-pub fn app_info(app: AppHandle) -> AppResult<AppInfo> {
-    Ok(AppInfo {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        os: desktop::friendly_os_name(),
-        arch: env::consts::ARCH.to_string(),
-        database_path: resolve_vault_path(&app)?.display().to_string(),
+pub async fn app_info(app: AppHandle) -> AppResult<AppInfo> {
+    let started = std::time::Instant::now();
+    // System metadata is not part of the UI event loop. Some platforms need
+    // filesystem or system queries here, so keep even the first lookup off it.
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        Ok(AppInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            os: desktop::friendly_os_name(),
+            arch: env::consts::ARCH.to_string(),
+            database_path: resolve_vault_path(&app)?.display().to_string(),
+        })
     })
+    .await
+    .map_err(|error| AppError::Io(format!("读取应用信息失败: {error}")))?;
+    log::info!(
+        "Startup app info ready: duration_ms={}",
+        started.elapsed().as_millis()
+    );
+    result
 }
 
 // ─── Internal helpers (shared by sub-modules via super::) ──────────────────────
@@ -383,7 +426,22 @@ mod tests {
     fn fresh_state() -> (AppState, TempDir) {
         let dir = tempfile::tempdir().expect("create tempdir for AppState test");
         let state = AppState::new(dir.path().join("test.rpvault"));
+        tauri::async_runtime::block_on(state.initialize_vault()).unwrap();
         (state, dir)
+    }
+
+    #[tokio::test]
+    async fn concurrent_bootstrap_opens_vault_once_off_the_constructor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("concurrent.rpvault");
+        let state = AppState::new(path.clone());
+        assert!(!path.exists());
+        let (first, second) = tokio::join!(state.initialize_vault(), state.initialize_vault());
+        first.unwrap();
+        second.unwrap();
+        let snapshot = state.vault.lock().unwrap().snapshot().unwrap();
+        assert_eq!(snapshot.data.groups.len(), 1);
+        assert!(state.ensure_vault_unlocked().is_ok());
     }
 
     #[test]

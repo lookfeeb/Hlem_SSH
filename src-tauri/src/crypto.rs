@@ -1,25 +1,22 @@
 use argon2::{Algorithm, Argon2, Params, Version};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
 use rand::{rngs::OsRng, RngCore};
-use serde::{Deserialize, Serialize};
 
 use crate::{
     config::VaultData,
     errors::{AppError, AppResult},
 };
 
-const MAGIC: &str = "RPVAULT";
-const VAULT_FORMAT_VERSION: u16 = 1;
+const VAULT_FORMAT_VERSION: u16 = 2;
+const BINARY_MAGIC: &[u8; 8] = b"RPVAULT\0";
+const BINARY_HEADER_LEN: usize = 70;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const KEY_LEN: usize = 32;
 
-const KDF_ALGORITHM: &str = "argon2id";
-const AEAD_ALGORITHM: &str = "xchacha20poly1305";
 const MIN_MASTER_PASSWORD_LEN: usize = 6;
 
 /// Argon2id 参数（new vault 的默认强度，~64 MiB / 3 轮）。
@@ -37,16 +34,6 @@ const KDF_PARAMS_FAST: KdfParams = KdfParams {
     parallelism: 1,
 };
 
-/// 兼容历史：早期版本写入的是 `"argon2-default"` 占位字符串，
-/// 实际派生用的是 `Argon2::default()`，对应这组参数。
-/// 升级 KDF 后必须用这组参数解开旧 vault，否则用户被锁死。
-const KDF_PARAMS_LEGACY_DEFAULT: KdfParams = KdfParams {
-    m_cost_kib: 19_456,
-    t_cost: 2,
-    parallelism: 1,
-};
-const KDF_PARAMS_LEGACY_TAG: &str = "argon2-default";
-
 #[derive(Debug, Clone, Copy)]
 struct KdfParams {
     m_cost_kib: u32,
@@ -55,46 +42,10 @@ struct KdfParams {
 }
 
 impl KdfParams {
-    fn encode(&self) -> String {
-        format!(
-            "m={},t={},p={}",
-            self.m_cost_kib, self.t_cost, self.parallelism
-        )
-    }
-
-    /// Header 里写的是 `"m=N,t=N,p=N"` 或老格式 `"argon2-default"`；
-    /// 解析失败（任何未知格式）一律退回 legacy 默认，保证旧文件能继续打开。
-    fn parse(raw: &str) -> Self {
-        let raw = raw.trim();
-        if raw.eq_ignore_ascii_case(KDF_PARAMS_LEGACY_TAG) || raw.is_empty() {
-            return KDF_PARAMS_LEGACY_DEFAULT;
-        }
-        let mut m_cost: Option<u32> = None;
-        let mut t_cost: Option<u32> = None;
-        let mut parallelism: Option<u32> = None;
-        for part in raw.split(',') {
-            let mut it = part.splitn(2, '=');
-            let key = it.next().unwrap_or("").trim();
-            let value = it.next().unwrap_or("").trim();
-            let parsed = value.parse::<u32>().ok();
-            match key {
-                "m" | "m_cost" => m_cost = parsed,
-                "t" | "t_cost" | "iterations" => t_cost = parsed,
-                "p" | "parallelism" => parallelism = parsed,
-                _ => {}
-            }
-        }
-        match (m_cost, t_cost, parallelism) {
-            (Some(m), Some(t), Some(p)) if m > 0 && t > 0 && p > 0 => KdfParams {
-                m_cost_kib: m,
-                t_cost: t,
-                parallelism: p,
-            },
-            _ => KDF_PARAMS_LEGACY_DEFAULT,
-        }
-    }
-
     fn argon2(&self) -> AppResult<Argon2<'static>> {
+        if self.m_cost_kib > 256 * 1024 || self.t_cost > 10 || self.parallelism > 16 {
+            return Err(AppError::Crypto("Argon2 参数超出支持范围".into()));
+        }
         let params = Params::new(
             self.m_cost_kib,
             self.t_cost,
@@ -106,23 +57,12 @@ impl KdfParams {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct EncryptedVault {
-    pub magic: String,
-    pub version: u16,
-    pub kdf: KdfHeader,
-    pub aead: String,
-    pub salt: String,
-    pub nonce: String,
-    pub ciphertext: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KdfHeader {
-    pub algorithm: String,
-    pub params: String,
+    params: KdfParams,
+    salt: [u8; SALT_LEN],
+    nonce: [u8; NONCE_LEN],
+    ciphertext: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,7 +70,7 @@ pub struct CryptoSession {
     pub key: [u8; KEY_LEN],
     pub salt: [u8; SALT_LEN],
     /// 当前 vault 派生 key 时使用的 KDF 参数。
-    /// mutate 写盘时 header 的 params 字段必须用同一组，否则下一次解锁会派生出不同 key。
+    /// 后续写入必须使用同一组参数，否则下一次解锁会派生出不同 key。
     params: KdfParams,
 }
 
@@ -182,55 +122,64 @@ pub fn encrypt_with_session(
     let plaintext = serde_json::to_vec(data)?;
     let cipher = XChaCha20Poly1305::new_from_slice(&session.key)
         .map_err(|error| AppError::Crypto(format!("初始化加密器失败: {error}")))?;
-    let ciphertext = cipher
-        .encrypt(XNonce::from_slice(&nonce), plaintext.as_ref())
-        .map_err(|_| AppError::Crypto("加密本机数据失败".to_string()))?;
-
-    Ok(EncryptedVault {
-        magic: MAGIC.to_string(),
-        version: VAULT_FORMAT_VERSION,
-        kdf: KdfHeader {
-            algorithm: KDF_ALGORITHM.to_string(),
-            params: session.params.encode(),
-        },
-        aead: AEAD_ALGORITHM.to_string(),
-        salt: STANDARD.encode(session.salt),
-        nonce: STANDARD.encode(nonce),
-        ciphertext: STANDARD.encode(ciphertext),
-    })
+    let mut encrypted = EncryptedVault {
+        params: session.params,
+        salt: session.salt,
+        nonce,
+        ciphertext: Vec::new(),
+    };
+    let header = binary_header(&encrypted, plaintext.len() + 16);
+    encrypted.ciphertext = cipher
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: &plaintext,
+                aad: &header,
+            },
+        )
+        .map_err(|_| AppError::Crypto("加密本机数据失败".into()))?;
+    Ok(encrypted)
 }
 
 pub fn decrypt_with_password(
     master_password: &str,
     encrypted: &EncryptedVault,
 ) -> AppResult<(VaultData, CryptoSession)> {
-    validate_header(encrypted)?;
-    let salt = decode_fixed::<SALT_LEN>(&encrypted.salt)?;
-    let nonce = decode_fixed::<NONCE_LEN>(&encrypted.nonce)?;
-    let ciphertext = STANDARD
-        .decode(&encrypted.ciphertext)
-        .map_err(|_| AppError::InvalidMasterPassword)?;
-    let params = KdfParams::parse(&encrypted.kdf.params);
+    let salt = encrypted.salt;
+    let nonce = encrypted.nonce;
+    let ciphertext = &encrypted.ciphertext;
+    let aad = binary_header(encrypted, ciphertext.len());
+    let params = encrypted.params;
     let key = derive_key(master_password, &salt, &params)?;
     let cipher = XChaCha20Poly1305::new_from_slice(&key)
         .map_err(|error| AppError::Crypto(format!("初始化解密器失败: {error}")))?;
     let plaintext = cipher
-        .decrypt(XNonce::from_slice(&nonce), ciphertext.as_ref())
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: ciphertext,
+                aad: &aad,
+            },
+        )
         .map_err(|_| AppError::InvalidMasterPassword)?;
     let data = serde_json::from_slice(&plaintext).map_err(|_| AppError::InvalidMasterPassword)?;
     Ok((data, CryptoSession { key, salt, params }))
 }
 
 pub fn decrypt_with_key(key: &[u8; KEY_LEN], encrypted: &EncryptedVault) -> AppResult<VaultData> {
-    validate_header(encrypted)?;
-    let nonce = decode_fixed::<NONCE_LEN>(&encrypted.nonce)?;
-    let ciphertext = STANDARD
-        .decode(&encrypted.ciphertext)
-        .map_err(|_| AppError::InvalidMasterPassword)?;
+    let nonce = encrypted.nonce;
+    let ciphertext = &encrypted.ciphertext;
+    let aad = binary_header(encrypted, ciphertext.len());
     let cipher = XChaCha20Poly1305::new_from_slice(key)
         .map_err(|error| AppError::Crypto(format!("初始化解密器失败: {error}")))?;
     let plaintext = cipher
-        .decrypt(XNonce::from_slice(&nonce), ciphertext.as_ref())
+        .decrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: ciphertext,
+                aad: &aad,
+            },
+        )
         .map_err(|_| AppError::InvalidMasterPassword)?;
     serde_json::from_slice(&plaintext).map_err(|_| AppError::InvalidMasterPassword)
 }
@@ -257,28 +206,85 @@ fn derive_key(
     Ok(key)
 }
 
-fn validate_header(encrypted: &EncryptedVault) -> AppResult<()> {
-    if encrypted.magic != MAGIC || encrypted.version != VAULT_FORMAT_VERSION {
-        return Err(AppError::Crypto("不支持的本机数据格式".to_string()));
+fn binary_header(encrypted: &EncryptedVault, ciphertext_len: usize) -> Vec<u8> {
+    let params = encrypted.params;
+    let mut header = Vec::with_capacity(BINARY_HEADER_LEN);
+    header.extend_from_slice(BINARY_MAGIC);
+    header.extend_from_slice(&VAULT_FORMAT_VERSION.to_le_bytes());
+    for value in [params.m_cost_kib, params.t_cost, params.parallelism] {
+        header.extend_from_slice(&value.to_le_bytes());
     }
-    if encrypted.kdf.algorithm != KDF_ALGORITHM || encrypted.aead != AEAD_ALGORITHM {
-        return Err(AppError::Crypto("不支持的加密算法".to_string()));
-    }
-    Ok(())
+    header.extend_from_slice(&encrypted.salt);
+    header.extend_from_slice(&encrypted.nonce);
+    header.extend_from_slice(&(ciphertext_len as u64).to_le_bytes());
+    header
 }
 
-fn decode_fixed<const N: usize>(value: &str) -> AppResult<[u8; N]> {
-    let decoded = STANDARD
-        .decode(value)
-        .map_err(|_| AppError::InvalidMasterPassword)?;
-    decoded
-        .try_into()
-        .map_err(|_| AppError::InvalidMasterPassword)
+pub fn encode_vault(encrypted: &EncryptedVault) -> AppResult<Vec<u8>> {
+    let mut bytes = binary_header(encrypted, encrypted.ciphertext.len());
+    bytes.extend_from_slice(&encrypted.ciphertext);
+    Ok(bytes)
+}
+
+pub fn decode_vault(bytes: &[u8]) -> AppResult<EncryptedVault> {
+    if !bytes.starts_with(BINARY_MAGIC) {
+        return Err(AppError::Crypto(
+            "仅支持二进制 v2 工作区，请使用已迁移的数据文件".into(),
+        ));
+    }
+    if bytes.len() < BINARY_HEADER_LEN + 16
+        || u16::from_le_bytes(bytes[8..10].try_into().unwrap()) != VAULT_FORMAT_VERSION
+    {
+        return Err(AppError::Crypto("二进制工作区版本无效或数据不完整".into()));
+    }
+    let read_u32 = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let params = KdfParams {
+        m_cost_kib: read_u32(10),
+        t_cost: read_u32(14),
+        parallelism: read_u32(18),
+    };
+    params.argon2()?;
+    let length = u64::from_le_bytes(bytes[62..70].try_into().unwrap());
+    if length != (bytes.len() - BINARY_HEADER_LEN) as u64 {
+        return Err(AppError::Crypto("二进制工作区长度不匹配".into()));
+    }
+    Ok(EncryptedVault {
+        params,
+        salt: bytes[22..38].try_into().unwrap(),
+        nonce: bytes[38..62].try_into().unwrap(),
+        ciphertext: bytes[BINARY_HEADER_LEN..].to_vec(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_vault_authenticates_header_and_rejects_truncation() {
+        let data = VaultData::with_default_group();
+        let (encrypted, _) = encrypt_with_password_fast("pass-123456", &data).unwrap();
+        let bytes = encode_vault(&encrypted).unwrap();
+        assert!(bytes.starts_with(BINARY_MAGIC));
+        let decoded = decode_vault(&bytes).unwrap();
+        assert_eq!(
+            decrypt_with_password("pass-123456", &decoded).unwrap().0,
+            data
+        );
+        for index in [10, 22, 38, 70] {
+            let mut tampered = bytes.clone();
+            tampered[index] ^= 1;
+            if let Ok(decoded) = decode_vault(&tampered) {
+                assert!(decrypt_with_password("pass-123456", &decoded).is_err());
+            }
+        }
+        for length in [0, 8, 69, 70, bytes.len() - 1] {
+            assert!(decode_vault(&bytes[..length]).is_err());
+        }
+        let mut extended = bytes.clone();
+        extended.push(0);
+        assert!(decode_vault(&extended).is_err());
+    }
 
     #[test]
     fn decrypts_with_correct_master_password() {
@@ -302,7 +308,7 @@ mod tests {
     fn rejects_tampered_ciphertext() {
         let data = VaultData::with_default_group();
         let (mut encrypted, _) = encrypt_with_password("pass-123456", &data).unwrap();
-        encrypted.ciphertext.push('A');
+        encrypted.ciphertext.push(b'A');
         assert!(decrypt_with_password("pass-123456", &encrypted).is_err());
     }
 
@@ -314,64 +320,28 @@ mod tests {
         assert_eq!(decrypted, data);
     }
 
-    /// 历史 vault：header 写的是 `"argon2-default"` 占位，实际用 Argon2::default 派生。
-    /// 这是用户机器上现存格式，必须能继续打开。
     #[test]
-    fn opens_legacy_default_argon2_vault() {
-        use argon2::Argon2;
-
-        let password = "pass-123456";
-        let data = VaultData::with_default_group();
-        let mut salt = [0u8; SALT_LEN];
-        OsRng.fill_bytes(&mut salt);
-
-        // 构造早期版本写出的 Argon2::default 派生 key
-        let mut legacy_key = [0u8; KEY_LEN];
-        Argon2::default()
-            .hash_password_into(password.as_bytes(), &salt, &mut legacy_key)
-            .unwrap();
-
-        // 构造早期版本写出的 header
-        let mut nonce = [0u8; NONCE_LEN];
-        OsRng.fill_bytes(&mut nonce);
-        let cipher = XChaCha20Poly1305::new_from_slice(&legacy_key).unwrap();
-        let plaintext = serde_json::to_vec(&data).unwrap();
-        let ciphertext = cipher
-            .encrypt(XNonce::from_slice(&nonce), plaintext.as_ref())
-            .unwrap();
-        let legacy_vault = EncryptedVault {
-            magic: MAGIC.to_string(),
-            version: VAULT_FORMAT_VERSION,
-            kdf: KdfHeader {
-                algorithm: KDF_ALGORITHM.to_string(),
-                params: KDF_PARAMS_LEGACY_TAG.to_string(),
-            },
-            aead: AEAD_ALGORITHM.to_string(),
-            salt: STANDARD.encode(salt),
-            nonce: STANDARD.encode(nonce),
-            ciphertext: STANDARD.encode(ciphertext),
-        };
-
-        let (decrypted, session) = decrypt_with_password(password, &legacy_vault).unwrap();
-        assert_eq!(decrypted, data);
-
-        // 解锁后用 session 重新写盘：header 必须仍能再次解锁（参数自洽）。
-        let rewritten = encrypt_with_session(&session, &data).unwrap();
-        let (decrypted_again, _) = decrypt_with_password(password, &rewritten).unwrap();
-        assert_eq!(decrypted_again, data);
-    }
-
-    #[test]
-    fn parses_known_kdf_param_strings() {
-        let p = KdfParams::parse("m=65536,t=3,p=1");
-        assert_eq!(p.m_cost_kib, 65536);
-        assert_eq!(p.t_cost, 3);
-        assert_eq!(p.parallelism, 1);
-
-        let legacy = KdfParams::parse("argon2-default");
-        assert_eq!(legacy.m_cost_kib, KDF_PARAMS_LEGACY_DEFAULT.m_cost_kib);
-
-        let unknown = KdfParams::parse("garbage-tag");
-        assert_eq!(unknown.m_cost_kib, KDF_PARAMS_LEGACY_DEFAULT.m_cost_kib);
+    fn rejects_unsupported_vault_versions_and_invalid_kdf_parameters() {
+        assert!(decode_vault(br#"{"magic":"RPVAULT","version":1}"#).is_err());
+        let (encrypted, _) =
+            encrypt_with_password_fast("pass-123456", &VaultData::with_default_group()).unwrap();
+        let bytes = encode_vault(&encrypted).unwrap();
+        for version in [0_u16, 1, 3, u16::MAX] {
+            let mut invalid = bytes.clone();
+            invalid[8..10].copy_from_slice(&version.to_le_bytes());
+            assert!(decode_vault(&invalid).is_err());
+        }
+        for (offset, value) in [
+            (10, 0_u32),
+            (10, 256 * 1024 + 1),
+            (14, 0),
+            (14, 11),
+            (18, 0),
+            (18, 17),
+        ] {
+            let mut invalid = bytes.clone();
+            invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert!(decode_vault(&invalid).is_err());
+        }
     }
 }

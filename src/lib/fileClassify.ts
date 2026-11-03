@@ -2,6 +2,9 @@ import type { RemoteFileEntry } from "../types";
 import { formatBeijingDateTimeHyphen } from "./format";
 import { getBaseName } from "./path";
 
+// Reuse the locale rules across O(n log n) comparisons in large directories.
+const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
 export type FileCategory =
   | "directory" | "archive" | "script" | "document" | "log" | "text"
   | "media" | "env" | "config" | "data" | "cert" | "binary" | "symlink" | "other";
@@ -50,7 +53,7 @@ export function compareEntryGroup(a: RemoteFileEntry, b: RemoteFileEntry): numbe
 }
 
 export function compareEntryName(a: RemoteFileEntry, b: RemoteFileEntry): number {
-  return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
+  return nameCollator.compare(a.name, b.name);
 }
 
 export function sortRemoteEntries(entries: RemoteFileEntry[]): RemoteFileEntry[] {
@@ -65,5 +68,5 @@ export function formatBeijingModifiedTime(value: string): string {
 export function comparePathName(a: string, b: string): number {
   const nameA = getBaseName(a) || a;
   const nameB = getBaseName(b) || b;
-  return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: "base" });
+  return nameCollator.compare(nameA, nameB);
 }

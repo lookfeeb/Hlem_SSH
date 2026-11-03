@@ -30,12 +30,21 @@ pub async fn terminal_write(
 
 #[tauri::command]
 pub async fn terminal_start(
-    app: AppHandle,
     state: State<'_, AppState>,
     terminal_id: String,
+    output: tauri::ipc::Channel<tauri::ipc::Response>,
 ) -> AppResult<()> {
     ensure_vault_unlocked(&state)?;
-    state.remote.terminal_start(&app, &terminal_id).await
+    state.remote.terminal_start(&terminal_id, output).await
+}
+
+#[tauri::command]
+pub async fn terminal_ack(
+    state: State<'_, AppState>,
+    terminal_id: String,
+    consumed: u64,
+) -> AppResult<()> {
+    state.remote.terminal_ack(&terminal_id, consumed).await
 }
 
 #[tauri::command]

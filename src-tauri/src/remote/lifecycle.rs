@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) async fn close_terminal_record(record: TerminalRecord) -> AppResult<()> {
     record.closed.store(true, Ordering::Release);
+    record.flow.close();
     let reader = lock_unpoisoned(&record.reader, "terminal reader registry").take();
     abort_and_join_task(reader, "terminal reader").await;
     let result = {

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { isTauriRuntime } from "./runtime";
 import { unknownErrorMessage } from "../lib/errors";
+import { recordPerformance } from "../lib/performanceMetrics";
 
 export type Unlisten = () => void;
 
@@ -23,13 +24,17 @@ export async function call<T>(
   const attempts = Math.max(1, (options.retries ?? 0) + 1);
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const started = performance.now();
     try {
-      return await withTimeout(
+      const result = await withTimeout(
         invoke<T>(command, args),
         options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
         command,
       );
+      recordPerformance(`ipc:${command}`, started);
+      return result;
     } catch (error) {
+      recordPerformance(`ipc:${command}`, started, false);
       lastError = error;
       if (attempt >= attempts || !isRetryableInvokeError(error)) break;
       await delay(RETRY_DELAY_MS * attempt);

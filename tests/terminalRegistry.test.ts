@@ -17,6 +17,20 @@ function entry(id: string, content: string): TerminalEntry {
   };
 }
 
+test("binary stderr chunks are not deduplicated and replay storage is byte bounded", () => {
+  const terminalId = "binary-replay";
+  const replayed: TerminalEntry[] = [];
+  try {
+    for (let index = 0; index < 80; index++) {
+      writeTerminalEntryDirect(terminalId, {...entry(String(index), ""), kind: "error", dataBytes: new Uint8Array(65536).fill(index)});
+    }
+    registerTerminalSink(terminalId, { writeEntry: (item) => replayed.push(item) });
+    assert.equal(replayed.length, 64);
+    assert.equal(replayed[0].dataBytes![0], 16);
+    assert.equal(replayed[63].dataBytes![0], 79);
+  } finally { forgetTerminalDirect(terminalId); }
+});
+
 test("terminal output remains replayable after an xterm sink is rebuilt", () => {
   const terminalId = "terminal-replay-after-remount";
   const firstSinkEntries: string[] = [];
@@ -65,7 +79,7 @@ test("terminal replay history is bounded", () => {
     for (let index = 0; index < 5000; index += 1) {
       writeTerminalEntryDirect(terminalId, {
         ...entry(`entry-${index}`, `${index}\n`),
-        dataBase64: "AA==",
+        dataBytes: new Uint8Array([0]),
       });
     }
     registerTerminalSink(terminalId, {
@@ -76,4 +90,23 @@ test("terminal replay history is bounded", () => {
   } finally {
     forgetTerminalDirect(terminalId);
   }
+});
+
+
+test("terminal credit follows parser consumption and is never replayed", () => {
+  const id = "terminal-consumption";
+  let credits = 0;
+  let consume: (() => void) | undefined;
+  const unlisten = registerTerminalSink(id, { writeEntry: (_entry, done) => { consume = done; } });
+  writeTerminalEntryDirect(id, entry("credit", "hello"), () => { credits++; });
+  assert.equal(credits, 0);
+  consume?.();
+  assert.equal(credits, 1);
+  unlisten();
+  registerTerminalSink(id, { writeEntry: (_entry, done) => { assert.equal(done, undefined); } });
+  assert.equal(credits, 1);
+  forgetTerminalDirect(id);
+  writeTerminalEntryDirect(id, entry("unmounted", "saved"), () => { credits++; });
+  assert.equal(credits, 2);
+  forgetTerminalDirect(id);
 });

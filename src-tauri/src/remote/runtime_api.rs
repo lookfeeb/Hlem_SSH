@@ -259,6 +259,14 @@ impl RemoteRuntime {
     }
 
     pub async fn api_session_status(&self, session_id: &str) -> (bool, bool) {
+        self.api_session_status_for(session_id, true).await
+    }
+
+    pub async fn api_session_status_for(
+        &self,
+        session_id: &str,
+        require_sftp: bool,
+    ) -> (bool, bool) {
         let connection_id = {
             let connections = self.connections.read().await;
             connections
@@ -274,6 +282,9 @@ impl RemoteRuntime {
         let Some(connection_id) = connection_id else {
             return (false, false);
         };
+        if !require_sftp {
+            return (true, false);
+        }
         let sftp_available = self.sftp_sessions.read().await.values().any(|record| {
             record.info.connection_id == connection_id && !record.closed.load(Ordering::Acquire)
         });

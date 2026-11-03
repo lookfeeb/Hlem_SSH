@@ -88,7 +88,8 @@ impl VaultStore {
                 self.upgrade_to_fast_kdf_if_needed();
                 Ok(AutoOpenResult::Ready)
             }
-            Err(_) => Ok(AutoOpenResult::NeedsMigration),
+            Err(AppError::InvalidMasterPassword) => Ok(AutoOpenResult::NeedsMigration),
+            Err(error) => Err(error),
         }
     }
 
@@ -164,7 +165,8 @@ impl VaultStore {
     pub fn unlock(&mut self, master_password: &str) -> AppResult<ConfigSnapshot> {
         let encrypted = read_encrypted(&self.path)?;
         let (mut data, crypto) = crypto::decrypt_with_password(master_password, &encrypted)?;
-        if migrate_vault_data(&mut data) {
+        let migrated_data = migrate_vault_data(&mut data);
+        if migrated_data {
             let encrypted = crypto::encrypt_with_session(&crypto, &data)?;
             write_encrypted(&self.path, &encrypted)?;
         }
@@ -496,6 +498,20 @@ impl VaultStore {
             .ok_or_else(|| AppError::NotFound(format!("会话 {}", session_id)))
     }
 
+    pub fn ensure_session_exists(&self, session_id: &str) -> AppResult<()> {
+        if self
+            .unlocked()?
+            .data
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id)
+        {
+            Ok(())
+        } else {
+            Err(AppError::NotFound(format!("会话 {}", session_id)))
+        }
+    }
+
     pub fn known_host(&self, host: &str, port: u16) -> AppResult<Option<KnownHostEntry>> {
         Ok(self
             .unlocked()?
@@ -743,12 +759,11 @@ fn read_backup_payload(path: &Path) -> AppResult<Vec<u8>> {
 }
 
 fn read_encrypted_bytes(bytes: &[u8]) -> AppResult<EncryptedVault> {
-    Ok(serde_json::from_slice(bytes)?)
+    crypto::decode_vault(bytes)
 }
 
 fn write_encrypted(path: &Path, encrypted: &EncryptedVault) -> AppResult<()> {
-    let content = serde_json::to_string_pretty(encrypted)?;
-    write_atomic(path, content.as_bytes())
+    write_atomic(path, &crypto::encode_vault(encrypted)?)
 }
 
 fn backup_decrypt_error(error: AppError) -> AppError {
@@ -821,6 +836,20 @@ mod tests {
     use super::*;
     use crate::config::AppSettings;
     use crate::config::{AuthConfig, TerminalOptions};
+
+    #[test]
+    fn unsupported_workspace_is_reported_without_password_migration_or_overwrite() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("workspace.rpvault");
+        let old = br#"{"magic":"RPVAULT","version":1}"#;
+        fs::write(&path, old).unwrap();
+        let mut store = VaultStore::new(path.clone());
+        assert!(matches!(store.auto_open(), Err(AppError::Crypto(_))));
+        assert_eq!(fs::read(&path).unwrap(), old);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(store.backup_import_bytes(old).is_err());
+        assert_eq!(fs::read(&path).unwrap(), old);
+    }
 
     fn store_path() -> PathBuf {
         tempdir().unwrap().keep().join(VAULT_FILE_NAME)

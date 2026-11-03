@@ -4,8 +4,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-
 use crate::errors::{AppError, AppResult};
 
 const BROKER_ARG: &str = "--helm-direct-broker";
@@ -30,12 +28,7 @@ pub fn run_from_args_if_requested() -> bool {
     let target_port = args.next().and_then(|value| value.parse::<u16>().ok());
     let target_process_id = args.next().and_then(|value| value.parse::<u32>().ok());
     let token = args.next().and_then(|value| hex::decode(value).ok());
-    let target_host = args.next().and_then(|value| {
-        URL_SAFE_NO_PAD
-            .decode(value)
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-    });
+    let target_host = args.next();
 
     if let (
         Some(callback_port),
@@ -355,7 +348,7 @@ fn spawn_broker(
         target_port.to_string(),
         std::process::id().to_string(),
         hex::encode(token),
-        URL_SAFE_NO_PAD.encode(target_host.as_bytes()),
+        target_host.to_string(),
     ];
     match spawn_with_shell_parent(&executable, &args) {
         Ok(pid) => Ok(pid),

@@ -4,23 +4,15 @@
 @import "./styles/top-bar.css";
 
 @import "./styles/modals/modal-base.css";
-@import "./styles/modals/modal-about.css";
-@import "./styles/modals/modal-settings.css";
-@import "./styles/modals/modal-tunnel.css";
-@import "./styles/modals/modal-backup.css";
-@import "./styles/modals/modal-ai.css";
-@import "./styles/modals/modal-logs.css";
 
 
 @import "./styles/workspace.css";
 @import "./styles/terminal.css";
 
 @import "./styles/file-manager/fm-layout.css";
-@import "./styles/file-manager/fm-editor.css";
 @import "./styles/file-manager/fm-table.css";
 @import "./styles/file-manager/fm-commands.css";
 @import "./styles/file-manager/fm-entries.css";
 @import "./styles/file-manager/fm-tree.css";
 
-@import "./styles/session-config.css";
 @import "./styles/overrides.css";

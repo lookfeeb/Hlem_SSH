@@ -77,6 +77,8 @@ pub enum AppError {
     TransferNeedsOverwrite(String),
     #[error("远程错误: {0}")]
     Remote(String),
+    #[error("{0}")]
+    ApiPortInUse(String),
     #[error("文件错误: {0}")]
     Io(String),
     #[error("加密错误: {0}")]

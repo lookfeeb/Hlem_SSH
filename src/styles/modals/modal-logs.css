@@ -1,355 +1,141 @@
-/* ─── AI API 日志行 ─────────────────────────────────────────────────────── */
-.aiApiLogItem {
-  display: grid;
-  grid-template-columns: 56px 90px minmax(0, 1fr) 48px 20px;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  font-size: 11.5px;
-  border-bottom: 1px solid #f1f5f9;
-  transition: background .15s;
-}
-
-.aiApiLogItem:last-child {
-  border-bottom: none;
-}
-
-.aiApiLogItem-ok:hover {
-  background: rgba(99, 102, 241, .04);
-}
-
-.aiApiLogItem-err {
-  background: rgba(239, 68, 68, .03);
-}
-
-.aiApiLogItem-err:hover {
-  background: rgba(239, 68, 68, .06);
-}
-
-.aiApiLogTime {
-  color: #94a3b8;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10.5px;
-}
-
-.aiApiLogAction {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  padding: 2px 8px;
-  border-radius: 4px;
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  letter-spacing: .3px;
-}
-
-.aiApiLogAction-exec { background: #dbeafe; color: #1d4ed8; }
-.aiApiLogAction-upload { background: #dcfce7; color: #166534; }
-.aiApiLogAction-files { background: #fef3c7; color: #92400e; }
-.aiApiLogAction-download { background: #e0e7ff; color: #3730a3; }
-
-.aiApiLogDetail {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #334155;
-}
-
-.aiApiLogItem-err .aiApiLogDetail {
-  color: #dc2626;
-}
-
-.aiApiLogDuration {
-  text-align: right;
-  color: #94a3b8;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-}
-
-
-/* ─── Detached Log Window ───────────────────────────────────────────────── */
 .logWindow {
+  --log-border: #e5eaf4;
+  --log-muted: #7d8ca8;
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  background: #f8fafc;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-.logWindowHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 16px 20px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-  border-bottom: 1px solid #e2e8f0;
-  flex-shrink: 0;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, .04);
-}
-
-.logWindowTitle {
-  font-size: 15px;
-  font-weight: 700;
-  color: #1e293b;
-  letter-spacing: -.3px;
-}
-
-.logWindowHeaderRight {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.logWindowCount {
-  font-size: 11.5px;
-  color: #64748b;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: #f1f5f9;
-  border: 1px solid #e2e8f0;
-  font-weight: 500;
-}
-
-.logWindowBody {
-  flex: 1;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, .3) transparent;
-}
-
-.logWindowBody::-webkit-scrollbar {
-  width: 6px;
-}
-
-.logWindowBody::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, .3);
-  border-radius: 3px;
-}
-
-.logWindowBody::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, .5);
-}
-
-.logWindowEmpty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  min-height: 200px;
-}
-
-.logWindowList {
-  padding: 4px 0;
-}
-
-.logWindowList .aiApiLogItem {
-  padding: 9px 20px;
-  border-radius: 0;
-}
-
-.logWindowList .aiApiLogItem:hover {
-  background: rgba(99, 102, 241, .04);
-}
-
-.logWindowList .aiApiLogItem-err:hover {
-  background: rgba(239, 68, 68, .06);
-}
-
-/* ─── Log Detail Modal (click to open) ─────────────────────────────────── */
-.logDetailModal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 200;
-  background: rgba(15, 23, 42, .35);
-  backdrop-filter: blur(2px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  animation: logPopoverIn .15s ease-out;
-}
-
-.logDetailModal {
-  width: 90%;
-  max-width: 580px;
-  max-height: 70vh;
-  background: #ffffff;
-  border-radius: 14px;
-  box-shadow: 0 24px 64px -16px rgba(15, 23, 42, .28), 0 8px 20px -8px rgba(15, 23, 42, .1);
-  padding: 24px 28px 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
+  gap: 20px;
+  height: 100dvh;
+  padding: 24px 26px 22px;
   overflow: hidden;
+  color: #33435e;
+  background: linear-gradient(135deg, #f8faff 0%, #fff 54%, #f7f9fd 100%);
+  font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
 }
-
-.logDetailModalHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-bottom: 10px;
-  border-bottom: 1px solid #f1f5f9;
+.logWindowHeader { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-shrink: 0; }
+.logWindowHeading { flex-shrink: 0; }
+.logWindowHeading h1 { margin: 0; font-size: 20px; line-height: 1.4; font-weight: 650; color: #1c2a42; letter-spacing: .2px; }
+.logWindowHeading p { margin: 6px 0 0; font-size: 12px; color: #76849e; }
+.logWindowTools { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; flex: 1; }
+.logWindowSearch.ant-input-affix-wrapper { flex: 1; max-width: 340px; min-width: 140px; height: 38px; padding-inline: 12px; border-color: var(--log-border); box-shadow: 0 2px 5px #24375704; background: #ffffffc9; }
+.logWindowSearch .ant-input-prefix { color: #8192af; margin-right: 9px; }
+.logWindowSearch input::placeholder { color: #8d9bb3; font-size: 12px; }
+.logWindowTools > .ant-btn { height: 36px; flex-shrink: 0; color: #61708d; }
+.logWindowTools > .logFilterButton { padding-inline: 14px; border-color: var(--log-border); color: #465673; height: 38px; }
+.logWindowTools > .logFilterButton.is-active { color: #3069e8; background: #edf3ff; border-color: #c8d9ff; }
+.logWindowCount { padding: 8px 14px; border-radius: 9px; color: #306cf0; background: #edf3ff; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.logWindowTools > .is-copied { color: #16a778; }
+.logWindowError { flex-shrink: 0; }
+.logWindowCopyError { color: #c4404e; font-size: 12px; }
+.logFilterForm { display: grid; grid-template-columns: 1fr; gap: 8px; width: 240px; padding: 4px; }
+.logFilterHeading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 3px; }
+.logFilterForm > label { font-size: 12px; color: #687993; }
+.logFilterForm .ant-select { width: 100%; margin-bottom: 6px; }
+.logWindowTableCard { flex: 1; min-height: 0; border: 1px solid var(--log-border); border-radius: 10px; overflow: hidden; background: #ffffffc7; box-shadow: 0 3px 10px #24375705; }
+.logWindowTableScroll { height: 100%; overflow: auto; scrollbar-width: thin; }
+.logWindowTable { width: 100%; min-width: 590px; border-spacing: 0; table-layout: fixed; text-align: left; }
+.logColExpand { width: 38px; }
+.logColTime { width: 144px; }
+.logColType { width: 146px; }
+.logColStatus { width: 94px; }
+.logColDuration { width: 92px; }
+.logWindowTable thead { position: sticky; top: 0; z-index: 1; }
+.logWindowTable th { height: 46px; padding: 0 12px; font-size: 12px; color: #53637f; font-weight: 600; background: #fafbff; border-bottom: 1px solid var(--log-border); white-space: nowrap; }
+.logWindowTable td { height: 48px; padding: 0 12px; border-bottom: 1px solid #edf0f7; font-size: 12px; }
+.logWindowTable td:first-child, .logWindowTable th:first-child { padding: 0 4px 0 8px; }
+.logWindowTable tbody tr { cursor: pointer; transition: background .12s; }
+.logWindowTable tbody tr:last-child td { border-bottom: 0; }
+.logWindowTable tbody tr:hover { background: #f3f7ff; }
+.logWindowTable tbody tr.is-selected { background: #eaf1ff; }
+.logWindowTable tbody tr:focus-within { background: #f0f5ff; }
+.logOpenDetail.ant-btn { width: 24px; min-width: 24px; height: 28px; color: #7687a4; font-size: 11px; }
+.logOpenDetail:focus-visible { outline: 2px solid #3973f6; outline-offset: 1px; }
+.logTimeCell { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.logCommandPreview { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #40516d; }
+.logTypeBadge { display: inline-block; max-width: 100%; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-radius: 5px; padding: 2px 7px; font-size: 10px; line-height: 1.6; font-weight: 650; }
+.logTypeBadge-blue { color: #306cf0; background: #eaf1ff; }
+.logTypeBadge-green { color: #138969; background: #e5f7f0; }
+.logTypeBadge-purple { color: #7654bd; background: #f0eafa; }
+.logTypeBadge-amber { color: #a66b19; background: #fff4db; }
+.logStatus { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; color: #526079; font-size: 12px; }
+.logStatus > i { height: 7px; width: 7px; border-radius: 50%; flex-shrink: 0; }
+.logStatus.is-success > i { background: #1fb287; box-shadow: 0 0 0 3px #1fb2870c; }
+.logStatus.is-error > i { background: #e05c68; box-shadow: 0 0 0 3px #e05c680c; }
+.logStatus.is-success > .anticon { color: #1aaf82; }
+.logStatus.is-error > .anticon { color: #de5965; }
+.logDurationCell { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.logDurationCell > span { padding-left: 2px; color: #7c8aa1; font-size: 11px; }
+.logWindowEmpty { min-height: 250px; height: calc(100% - 46px); display: flex; align-items: center; justify-content: center; }
+.logEmptyHint { font-size: 12px; color: var(--log-muted); }
+.logLoadingSpace { width: 200px; height: 120px; }
+.logWindowFooter { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-shrink: 0; min-height: 62px; padding: 12px 16px; border: 1px solid var(--log-border); border-radius: 10px; background: #ffffffb8; box-shadow: 0 3px 10px #24375704; }
+.logWindowSummary { display: flex; gap: 18px; align-items: center; font-size: 12px; white-space: nowrap; }
+.logLiveStatus { display: inline-flex; align-items: center; gap: 6px; color: var(--log-muted); font-size: 11px; }
+.logLiveStatus i { width: 6px; height: 6px; border-radius: 50%; background: #bdc6d6; }
+.logLiveStatus i.is-live { background: #23b58a; }
+.logWindowFooter .ant-pagination { margin: 0; }
+.logWindowFooter .ant-pagination-item { font-size: 12px; min-width: 30px; }
+.logWindowFooter .ant-pagination-item-active { background: #edf3ff; border-color: #edf3ff; }
+.logWindowFooter .ant-pagination-prev, .logWindowFooter .ant-pagination-next { background: #fff; border: 1px solid #edf0f7; border-radius: 7px; }
+.ant-modal-mask.logDetailMask { background: #263b6026 !important; backdrop-filter: none; }
+.logDetailModal .ant-modal-container { padding: 0; overflow: hidden; border: 1px solid #dde5f2; border-radius: 14px; box-shadow: 0 20px 60px #2036542b, 0 3px 10px #20365414; }
+.logDetailModal .ant-modal-header { padding: 20px 24px 18px; margin: 0; background: linear-gradient(110deg, #f8faff, #fcfdff); border-bottom: 1px solid #e5eaf4; }
+.logDetailModal .ant-modal-title { color: #1e2b43; font-size: 17px; font-weight: 650; }
+.logDetailTitle { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-right: 30px; }
+.logDetailTitle .ant-btn { color: #7182a0; font-size: 12px; font-weight: 400; }
+.logDetailModal .ant-modal-close { top: 18px; right: 18px; color: #7687a2; }
+.logDetailBody { display: flex; flex-direction: column; gap: 20px; max-height: calc(100dvh - 150px); overflow: auto; padding: 22px 24px; scrollbar-width: thin; }
+.logDetailSection { min-width: 0; }
+.logResponseHeading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.logDetailSection .logResponseHeading h2 { margin-bottom: 0; }
+.logResponseOutputs { display: flex; flex-direction: column; gap: 10px; }
+.logResponseHeading .ant-segmented { font-size: 11px; }
+.logDetailSection h2 { display: flex; align-items: center; gap: 9px; margin: 0 0 12px; font-size: 13px; font-weight: 600; color: #34445f; }
+.logDetailSection h2::before { content: ""; width: 3px; height: 14px; background: #3973f6; border-radius: 2px; }
+.logDetailFacts { display: grid; grid-template-columns: 1.3fr 1.3fr .9fr .9fr; margin: 0; border: 1px solid #e5eaf4; border-radius: 9px; background: #fafbff; }
+.logDetailFacts > div { min-width: 0; padding: 13px 12px; border-right: 1px solid #e9edf5; }
+.logDetailFacts > div:last-child { border-right: 0; }
+.logDetailFacts dt { display: flex; align-items: center; gap: 7px; color: #7786a0; font-size: 11px; margin-bottom: 9px; }
+.logDetailFacts dd { margin: 0; color: #34445f; font-size: 12px; line-height: 1.6; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.logDetailFacts .logTypeBadge { white-space: normal; overflow-wrap: anywhere; }
+.logDetailUnit { font-size: 11px; color: #7c8aa1; margin-left: 3px; }
+.logCodeBlock { border: 1px solid #263247; border-radius: 9px; background: #202a3a; overflow: hidden; box-shadow: 0 2px 5px #1c293510; }
+.logCodeToolbar { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px 4px 15px; }
+.logCodeToolbar > span { color: #9aabc2; font: 10px/1.5 "Segoe UI", sans-serif; letter-spacing: 1px; }
+.logCodeToolbar .ant-btn { color: #b1bfd2; font-size: 11px; height: 24px; padding-inline: 7px; }
+.logCodeToolbar .ant-btn:not(:disabled):hover { color: #fff; background: #ffffff12; }
+.logCodeToolbar .ant-btn:disabled { color: #8994a4; }
+.logCodeBlock pre { margin: 0; padding: 7px 15px 17px; max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: #e0e7f1; font: 12px/1.7 Consolas, "Cascadia Code", "Microsoft YaHei", monospace; tab-size: 2; scrollbar-width: thin; scrollbar-color: #52627b transparent; }
+.logCodeBlock pre:focus-visible { outline: 2px solid #80aaff; outline-offset: -3px; }
+.logCodeBlock.is-response pre { max-height: 300px; min-height: 84px; }
+.logSyntax-key { color: #c9d7ed; }
+.logSyntax-string { color: #a5d69c; }
+.logSyntax-number { color: #edc58e; }
+.logSyntax-literal { color: #80c3e8; }
+@media (max-width: 900px) {
+  .logWindow { padding: 20px; gap: 16px; }
+  .logWindowHeader { flex-wrap: wrap; gap: 16px; }
+  .logWindowHeading { width: 100%; display: flex; align-items: baseline; gap: 14px; }
+  .logWindowHeading p { margin: 0; }
+  .logWindowTools { width: 100%; }
+  .logWindowSearch.ant-input-affix-wrapper { max-width: none; }
+  .logColTime { width: 132px; }
+  .logColType { width: 128px; }
+  .logColStatus { width: 76px; }
+  .logColDuration { width: 74px; }
+  .logWindowSummary { gap: 10px; }
 }
-
-.logDetailModalTitle {
-  font-size: 14px;
-  font-weight: 700;
-  color: #1e293b;
-  letter-spacing: -.2px;
+@media (max-width: 680px) {
+  .logWindow { padding: 14px; gap: 12px; }
+  .logWindowTools { gap: 6px; }
+  .logWindowCount { padding: 8px 9px; font-size: 12px; }
+  .logWindowFooter { padding: 10px 12px; gap: 8px; flex-wrap: wrap; }
+  .logWindowFooter .ant-pagination { margin-left: auto; }
+  .logLiveStatus { display: none; }
+  .logDetailBody { padding: 18px; gap: 18px; }
+  .logDetailFacts { grid-template-columns: 1fr 1fr; }
+  .logDetailFacts > div:nth-child(2) { border-right: 0; }
+  .logDetailFacts > div:nth-child(-n+2) { border-bottom: 1px solid #e9edf5; }
 }
-
-.logDetailModalClose {
-  cursor: pointer;
-  color: #94a3b8;
-  font-size: 13px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  transition: color .15s, background .15s, transform .1s;
-}
-
-.logDetailModalClose:hover {
-  color: #ef4444;
-  background: rgba(239, 68, 68, .08);
-}
-
-.logDetailModalClose:active {
-  transform: scale(.85);
-}
-
-@keyframes logPopoverIn {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.logDetailSection {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-height: 0;
-}
-
-.logDetailSection:last-of-type {
-  flex: 1;
-  overflow: hidden;
-}
-
-.logDetailLabel {
-  font-size: 11px;
-  font-weight: 600;
-  color: #64748b;
-  text-transform: uppercase;
-  letter-spacing: .5px;
-}
-
-.logDetailLabelRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.logDetailCommand {
-  margin: 0;
-  font-size: 12.5px;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
-  color: #1e293b;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 8px 12px;
-  line-height: 1.4;
-  white-space: pre-wrap;
-  word-break: break-all;
-  display: flex;
-  align-items: center;
-  resize: none;
-  overflow: hidden;
-}
-
-.logDetailResponse {
-  margin: 0;
-  font-size: 12px;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
-  color: #334155;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 10px 12px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  line-height: 1.6;
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-.logDetailCommand::-webkit-scrollbar,
-.logDetailResponse::-webkit-scrollbar {
-  width: 5px;
-}
-
-.logDetailCommand::-webkit-scrollbar-thumb,
-.logDetailResponse::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, .3);
-  border-radius: 3px;
-}
-
-.logDetailCommand::-webkit-scrollbar-thumb:hover,
-.logDetailResponse::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, .5);
-}
-
-.logDetailMeta {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  font-size: 11.5px;
-  color: #94a3b8;
-  padding-top: 10px;
-  border-top: 1px solid #f1f5f9;
-  font-family: "JetBrains Mono", "Fira Code", monospace;
-  flex-shrink: 0;
-}
-
-.logDetailMetaOk {
-  color: #10b981;
-  font-weight: 600;
-}
-
-.logDetailMetaErr {
-  color: #ef4444;
-  font-weight: 600;
-}
-
-.aiApiLogCopy {
-  opacity: 0;
-  cursor: pointer;
-  color: #94a3b8;
-  font-size: 12px;
-  transition: opacity .15s, color .15s, transform .1s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.aiApiLogItem:hover .aiApiLogCopy {
-  opacity: 1;
-}
-
-.aiApiLogCopy:hover {
-  color: #6366f1;
-  transform: scale(1.15);
-}
-
-.aiApiLogCopy:active {
-  transform: scale(.9);
-}
-
-.aiApiLogCopy-done {
-  opacity: 1;
-  color: #10b981;
+@media (prefers-reduced-motion: reduce) {
+  .logWindowTable tbody tr { transition: none; }
 }

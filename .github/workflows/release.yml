@@ -291,7 +291,7 @@ jobs:
             padding: crypto.constants.RSA_PKCS1_PSS_PADDING,
             saltLength: 32,
           });
-          fs.writeFileSync(path.join(releaseDir, "latest.json.sig"), `${signature.toString("base64")}\n`, "utf8");
+          fs.writeFileSync(path.join(releaseDir, "latest.json.sig.bin"), signature);
           '@ | Set-Content sign-update.cjs
           node sign-update.cjs
 

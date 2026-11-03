@@ -1,3 +1,4 @@
+import "../styles/file-manager/fm-editor.css";
 import {
   CheckCircleFilled,
   CloseCircleOutlined,

@@ -5,15 +5,6 @@ import type { RemoteSession, SessionConfig, SessionInput, TerminalEntry } from "
 
 export { getHostKeyPayload } from "../lib/configMapping";
 
-const CWD_TRACKING_ECHO_FRAGMENTS = [
-  "HELM_CWD_HOOK",
-  "__helm_emit_cwd",
-  "777;cwd",
-  "PROMPT_COMMAND",
-  "add-zsh-hook precmd",
-  "precmd_functions",
-];
-
 export function sessionConfigToInput(config: SessionConfig): SessionInput {
   return {
     name: config.name,
@@ -70,19 +61,6 @@ export function uploadConcurrency(count: number) {
   if (count <= 3) return Math.min(count, 2);
   if (count <= 8) return Math.min(count, Math.max(2, Math.floor(cores / 2)));
   return Math.min(12, Math.max(4, Math.floor(cores * 0.75)));
-}
-
-export function stripCwdMarkers(data: string) {
-  let cwd: string | null = null;
-  const withoutMarkers = data.replace(/\x1b\]777;cwd=([^\x07]*)\x07/g, (_, value: string) => {
-    cwd = value;
-    return "";
-  });
-  const withoutCommandEcho = withoutMarkers
-    .split(/(\r?\n)/)
-    .filter((chunk) => !CWD_TRACKING_ECHO_FRAGMENTS.some((fragment) => chunk.includes(fragment)))
-    .join("");
-  return { data: withoutCommandEcho, cwd };
 }
 
 export function extractPromptCwd(data: string, username: string, loginPath?: string | null) {

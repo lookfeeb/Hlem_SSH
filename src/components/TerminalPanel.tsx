@@ -12,6 +12,8 @@ import { getErrorMessage } from "../lib/configMapping";
 import { useAnimationFrameRegistry } from "../lib/reactLifecycle";
 import { registerTerminalSink } from "../lib/terminalRegistry";
 import { TerminalViewportFollower } from "../lib/terminalViewportFollow";
+import { extractPromptCwd } from "../app/appHelpers";
+import { recordPerformance } from "../lib/performanceMetrics";
 import type { RemoteSession, TerminalEntry } from "../types";
 
 interface TerminalPanelProps {
@@ -22,6 +24,7 @@ interface TerminalPanelProps {
   onSendData: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
   onClear: () => void;
+  onCwd: (cwd: string) => void;
 }
 
 type AppliedTerminalState = {
@@ -29,7 +32,7 @@ type AppliedTerminalState = {
   offsets: Map<string, number>;
 };
 
-function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendData, onResize, onClear }: TerminalPanelProps) {
+function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendData, onResize, onClear, onCwd }: TerminalPanelProps) {
   const [contextMenu, setContextMenu] = useState<{ selectedText: string } | null>(null);
   const [commandInputValue, setCommandInputValue] = useState("");
   const requestSafeAnimationFrame = useAnimationFrameRegistry();
@@ -49,6 +52,10 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
   const sendDataRef = useRef(onSendData);
   const resizeRef = useRef(onResize);
   const clearRef = useRef(onClear);
+  const cwdContextRef = useRef({ username: session.username, loginPath: session.loginPath, onCwd });
+  cwdContextRef.current = { username: session.username, loginPath: session.loginPath, onCwd };
+  const inputStartedRef = useRef<number | null>(null);
+  const pendingConsumptionRef = useRef(new Set<() => void>());
   const terminalAvailable = session.state === "connected" && Boolean(session.terminalId);
   const terminalAvailableRef = useRef(terminalAvailable);
 
@@ -112,15 +119,29 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
   }
 
   function prepareTerminalForInput() {
+    inputStartedRef.current = performance.now();
     viewportFollowerRef.current?.detach(terminalIdRef.current);
     terminalRef.current?.scrollToBottom();
   }
 
-  function writeOutputToTerminal(terminal: XtermTerminal, content: TerminalWriteData) {
+  function writeOutputToTerminal(terminal: XtermTerminal, content: TerminalWriteData, onConsumed?: () => void) {
     const terminalId = terminalIdRef.current;
+    const received = performance.now();
+    const consume = () => {
+      if (pendingConsumptionRef.current.delete(consume)) onConsumed?.();
+    };
+    if (onConsumed) pendingConsumptionRef.current.add(consume);
     writeTerminalData(terminal, content, {
       shouldForceFollow: () => viewportFollowerRef.current?.shouldFollow(terminalId) ?? false,
-      onWriteComplete: () => viewportFollowerRef.current?.handleWriteComplete(terminalId),
+      onWriteComplete: () => {
+        consume();
+        recordPerformance("terminal:parse", received);
+        if (inputStartedRef.current !== null) {
+          recordPerformance("terminal:input-to-next-output", inputStartedRef.current);
+          inputStartedRef.current = null;
+        }
+        viewportFollowerRef.current?.handleWriteComplete(terminalId);
+      },
     });
   }
 
@@ -174,6 +195,17 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
       });
     }));
     terminal.open(host);
+    const cwdMarker = terminal.parser.registerOscHandler(777, (data) => {
+      if (!data.startsWith("cwd=")) return false;
+      cwdContextRef.current.onCwd(data.slice(4));
+      return true;
+    });
+    const parsed = terminal.onWriteParsed(() => {
+      if (terminal.buffer.active.type === "alternate") return;
+      const context = cwdContextRef.current;
+      const cwd = extractPromptCwd(terminalPromptTail(terminal), context.username, context.loginPath);
+      if (cwd) context.onCwd(cwd);
+    });
     const viewportFollower = new TerminalViewportFollower(
       () => terminalRef.current?.scrollToBottom(),
       {
@@ -233,9 +265,14 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     return () => {
       resizeObserver.disconnect();
       dataDisposable.dispose();
+      cwdMarker.dispose();
+      parsed.dispose();
       host.removeEventListener("wheel", handleViewportWheel);
       host.removeEventListener("pointerdown", handleViewportPointerDown);
       viewportFollower.dispose();
+      // The replay registry owns these bytes after the renderer goes away.
+      // Release its outstanding credit even if xterm drops queued callbacks.
+      for (const consume of pendingConsumptionRef.current) consume();
       terminal.dispose();
       terminalRef.current = null;
       viewportFollowerRef.current = null;
@@ -257,7 +294,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     const terminal = terminalRef.current;
     webglAddonRef.current?.dispose();
     webglAddonRef.current = null;
-    if (!terminal || !webglEnabled) return;
+    if (!terminal || !webglEnabled || !active) return;
     let disposed = false;
     void import("@xterm/addon-webgl")
       .then(({ WebglAddon }) => {
@@ -284,7 +321,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
       webglAddonRef.current?.dispose();
       webglAddonRef.current = null;
     };
-  }, [webglEnabled]);
+  }, [webglEnabled, active]);
 
   useEffect(() => {
     if (!active) {
@@ -333,7 +370,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     const terminal = terminalRef.current;
     if (!terminal || !session.terminalId) return;
     return registerTerminalSink(session.terminalId, {
-      writeEntry: (entry) => writeOutputToTerminal(terminal, terminalEntryData(entry)),
+      writeEntry: (entry, onConsumed) => writeOutputToTerminal(terminal, terminalEntryData(entry), onConsumed),
       clear: () => terminal.clear(),
       reset: () => terminal.reset(),
     });
@@ -436,8 +473,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     if (!activeRef.current || !terminalAvailableRef.current) return;
     const command = commandInputValue.trim();
     if (command) {
-      prepareTerminalForInput();
-      sendDataRef.current(`${command}\r`);
+      terminalRef.current?.input(`${command}\r`, true);
     }
     setCommandInputValue("");
     requestSafeAnimationFrame(leaveCommandInput);
@@ -459,8 +495,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     if ((event.key === "ArrowUp" || event.key === "ArrowDown") && commandInputValue.length === 0) {
       event.preventDefault();
       if (activeRef.current && terminalAvailableRef.current) {
-        prepareTerminalForInput();
-        sendDataRef.current(event.key === "ArrowUp" ? "\x1b[A" : "\x1b[B");
+        terminalRef.current?.input(event.key === "ArrowUp" ? "\x1b[A" : "\x1b[B", true);
       }
       leaveCommandInput();
     }
@@ -524,6 +559,8 @@ export const TerminalPanel = memo(TerminalPanelView, (previous, next) => (
   previous.session.id === next.session.id &&
   previous.session.state === next.session.state &&
   previous.session.terminalId === next.session.terminalId &&
+  previous.session.username === next.session.username &&
+  previous.session.loginPath === next.session.loginPath &&
   previous.session.connectionNotice === next.session.connectionNotice &&
   previous.session.terminal === next.session.terminal
 ));
@@ -534,10 +571,10 @@ type TerminalWriteOptions = {
 };
 
 function writeTerminalData(terminal: XtermTerminal, content: TerminalWriteData, options: TerminalWriteOptions = {}) {
-  const shouldStickToBottom = isTerminalAtBottom(terminal) || shouldFollowTerminalOutput(content);
+  const shouldStickToBottom = isTerminalAtBottom(terminal) || hasBareCarriageReturn(content);
   terminal.write(content, () => {
-    terminal.refresh(0, terminal.rows - 1);
-    if (shouldStickToBottom || options.shouldForceFollow?.()) terminal.scrollToBottom();
+    if (shouldStickToBottom || terminal.buffer.active.type === "alternate" ||
+        hasInteractiveTerminalMarker(terminalPromptTail(terminal)) || options.shouldForceFollow?.()) terminal.scrollToBottom();
     options.onWriteComplete?.();
   });
 }
@@ -545,7 +582,7 @@ function writeTerminalData(terminal: XtermTerminal, content: TerminalWriteData, 
 type TerminalWriteData = string | Uint8Array;
 
 function terminalEntryData(entry: TerminalEntry): TerminalWriteData {
-  if (entry.dataBase64) return decodeBase64Bytes(entry.dataBase64);
+  if (entry.dataBytes) return entry.dataBytes;
   if (entry.kind === "system") {
     if (entry.content === "连接已断开") {
       return `\r\n\x1b[31m${entry.timestamp} ${entry.content}\x1b[0m\r\n`;
@@ -561,15 +598,6 @@ function terminalEntryData(entry: TerminalEntry): TerminalWriteData {
   return entry.content;
 }
 
-function decodeBase64Bytes(value: string) {
-  const binary = window.atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
-
 function terminalEntryDataLength(value: TerminalWriteData) {
   return typeof value === "string" ? value.length : value.length;
 }
@@ -583,27 +611,20 @@ function isTerminalAtBottom(terminal: XtermTerminal) {
   return buffer.viewportY >= Math.max(0, buffer.baseY - 1);
 }
 
-function shouldFollowTerminalOutput(value: TerminalWriteData) {
-  const text = terminalWriteDataText(value);
-  return hasFullScreenTerminalControl(text) || hasInteractiveTerminalMarker(text) || /\r(?!\n)/.test(text);
-}
-
-function terminalWriteDataText(value: TerminalWriteData) {
-  if (typeof value === "string") return value;
-  try {
-    return new TextDecoder().decode(value);
-  } catch (error) {
-    console.debug("[helm] failed to decode terminal write data:", error);
-    return "";
+function terminalPromptTail(terminal: XtermTerminal) {
+  const buffer = terminal.buffer.active;
+  const end = buffer.baseY + buffer.cursorY;
+  const lines: string[] = [];
+  // Reuse xterm's decoded screen. Work is bounded regardless of output size.
+  for (let index = Math.max(0, end - 7); index <= end; index++) {
+    lines.push(buffer.getLine(index)?.translateToString(true) ?? "");
   }
+  return lines.join("\n").slice(-8192);
 }
 
-function hasAlternateScreenEnter(text: string) {
-  return /\x1b\[\?(?:47|1047|1049)h/.test(text);
-}
-
-function hasFullScreenTerminalControl(text: string) {
-  return hasAlternateScreenEnter(text) || /\x1b\[\d+;\d+[Hf]/.test(text);
+function hasBareCarriageReturn(value: TerminalWriteData) {
+  if (typeof value === "string") return /\r(?!\n)/.test(value);
+  return value.some((byte, index) => byte === 13 && value[index + 1] !== 10);
 }
 
 function hasInteractiveTerminalMarker(text: string) {

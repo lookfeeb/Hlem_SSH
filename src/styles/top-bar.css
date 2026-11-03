@@ -182,6 +182,8 @@
   background: rgba(16, 185, 129, .08) !important;
 }
 
+.brandApiButton-starting.ant-btn { color: #3973f6; border-color: #cbdcff; background: #edf3ff; }
+
 @keyframes brandApiPulse {
   0%, 100% { opacity: 1; }
   50% { opacity: .4; }

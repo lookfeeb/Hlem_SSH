@@ -278,6 +278,11 @@
   background: linear-gradient(145deg, #f1faf7, #f7fbfa);
 }
 
+.aiApiServiceSurface.is-starting { border-color: #d6e3ff; background: #f3f7ff; }
+.aiApiServiceSurface.is-starting .aiApiServicePulse { border-color: #e9f0ff; background: #3973f6; box-shadow: 0 0 0 1px #3973f6; }
+.aiApiHeaderStatus.is-starting { color: #3973f6; background: #edf3ff; }
+.aiApiHeaderStatus.is-starting i { background: #3973f6; }
+
 .aiApiServiceState {
   min-width: 0;
   display: flex;
@@ -320,7 +325,8 @@
   color: #758298;
   font-size: 11px;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .aiApiServiceActions {

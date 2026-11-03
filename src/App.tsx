@@ -15,9 +15,13 @@ import { remoteApi } from "./api/remoteApi";
 import { defaultBackupSettings, vaultApi } from "./api/vaultApi";
 import {
   BackupModal,
+  SessionConfigModal,
+  useOpenedPanel,
   SettingsModal,
   TransferCenter,
   TunnelDrawer,
+  SessionWorkspace,
+  MigrationGate,
 } from "./app/lazyComponents";
 import {
   formatSessionError,
@@ -42,10 +46,8 @@ import { AppLoadingFallback } from "./components/shared/AppLoadingFallback";
 import { AppProviders } from "./components/shared/AppProviders";
 import { AppStatusBar } from "./components/AppStatusBar";
 import { ConnectionSidebar } from "./components/ConnectionSidebar";
-import { MigrationGate } from "./components/MigrationGate";
-import { SessionConfigModal } from "./components/SessionConfigModal";
-import { closeSharedDetachedEditorChannel } from "./components/FileManager";
-import { SessionWorkspace, type SessionWorkspaceActions } from "./components/SessionWorkspace";
+import { closeSharedDetachedEditorChannel } from "./lib/detachedEditorBridge";
+import type { SessionWorkspaceActions } from "./components/SessionWorkspace";
 import { TopBar } from "./components/TopBar";
 import { EmptyWorkspace } from "./components/shared/EmptyWorkspace";
 import { configToRemoteSession, getErrorMessage } from "./lib/configMapping";
@@ -128,19 +130,21 @@ function App() {
   }, [sftpListRequestKey]);
   const {
     apiServerRunning,
-    setApiServerRunning,
+    apiServerStarting,
+    apiServerError,
+    setApiServerStatus,
     initializeApiServerRuntime,
   } = useApiServerRuntime();
 
-  const earlyEventHandlersRef = useRef({ applySnapshot, setApiServerRunning });
-  earlyEventHandlersRef.current = { applySnapshot, setApiServerRunning };
+  const earlyEventHandlersRef = useRef({ applySnapshot, setApiServerStatus });
+  earlyEventHandlersRef.current = { applySnapshot, setApiServerStatus };
 
   useEffect(() => {
     let disposed = false;
     let cleanups: Array<() => void> = [];
     void Promise.allSettled([
       appEvents.onConfigChanged((payload) => earlyEventHandlersRef.current.applySnapshot(payload)),
-      appEvents.onApiStatus((payload) => earlyEventHandlersRef.current.setApiServerRunning(payload.running)),
+      appEvents.onApiStatus((payload) => earlyEventHandlersRef.current.setApiServerStatus(payload)),
     ]).then((results) => {
       const items = results.flatMap((result) => {
         if (result.status === "fulfilled") return [result.value];
@@ -174,7 +178,6 @@ function App() {
   } = useAppBootstrap({
     enabled: earlyEventsReady,
     applySnapshot,
-    onFrontendReady: initializeApiServerRuntime,
   });
   const {
     forwards,
@@ -197,6 +200,7 @@ function App() {
     handleTerminalClosed,
     sendTerminalData,
     sendTerminalCommand,
+    updateTerminalCwd,
     resizeTerminal,
     clearTerminal,
   } = useTerminalRuntime({
@@ -724,6 +728,7 @@ function App() {
   }
 
   sessionWorkspaceActionsRef.current = {
+    updateTerminalCwd,
     sendTerminalData,
     sendTerminalCommand,
     resizeTerminal,
@@ -743,6 +748,10 @@ function App() {
 
   const currentSettings = configSnapshot?.data.settings ?? { proxy: null, backup: defaultBackupSettings(), quickCommands: [] };
   const quickCommands = currentSettings.quickCommands ?? EMPTY_QUICK_COMMANDS;
+  const transferMounted = useOpenedPanel(transferCenterOpen);
+  const backupMounted = useOpenedPanel(backupOpen);
+  const settingsMounted = useOpenedPanel(settingsOpen || aiApiOpen);
+  const tunnelMounted = useOpenedPanel(tunnelOpen);
 
   return (
     <AppProviders>
@@ -764,6 +773,8 @@ function App() {
                   connectingSessionIds={connectingSessionIds}
                   transfers={transfers}
                   apiServerRunning={apiServerRunning}
+                  apiServerStarting={apiServerStarting}
+                  apiServerError={apiServerError}
                   apiConfigured={!!currentSettings.aiApiKey}
                   onApiServerStart={() => {
                     setAiApiOpen(true);
@@ -789,6 +800,7 @@ function App() {
                       onCollapsedSectionIdsChange={persistConnectionSectionState}
                     />
                     <section className="sessionWorkspaceLayer">
+                      <Suspense fallback={<AppLoadingFallback />}>
                       {openSessions.map((session) => (
                         <SessionWorkspace
                           key={session.id}
@@ -801,6 +813,7 @@ function App() {
                           actionsRef={sessionWorkspaceActionsRef}
                         />
                       ))}
+                      </Suspense>
                     </section>
                   </main>
                 ) : (
@@ -841,15 +854,15 @@ function App() {
       </div>
 
       {/* 一次性数据迁移弹窗 */}
-      <MigrationGate
+      {migrationNeeded && <Suspense fallback={null}><MigrationGate
         open={migrationNeeded}
         loading={migrationBusy}
         error={migrationError}
         onMigrate={handleMigrate}
         onSkip={handleSkipMigration}
-      />
+      /></Suspense>}
 
-      {appReady && (
+      {appReady && transferMounted && (
           <Suspense fallback={null}>
             <TransferCenter
               open={transferCenterOpen}
@@ -894,7 +907,7 @@ function App() {
       )}
       {configSnapshot && (
           <Suspense fallback={null}>
-            <BackupModal
+            {backupMounted && <BackupModal
               open={backupOpen}
               busy={backupBusy}
               settings={currentSettings}
@@ -906,8 +919,8 @@ function App() {
               onRunNow={() => runConfiguredBackup()}
               onRestoreRecord={restoreBackupRecord}
               onDeleteRecord={deleteBackupRecord}
-            />
-            <SettingsModal
+            />}
+            {settingsMounted && <SettingsModal
               open={settingsOpen}
               initialValue={currentSettings}
               sessions={configSessions}
@@ -916,7 +929,7 @@ function App() {
               onBackupOpen={() => setBackupOpen(true)}
               onTunnelOpen={() => setTunnelOpen(true)}
               onCreateSession={(onCreated) => addSession(onCreated)}
-              onApiServerChange={setApiServerRunning}
+              onApiServerChange={setApiServerStatus}
               onSettingsChange={applyConfigSnapshot}
               aiApiOpen={aiApiOpen}
               onAiApiOpenChange={setAiApiOpen}
@@ -934,8 +947,8 @@ function App() {
               onOpenDatabaseDir={openDatabaseDir}
               onOpenPathDir={openPathDir}
               onOpenExternalUrl={openExternalUrl}
-            />
-            <TunnelDrawer
+            />}
+            {tunnelMounted && <TunnelDrawer
               open={tunnelOpen}
               sessions={configSessions}
               tunnels={configSnapshot.data.tunnels ?? []}
@@ -946,7 +959,7 @@ function App() {
               onDelete={deleteTunnel}
               onStart={startTunnel}
               onStop={stopTunnel}
-            />
+            />}
           </Suspense>
       )}
       {configSnapshot && sessionModal && (

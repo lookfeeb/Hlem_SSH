@@ -34,6 +34,9 @@ pub fn spawn_auto_backup_scheduler(app: AppHandle) {
     let mut shutdown = state.shutdown_receiver();
     tauri::async_runtime::spawn(async move {
         let _registration = registration;
+        if app.state::<AppState>().initialize_vault().await.is_err() {
+            return;
+        }
         run_auto_backup_scheduler(&app, &mut shutdown).await;
     });
 }

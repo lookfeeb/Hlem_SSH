@@ -335,12 +335,12 @@ export function useSftpFiles({
           const transfer = await remoteApi.upload(sftpId, entry.localPath, remotePath, overwrite, accelerated, false);
           queuedCount += 1;
           if (mountedRef.current) upsertTransfer(transfer);
+          if (mountedRef.current && queuedCount === 1) openTransferCenter();
         } catch (error) {
           failures.push({ relativePath: entry.relativePath, error });
         }
       },
     );
-    if (queuedCount > 1) openTransferCenter();
     if (failures.length > 0) {
       const first = failures[0];
       throw new Error(`${failures.length} 个上传任务未能启动；${first.relativePath}：${getErrorMessage(first.error)}`);
@@ -398,12 +398,12 @@ export function useSftpFiles({
           );
           queuedCount += 1;
           if (mountedRef.current) upsertTransfer(transfer);
+          if (mountedRef.current && queuedCount === 1) openTransferCenter();
         } catch (error) {
           failures.push({ relativePath: file.relativePath, error });
         }
       },
     );
-    if (queuedCount > 0) openTransferCenter();
     if (failures.length > 0) {
       const first = failures[0];
       throw new Error(

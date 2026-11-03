@@ -58,7 +58,7 @@ pub(super) fn verify_session_access_and_exists(
             }),
         )
     })?;
-    store.session(session_id).map(|_| ()).map_err(|_| {
+    store.ensure_session_exists(session_id).map_err(|_| {
         (
             StatusCode::NOT_FOUND,
             Json(ApiError {

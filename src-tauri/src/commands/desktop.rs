@@ -8,7 +8,6 @@ use std::{
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-use base64::{engine::general_purpose, Engine as _};
 use rsa::{
     pkcs8::DecodePublicKey,
     pss::{Signature as PssSignature, VerifyingKey},
@@ -237,6 +236,35 @@ async fn fetch_text_url_inner(url: &str) -> AppResult<String> {
         .map_err(|error| AppError::Remote(format!("解析远程内容失败：{error}")))
 }
 
+async fn fetch_manifest_signature(manifest_url: &str) -> AppResult<Vec<u8>> {
+    let client = http_client(UPDATE_FETCH_TIMEOUT)?;
+    let url = format!("{manifest_url}.sig.bin");
+    let mut response = send_with_retry("读取更新签名", || {
+        client
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, "HelM-Updater")
+    })
+    .await?;
+    if !response.status().is_success() {
+        return Err(AppError::Remote(format!(
+            "读取更新签名失败：HTTP {}",
+            response.status()
+        )));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| AppError::Remote(error.to_string()))?
+    {
+        if bytes.len() + chunk.len() > 8192 {
+            return Err(AppError::Crypto("更新签名长度无效".into()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 async fn check_signed_manifest(
     repo: &str,
     public_key: &str,
@@ -244,12 +272,11 @@ async fn check_signed_manifest(
     current_arch: String,
 ) -> AppResult<UpdateInfo> {
     let manifest_url = format!("https://github.com/{repo}/releases/latest/download/latest.json");
-    let signature_url = format!("{manifest_url}.sig");
     let (manifest_text, signature) = tokio::try_join!(
         fetch_text_url_inner(&manifest_url),
-        fetch_text_url_inner(&signature_url)
+        fetch_manifest_signature(&manifest_url)
     )?;
-    if !verify_manifest_signature(&manifest_text, signature.trim(), public_key)? {
+    if !verify_manifest_signature(&manifest_text, &signature, public_key)? {
         return Err(AppError::Crypto("更新清单签名验证失败".to_string()));
     }
     let manifest: SignedUpdateManifest = serde_json::from_str(&manifest_text)?;
@@ -679,15 +706,12 @@ fn version_numbers(value: &str) -> Vec<i32> {
 
 fn verify_manifest_signature(
     manifest_text: &str,
-    signature_base64: &str,
+    signature_bytes: &[u8],
     public_key_pem: &str,
 ) -> AppResult<bool> {
     let public_key = RsaPublicKey::from_public_key_pem(&public_key_pem.replace("\\n", "\n"))
         .map_err(|error| AppError::Crypto(format!("更新公钥无效：{error}")))?;
-    let signature_bytes = general_purpose::STANDARD
-        .decode(signature_base64)
-        .map_err(|error| AppError::Crypto(format!("更新签名无效：{error}")))?;
-    let signature = PssSignature::try_from(signature_bytes.as_slice())
+    let signature = PssSignature::try_from(signature_bytes)
         .map_err(|error| AppError::Crypto(format!("更新签名无效：{error}")))?;
     let verifying_key = VerifyingKey::<Sha256>::new(public_key);
     Ok(verifying_key
@@ -699,12 +723,6 @@ fn spawn_update_installer(installer: &Path) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     {
         let script = windows_update_script(installer, std::process::id());
-        let encoded = general_purpose::STANDARD.encode(
-            script
-                .encode_utf16()
-                .flat_map(u16::to_le_bytes)
-                .collect::<Vec<_>>(),
-        );
         let mut command = Command::new("powershell");
         command.args([
             "-NoProfile",
@@ -712,8 +730,8 @@ fn spawn_update_installer(installer: &Path) -> AppResult<()> {
             "Bypass",
             "-WindowStyle",
             "Hidden",
-            "-EncodedCommand",
-            &encoded,
+            "-Command",
+            &script,
         ]);
         #[cfg(target_os = "windows")]
         command.creation_flags(CREATE_NO_WINDOW);
@@ -827,6 +845,11 @@ fn open_url(url: &str) -> AppResult<()> {
 }
 
 pub fn friendly_os_name() -> String {
+    static OS_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OS_NAME.get_or_init(detect_os_name).clone()
+}
+
+fn detect_os_name() -> String {
     #[cfg(target_os = "windows")]
     {
         windows_version_name()
@@ -849,16 +872,24 @@ pub fn friendly_os_name() -> String {
 
 #[cfg(target_os = "windows")]
 fn windows_version_name() -> String {
-    let version = command_output("cmd", &["/C", "ver"]).unwrap_or_default();
-    let build = version
-        .split(|ch: char| !ch.is_ascii_digit() && ch != '.')
-        .find(|part| part.matches('.').count() >= 2)
-        .and_then(|part| part.split('.').nth(2))
-        .and_then(|part| part.parse::<u32>().ok());
-    match build {
-        Some(value) if value >= 22_000 => "Windows 11".to_string(),
-        Some(_) => "Windows 10".to_string(),
-        None => "Windows".to_string(),
+    use windows_sys::{
+        Wdk::System::SystemServices::RtlGetVersion,
+        Win32::System::SystemInformation::OSVERSIONINFOW,
+    };
+    let mut version = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
+    // Query the kernel directly: no cmd.exe, console allocation or shell
+    // AutoRun on startup, and no application-manifest version virtualization.
+    // SAFETY: the writable struct has the required size and lives for the call.
+    if unsafe { RtlGetVersion(&mut version) } < 0 {
+        return "Windows".to_string();
+    }
+    match (version.dwMajorVersion, version.dwBuildNumber) {
+        (10, build) if build >= 22_000 => "Windows 11".to_string(),
+        (10, _) => "Windows 10".to_string(),
+        _ => "Windows".to_string(),
     }
 }
 
@@ -871,6 +902,7 @@ fn linux_pretty_name() -> Option<String> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn command_output(command: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(command).args(args).output().ok()?;
     if !output.status.success() {
@@ -1049,10 +1081,15 @@ mod tests {
         let public_key = RsaPublicKey::from(&private_key)
             .to_public_key_pem(LineEnding::LF)
             .expect("public key pem");
-        let invalid_signature = general_purpose::STANDARD.encode(vec![0_u8; 256]);
+        let invalid_signature = vec![0_u8; 256];
         let verified = verify_manifest_signature("manifest", &invalid_signature, &public_key)
             .expect("verification result");
         assert!(!verified);
+        use rsa::signature::{RandomizedSigner, SignatureEncoding};
+        let signing_key = rsa::pss::SigningKey::<Sha256>::new(private_key);
+        let signature = signing_key.sign_with_rng(&mut rng, b"manifest").to_vec();
+        assert!(verify_manifest_signature("manifest", &signature, &public_key).unwrap());
+        assert!(!verify_manifest_signature("tampered", &signature, &public_key).unwrap());
     }
 
     #[cfg(target_os = "windows")]

@@ -5,6 +5,7 @@ use crate::config::ConfigSnapshot;
 use crate::errors::{AppError, AppResult};
 use crate::events;
 
+use super::api_startup::{retry_api_start, API_STARTUP_MAX_WAIT, API_STARTUP_NORMAL_WAIT};
 use super::{ensure_vault_unlocked, with_store, AppState};
 
 const MAX_ALLOWED_API_SESSIONS: usize = 20;
@@ -24,6 +25,7 @@ pub async fn api_server_configure_and_start(
     allowed_session_ids: Vec<String>,
     auto_start: bool,
 ) -> AppResult<ApiServerConfigureResult> {
+    state.api_startup.cancel();
     let ticket = state.config_mutations.ticket();
     let _operation_guard = state.api_server_operation.lock().await;
     ensure_vault_unlocked(&state)?;
@@ -108,6 +110,7 @@ async fn start_api_server_inner(
             running: true,
             port: existing.port,
             api_key: existing.api_key.clone(),
+            ..Default::default()
         };
         emit_api_status(&app, &info);
         return Ok(info);
@@ -161,12 +164,12 @@ async fn start_api_server_inner(
         connection_config_gate: state.connection_config_gate.clone(),
         config_mutations: state.config_mutations.clone(),
     })
-    .await
-    .map_err(AppError::Remote)?;
+    .await?;
     let info = ApiServerInfo {
         running: true,
         port: server_handle.port,
         api_key: server_handle.api_key.clone(),
+        ..Default::default()
     };
     *handle_guard = Some(server_handle);
     emit_api_status(&app, &info);
@@ -178,40 +181,68 @@ async fn start_api_server_inner(
 pub fn spawn_api_server_autostart(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        if state.is_shutting_down() {
+        if let Err(error) = state.initialize_vault().await {
+            log::error!("Vault initialization failed: {error}");
             return;
         }
-        let settings = match with_store(&state, |store| Ok(store.snapshot()?.data.settings)) {
-            Ok(settings) => settings,
-            Err(error) => {
-                log::debug!("AI API autostart skipped: {error}");
-                return;
-            }
-        };
-        let Some(port) = settings.ai_api_port else {
-            return;
-        };
-        let allowed_session_ids = normalize_allowed_session_ids(
-            Some(settings.ai_api_session_ids),
-            settings.ai_api_session_id,
-        );
-        if !settings.ai_api_auto_start || allowed_session_ids.is_empty() {
-            return;
-        }
+        let result = retry_api_start(
+            || async {
+                let _operation_guard = state.api_server_operation.lock().await;
+                if state.is_shutting_down() || state.api_startup.is_cancelled() {
+                    return Ok(None);
+                }
+                if state.needs_migration() {
+                    return Ok(None);
+                }
+                // Every attempt uses current settings, not a snapshot captured
+                // before waiting for the outgoing process to release its port.
+                let snapshot = with_store(&state, |store| store.snapshot())?;
+                let settings = &snapshot.data.settings;
+                let Some(port) = settings.ai_api_port else {
+                    return Ok(None);
+                };
+                let (allowed_session_ids, _) = configured_allowed_sessions(&snapshot);
+                if !settings.ai_api_auto_start || allowed_session_ids.is_empty() {
+                    return Ok(None);
+                }
+                if state.api_startup.waiting(port) {
+                    emit_api_status(&app, &stopped_api_server_info());
+                }
+                start_api_server_inner(app.clone(), &state, port, allowed_session_ids)
+                    .await
+                    .map(Some)
+            },
+            state.api_startup.cancellation(),
+            state.shutdown_receiver(),
+            API_STARTUP_NORMAL_WAIT,
+            API_STARTUP_MAX_WAIT,
+        )
+        .await;
         let _operation_guard = state.api_server_operation.lock().await;
-        if state.is_shutting_down() {
+        if state.is_shutting_down() || state.api_startup.is_cancelled() {
             return;
         }
-        if let Err(error) =
-            start_api_server_inner(app.clone(), &state, port, allowed_session_ids).await
-        {
-            log::warn!("AI API autostart failed: {error}");
+        match result {
+            Ok(Some(_)) => state.api_startup.finish(None),
+            Ok(None) => {
+                state.api_startup.finish(None);
+                emit_api_status(&app, &stopped_api_server_info());
+            }
+            Err(error) => {
+                log::warn!("AI API autostart failed: {error}");
+                state.api_startup.finish(Some(error.to_string()));
+                emit_api_status(&app, &stopped_api_server_info());
+            }
         }
     });
 }
 
 #[tauri::command]
 pub async fn api_server_stop(app: AppHandle, state: State<'_, AppState>) -> AppResult<()> {
+    state.api_startup.cancel();
+    if let Some(handle) = state.api_server.lock().await.as_ref() {
+        handle.request_shutdown();
+    }
     let _operation_guard = state.api_server_operation.lock().await;
     let handle = {
         let mut handle_guard = state.api_server.lock().await;
@@ -244,18 +275,16 @@ pub async fn api_server_status(
             return Ok(info);
         }
     }
-    match handle_guard.as_ref() {
-        Some(handle) => Ok(ApiServerInfo {
+    let info = match handle_guard.as_ref() {
+        Some(handle) => ApiServerInfo {
             running: true,
             port: handle.port,
             api_key: handle.api_key.clone(),
-        }),
-        None => Ok(ApiServerInfo {
-            running: false,
-            port: 0,
-            api_key: String::new(),
-        }),
-    }
+            ..Default::default()
+        },
+        None => stopped_api_server_info(),
+    };
+    Ok(state.api_startup.decorate(info))
 }
 
 #[tauri::command]
@@ -263,6 +292,7 @@ pub async fn api_server_regenerate_key(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> AppResult<ApiServerInfo> {
+    state.api_startup.cancel();
     let ticket = state.config_mutations.ticket();
     let _operation_guard = state.api_server_operation.lock().await;
     ensure_vault_unlocked(&state)?;
@@ -303,13 +333,14 @@ pub async fn api_server_regenerate_key(
             Err(error) => {
                 let info = stopped_api_server_info();
                 emit_api_status(&app, &info);
-                return Err(AppError::Remote(error));
+                return Err(error);
             }
         };
         let info = ApiServerInfo {
             running: true,
             port: server_handle.port,
             api_key: server_handle.api_key.clone(),
+            ..Default::default()
         };
         let mut handle_guard = state.api_server.lock().await;
         *handle_guard = Some(server_handle);
@@ -320,6 +351,7 @@ pub async fn api_server_regenerate_key(
             running: false,
             port: 0,
             api_key: new_key,
+            ..Default::default()
         };
         emit_api_status(&app, &info);
         Ok(info)
@@ -490,6 +522,7 @@ async fn reconcile_api_server_with_snapshot_inner(
             running: false,
             port: 0,
             api_key: String::new(),
+            ..Default::default()
         });
     }
     match handle_guard.as_ref() {
@@ -501,6 +534,7 @@ async fn reconcile_api_server_with_snapshot_inner(
                 running: true,
                 port: handle.port,
                 api_key: handle.api_key.clone(),
+                ..Default::default()
             })
         }
         None => Ok(ApiServerInfo {
@@ -512,6 +546,7 @@ async fn reconcile_api_server_with_snapshot_inner(
                 .ai_api_key
                 .clone()
                 .unwrap_or_default(),
+            ..Default::default()
         }),
     }
 }
@@ -520,6 +555,7 @@ pub(super) async fn stop_api_server_for_config_replacement<'a>(
     app: &AppHandle,
     state: &'a State<'_, AppState>,
 ) -> (tokio::sync::MutexGuard<'a, ()>, bool) {
+    state.api_startup.cancel();
     let operation_guard = state.api_server_operation.lock().await;
     let handle = state.api_server.lock().await.take();
     let was_running = handle.as_ref().is_some_and(|handle| !handle.is_finished());
@@ -563,11 +599,7 @@ pub(super) async fn restore_api_server_after_config_replacement(
 }
 
 fn stopped_api_server_info() -> ApiServerInfo {
-    ApiServerInfo {
-        running: false,
-        port: 0,
-        api_key: String::new(),
-    }
+    ApiServerInfo::default()
 }
 
 fn emit_api_status(app: &AppHandle, info: &ApiServerInfo) {
@@ -576,7 +608,8 @@ fn emit_api_status(app: &AppHandle, info: &ApiServerInfo) {
         .frontend_ready
         .load(std::sync::atomic::Ordering::Acquire)
     {
-        events::emit(app, events::API_STATUS, info.clone());
+        let info = app.state::<AppState>().api_startup.decorate(info.clone());
+        events::emit(app, events::API_STATUS, info);
     }
 }
 

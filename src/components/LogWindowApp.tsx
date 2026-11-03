@@ -1,217 +1,158 @@
-import { CheckOutlined, CloseOutlined, CopyOutlined } from "@ant-design/icons";
-import { Button, ConfigProvider, Empty, Tooltip, theme } from "antd";
+import "../styles/modals/modal-logs.css";
+import { CheckOutlined, CopyOutlined, FilterOutlined, ReloadOutlined, RightOutlined, SearchOutlined } from "@ant-design/icons";
+import { Alert, Button, ConfigProvider, Empty, Input, Pagination, Popover, Select, Spin, Tooltip, theme } from "antd";
 import zhCN from "antd/locale/zh_CN";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { appApi, type ApiLogEntry } from "../api/appApi";
 import { appEvents } from "../api/appEvents";
 import { writeClipboardText } from "../lib/clipboard";
 import { getErrorMessage } from "../lib/configMapping";
-import { apiLogEntryKey, mergeApiLogEntries } from "../lib/apiLogEntries";
+import { apiLogEntryKey, filterApiLogEntries, mergeApiLogEntries, type ApiLogStatusFilter } from "../lib/apiLogEntries";
 import { formatBeijingMonthDayTime } from "../lib/format";
 import { useMountedRef, useTimeoutRegistry } from "../lib/reactLifecycle";
+import { ApiLogDetailModal, ApiLogStatus, ApiLogTypeBadge, formatApiLogDetail } from "./logs/ApiLogDetailModal";
+
+const PAGE_SIZE = 10;
 
 export function LogWindowApp() {
   const [logs, setLogs] = useState<ApiLogEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [live, setLive] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [detailCopied, setDetailCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   const [selectedLog, setSelectedLog] = useState<ApiLogEntry | null>(null);
+  const [query, setQuery] = useState("");
+  const [status, setStatus] = useState<ApiLogStatusFilter>("all");
+  const [action, setAction] = useState("");
+  const [page, setPage] = useState(1);
   const mountedRef = useMountedRef();
+  const loadingRef = useRef(false);
   const setSafeTimeout = useTimeoutRegistry();
+
+  const loadLogs = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    setLoading(true);
+    try {
+      const items = await appApi.apiServerLogs();
+      if (mountedRef.current) {
+        setLogs((current) => mergeApiLogEntries(current, items));
+        setError(null);
+      }
+    } catch (failure) {
+      if (mountedRef.current) setError(getErrorMessage(failure));
+    } finally {
+      loadingRef.current = false;
+      if (mountedRef.current) setLoading(false);
+    }
+  }, [mountedRef]);
 
   useEffect(() => {
     let mounted = true;
     let unlisten: (() => void) | null = null;
     let pollingTimer: number | null = null;
-    const load = () => {
-      void appApi.apiServerLogs()
-        .then((items) => {
-          if (mounted) setLogs((current) => mergeApiLogEntries(current, items));
-        })
-        .catch((error) => {
-          console.warn("[helm] failed to load api logs:", getErrorMessage(error));
-        });
-    };
     void appEvents.onApiLog((entry) => {
-      if (!mounted) return;
-      if (pollingTimer !== null) { clearInterval(pollingTimer); pollingTimer = null; }
-      setLogs((prev) => {
-        return mergeApiLogEntries(prev, [entry]);
-      });
-    }).then((u) => {
-      if (!mounted) { u(); return; }
-      unlisten = u;
-      // 查询和订阅之间产生的日志由这次补查合并进来，merge 会去重。
-      load();
-    }).catch((error) => {
-      console.warn("[helm] failed to subscribe api logs:", getErrorMessage(error));
-      if (mounted) pollingTimer = window.setInterval(load, 3000);
+      if (mounted) setLogs((current) => mergeApiLogEntries(current, [entry]));
+    }).then((unsubscribe) => {
+      if (!mounted) { unsubscribe(); return; }
+      unlisten = unsubscribe;
+      setLive(true);
+      // Merge after subscribing so events arriving during the snapshot are preserved.
+      void loadLogs();
+    }).catch((failure) => {
+      console.warn("[helm] failed to subscribe api logs:", getErrorMessage(failure));
+      if (mounted) {
+        void loadLogs();
+        pollingTimer = window.setInterval(() => void loadLogs(), 3000);
+      }
     });
     return () => {
       mounted = false;
-      if (unlisten) unlisten();
+      unlisten?.();
       if (pollingTimer !== null) clearInterval(pollingTimer);
     };
-  }, []);
+  }, [loadLogs]);
 
-  const reversed = [...logs].reverse();
+  const actions = useMemo(() => [...new Set(logs.map((log) => log.action))].sort(), [logs]);
+  const filtered = useMemo(() => filterApiLogEntries(logs, query, status, action).reverse(), [logs, query, status, action]);
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)));
+  const visible = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const filterCount = Number(status !== "all") + Number(Boolean(action));
+  const hasFilters = Boolean(query.trim()) || filterCount > 0;
+  const selectedKey = selectedLog ? apiLogEntryKey(selectedLog) : null;
+
+  function resetFilters() {
+    setQuery(""); setStatus("all"); setAction(""); setPage(1);
+  }
 
   async function copyLogs() {
-    if (logs.length === 0) return;
-    const text = reversed.map((log) => {
-      const lines = [
-        `[${formatLogTime(log.timestamp)}] ${log.success ? "OK" : "ERR"} ${log.action} | ${log.detail} (${log.durationMs}ms)`,
-        ...(log.response ? [log.response] : []),
-      ];
-      return lines.join("\n");
-    }).join("\n\n");
-    if (!(await writeClipboardText(text))) return;
+    if (!filtered.length) return;
+    const success = await writeClipboardText(filtered.map(formatApiLogDetail).join("\n\n"));
     if (!mountedRef.current) return;
-    setCopied(true);
-    setSafeTimeout(() => setCopied(false), 2000);
-  }
-
-  async function copySingleLog(log: ApiLogEntry) {
-    if (!(await writeClipboardText(formatLogDetail(log)))) return;
-    if (!mountedRef.current) return;
-    setCopiedKey(logKey(log));
-    setSafeTimeout(() => setCopiedKey(null), 1500);
-  }
-
-  async function copySelectedLog(log: ApiLogEntry) {
-    if (!(await writeClipboardText(formatLogDetail(log)))) return;
-    if (!mountedRef.current) return;
-    setDetailCopied(true);
-    setSafeTimeout(() => setDetailCopied(false), 1500);
-  }
-
-  function handleClick(log: ApiLogEntry) {
-    setSelectedLog(log);
+    setCopied(success);
+    setCopyError(!success);
+    setSafeTimeout(() => { setCopied(false); setCopyError(false); }, 2000);
   }
 
   return (
-    <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm }}>
-      <div className="logWindow">
+    <ConfigProvider locale={zhCN} theme={{ algorithm: theme.defaultAlgorithm, token: { colorPrimary: "#3973f6", borderRadius: 8, fontFamily: '"Segoe UI", "Microsoft YaHei", sans-serif' } }}>
+      <main className="logWindow">
         <header className="logWindowHeader">
-          <span className="logWindowTitle">操作日志</span>
-          <div className="logWindowHeaderRight">
+          <div className="logWindowHeading">
+            <h1>操作日志</h1>
+            <p>查看 AI API 请求与响应</p>
+          </div>
+          <div className="logWindowTools">
+            <Input className="logWindowSearch" aria-label="搜索操作日志" prefix={<SearchOutlined />} placeholder="搜索命令、状态或响应内容…" allowClear value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} />
+            <Popover trigger="click" placement="bottomRight" rootClassName="logFilterPopover" content={(
+              <div className="logFilterForm">
+                <div className="logFilterHeading"><strong>筛选日志</strong><Button type="link" size="small" onClick={() => { setStatus("all"); setAction(""); setPage(1); }}>重置</Button></div>
+                <label htmlFor="logStatusFilter">状态</label>
+                <Select id="logStatusFilter" value={status} onChange={(value) => { setStatus(value); setPage(1); }} options={[{ value: "all", label: "全部状态" }, { value: "success", label: "成功" }, { value: "error", label: "失败" }]} />
+                <label htmlFor="logActionFilter">类型</label>
+                <Select id="logActionFilter" value={action} onChange={(value) => { setAction(value); setPage(1); }} options={[{ value: "", label: "全部类型" }, ...[...new Set([...actions, ...(action ? [action] : [])])].map((value) => ({ value, label: value.toUpperCase() }))]} />
+              </div>
+            )}>
+              <Button className={filterCount ? "logFilterButton is-active" : "logFilterButton"} icon={<FilterOutlined />}>筛选{filterCount > 0 ? ` · ${filterCount}` : ""}</Button>
+            </Popover>
             <span className="logWindowCount">{logs.length} 条记录</span>
-            <Tooltip title={copied ? "已复制" : "复制日志"}>
-              <Button
-                size="small"
-                type="text"
-                icon={copied ? <CheckOutlined style={{ color: "#10b981" }} /> : <CopyOutlined />}
-                disabled={logs.length === 0}
-                onClick={() => void copyLogs()}
-              />
-            </Tooltip>
+            <Tooltip title="刷新日志"><Button type="text" aria-label="刷新日志" icon={<ReloadOutlined />} loading={loading} onClick={() => void loadLogs()} /></Tooltip>
+            <Tooltip title={copyError ? "复制失败，请重试" : copied ? "已复制" : "复制当前筛选的全部日志"}><Button type="text" aria-label="复制日志" className={copied ? "is-copied" : ""} icon={copied ? <CheckOutlined /> : <CopyOutlined />} disabled={!filtered.length} onClick={() => void copyLogs()} /></Tooltip>
           </div>
         </header>
-        <div className="logWindowBody">
-          {reversed.length === 0 ? (
-            <div className="logWindowEmpty">
-              <Empty description="暂无日志" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-            </div>
-          ) : (
-            <div className="logWindowList">
-              {reversed.map((log) => {
-                const key = logKey(log);
-                return (
-                <div
-                  key={key}
-                  className={`aiApiLogItem aiApiLogItem-${log.success ? "ok" : "err"}`}
-                  onClick={() => handleClick(log)}
-                  style={{ cursor: "pointer" }}
-                >
-                  <span className="aiApiLogTime">{formatLogTime(log.timestamp)}</span>
-                  <span className={`aiApiLogAction aiApiLogAction-${log.action}`}>{log.action.toUpperCase()}</span>
-                  <span className="aiApiLogDetail">{log.detail}</span>
-                  <span className="aiApiLogDuration">{log.durationMs}ms</span>
-                  <span
-                    className={`aiApiLogCopy${copiedKey === key ? " aiApiLogCopy-done" : ""}`}
-                    role="button"
-                    tabIndex={0}
-                    title="复制此条"
-                    onClick={(e) => { e.stopPropagation(); void copySingleLog(log); }}
-                    onKeyDown={(e) => { if (e.key === "Enter") void copySingleLog(log); }}
-                  >
-                    {copiedKey === key ? <CheckOutlined /> : <CopyOutlined />}
-                  </span>
-                </div>
-                );
-              })}
-            </div>
-          )}
-          {selectedLog && (
-            <div className="logDetailModal-overlay" onClick={() => { setSelectedLog(null); setDetailCopied(false); }}>
-              <div className="logDetailModal" onClick={(e) => e.stopPropagation()}>
-                <div className="logDetailModalHeader">
-                  <span className="logDetailModalTitle">日志详情</span>
-                  <span
-                    className="logDetailModalClose"
-                    role="button"
-                    tabIndex={0}
-                    title="关闭"
-                    onClick={() => { setSelectedLog(null); setDetailCopied(false); }}
-                    onKeyDown={(e) => { if (e.key === "Enter") { setSelectedLog(null); setDetailCopied(false); } }}
-                  >
-                    <CloseOutlined />
-                  </span>
-                </div>
-                <div className="logDetailSection">
-                  <div className="logDetailLabelRow">
-                    <span className="logDetailLabel">命令</span>
-                    <span
-                      className={`aiApiLogCopy${detailCopied ? " aiApiLogCopy-done" : ""}`}
-                      role="button"
-                      tabIndex={0}
-                      title="复制此条"
-                      style={{ opacity: 1 }}
-                      onClick={() => void copySelectedLog(selectedLog)}
-                      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.click(); }}
-                    >
-                      {detailCopied ? <CheckOutlined /> : <CopyOutlined />}
-                    </span>
-                  </div>
-                  <pre className="logDetailCommand">{selectedLog.detail}</pre>
-                </div>
-                {selectedLog.response && (
-                  <div className="logDetailSection">
-                    <span className="logDetailLabel">响应</span>
-                    <pre className="logDetailResponse">{selectedLog.response}</pre>
-                  </div>
-                )}
-                <div className="logDetailMeta">
-                  <span>{formatLogTime(selectedLog.timestamp)}</span>
-                  <span>{selectedLog.durationMs}ms</span>
-                  <span className={selectedLog.success ? "logDetailMetaOk" : "logDetailMetaErr"}>
-                    {selectedLog.success ? "成功" : "失败"}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+        {error && <Alert className="logWindowError" type="error" showIcon title="读取日志失败" description={error} action={<Button size="small" onClick={() => void loadLogs()}>重试</Button>} />}
+        {copyError && <span className="logWindowCopyError" role="alert">复制失败，请重试</span>}
+        <section className="logWindowTableCard" aria-label="操作日志列表" aria-busy={loading}>
+          <div className="logWindowTableScroll" key={`${currentPage}:${query}:${status}:${action}`}>
+            <table className="logWindowTable">
+              <colgroup><col className="logColExpand" /><col className="logColTime" /><col className="logColType" /><col /><col className="logColStatus" /><col className="logColDuration" /></colgroup>
+              <thead><tr><th aria-label="详情" /><th scope="col">时间</th><th scope="col">类型</th><th scope="col">命令 / 操作</th><th scope="col">状态</th><th scope="col">耗时</th></tr></thead>
+              <tbody>
+                {visible.map((log) => {
+                  const key = apiLogEntryKey(log);
+                  return (
+                    <tr key={key} className={selectedKey === key ? "is-selected" : ""} onClick={() => setSelectedLog(log)}>
+                      <td><Button type="text" size="small" className="logOpenDetail" aria-label={`查看日志详情：${log.action} ${formatBeijingMonthDayTime(log.timestamp, log.timestamp, true)}`} aria-haspopup="dialog" icon={<RightOutlined />} onClick={(event) => { event.stopPropagation(); setSelectedLog(log); }} /></td>
+                      <td className="logTimeCell">{formatBeijingMonthDayTime(log.timestamp, log.timestamp, true)}</td>
+                      <td><ApiLogTypeBadge action={log.action} /></td>
+                      <td><span className="logCommandPreview" title={log.detail}>{log.detail || "—"}</span></td>
+                      <td><ApiLogStatus success={log.success} /></td>
+                      <td className="logDurationCell">{log.durationMs}<span>ms</span></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {!visible.length && <div className="logWindowEmpty">{loading ? <Spin description="正在加载日志"><div className="logLoadingSpace" /></Spin> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={hasFilters ? "没有匹配的日志" : "暂无操作日志"}>{hasFilters ? <Button onClick={resetFilters}>清除筛选</Button> : <span className="logEmptyHint">API 操作完成后，记录会自动显示在这里</span>}</Empty>}</div>}
+          </div>
+        </section>
+        <footer className="logWindowFooter">
+          <div className="logWindowSummary"><span>{hasFilters ? `匹配 ${filtered.length} / ${logs.length} 条记录` : `共 ${logs.length} 条记录`}</span><span className="logLiveStatus"><i className={live ? "is-live" : ""} />{live ? "实时更新" : "定时刷新"}</span></div>
+          <Pagination current={currentPage} pageSize={PAGE_SIZE} total={filtered.length} showSizeChanger={false} showLessItems hideOnSinglePage={false} onChange={setPage} />
+        </footer>
+        <ApiLogDetailModal log={selectedLog} onClose={() => setSelectedLog(null)} />
+      </main>
     </ConfigProvider>
   );
-}
-
-function formatLogTime(timestamp: string): string {
-  return formatBeijingMonthDayTime(timestamp, timestamp, true);
-}
-
-function formatLogDetail(log: ApiLogEntry) {
-  return [
-    `时间: ${formatLogTime(log.timestamp)}`,
-    `状态: ${log.success ? "成功" : "失败"}`,
-    `类型: ${log.action}`,
-    `命令: ${log.detail}`,
-    `耗时: ${log.durationMs}ms`,
-    ...(log.response ? [`\n--- 响应 ---\n${log.response}`] : []),
-  ].join("\n");
-}
-
-function logKey(log: ApiLogEntry) {
-  return apiLogEntryKey(log);
 }

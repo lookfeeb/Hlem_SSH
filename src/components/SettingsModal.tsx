@@ -1,3 +1,4 @@
+import "../styles/modals/modal-settings.css";
 import {
   ApartmentOutlined,
   AppstoreOutlined,
@@ -30,7 +31,7 @@ interface SettingsModalProps {
   onBackupOpen: () => void;
   onTunnelOpen: () => void;
   onCreateSession: (onCreated?: (sessionId: string) => void) => void;
-  onApiServerChange: (running: boolean) => void;
+  onApiServerChange: (info: import("../api/appApi").ApiServerInfo) => void;
   onSettingsChange: (snapshot: ConfigSnapshot) => void;
   aiApiOpen: boolean;
   onAiApiOpenChange: (open: boolean) => void;

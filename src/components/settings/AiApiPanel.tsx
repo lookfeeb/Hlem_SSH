@@ -1,3 +1,4 @@
+import "../../styles/modals/modal-ai.css";
 import {
   ApiOutlined,
   CheckOutlined,
@@ -32,7 +33,7 @@ interface AiApiPanelProps {
   initialValue: AppSettings;
   sessions: { id: string; name: string; host: string }[];
   onCreateSession: (onCreated?: (sessionId: string) => void) => void;
-  onApiServerChange: (running: boolean) => void;
+  onApiServerChange: (info: ApiServerInfo) => void;
   onSettingsChange: (snapshot: ConfigSnapshot) => void;
 }
 
@@ -143,7 +144,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
       if (!mounted) return;
       statusQueryVersionRef.current += 1;
       setAiApiInfo(info);
-      onApiServerChange(info.running);
+      onApiServerChange(info);
       if (info.running && info.port) setAiApiPort(info.port);
     }).then((u) => {
       if (!mounted) { u(); return; }
@@ -165,7 +166,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
       const info = await appApi.apiServerStatus();
       if (!mountedRef.current || queryVersion !== statusQueryVersionRef.current) return;
       setAiApiInfo(info);
-      onApiServerChange(info.running);
+      onApiServerChange(info);
       if (info.running && info.port) setAiApiPort(info.port);
     } catch (error) {
       if (!mountedRef.current || queryVersion !== statusQueryVersionRef.current) return;
@@ -187,7 +188,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
       );
       if (!mountedRef.current || operationVersion !== serviceOperationVersionRef.current) return;
       setAiApiInfo(result.info);
-      onApiServerChange(true);
+      onApiServerChange(result.info);
       onSettingsChange(result.snapshot);
     } catch (error) {
       const status = await appApi.apiServerStatus().catch(() => null);
@@ -198,7 +199,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
       ) return;
       if (status) {
         setAiApiInfo(status);
-        onApiServerChange(status.running);
+        onApiServerChange(status);
       }
       Modal.error({ title: "启动 API 服务失败", content: getErrorMessage(error) });
     }
@@ -216,12 +217,13 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
     try {
       await appApi.apiServerStop();
       if (!mountedRef.current || operationVersion !== serviceOperationVersionRef.current) return;
-      setAiApiInfo((prev) => ({
+      const stopped = {
         running: false,
-        port: prev?.port ?? aiApiPort,
-        apiKey: prev?.apiKey ?? initialValue.aiApiKey ?? "",
-      }));
-      onApiServerChange(false);
+        port: aiApiInfo?.port ?? aiApiPort,
+        apiKey: aiApiInfo?.apiKey ?? initialValue.aiApiKey ?? "",
+      };
+      setAiApiInfo(stopped);
+      onApiServerChange(stopped);
       message.success("AI API 已关闭");
     } catch (error) {
       if (mountedRef.current && operationVersion === serviceOperationVersionRef.current) {
@@ -237,7 +239,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
 
   async function toggleAiApiStatus() {
     if (aiApiLoading) return;
-    if (aiApiInfo?.running) {
+    if (aiApiInfo?.running || aiApiInfo?.starting) {
       await stopAiApi();
       return;
     }
@@ -245,6 +247,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
   }
 
   function aiApiStatusTooltip() {
+    if (aiApiInfo?.starting) return "取消本次自动启动";
     if (aiApiLoading) return aiApiInfo?.running ? "正在关闭 API 服务" : "正在开启 API 服务";
     return aiApiInfo?.running ? "点击关闭 API 服务" : "点击开启 API 服务";
   }
@@ -393,12 +396,12 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
         const existing = await WebviewWindow.getByLabel("api-logs");
         if (!mountedRef.current) return;
         if (existing) { await existing.setFocus(); return; }
-        const webview = new WebviewWindow("api-logs", { url: "index.html?logWindow=1", title: "AI API 操作日志", width: 680, height: 480, minWidth: 480, minHeight: 320, resizable: true, devtools: import.meta.env.DEV });
+        const webview = new WebviewWindow("api-logs", { url: "index.html?logWindow=1", title: "AI API 操作日志", width: 1040, height: 740, minWidth: 640, minHeight: 480, center: true, resizable: true, devtools: import.meta.env.DEV });
         await webview.once("tauri://error", (event) => {
           if (mountedRef.current) message.error(getErrorMessage(event.payload));
         });
       } else {
-        window.open(`${window.location.origin}${window.location.pathname}?logWindow=1`, "api-logs", "width=680,height=480");
+        window.open(`${window.location.origin}${window.location.pathname}?logWindow=1`, "api-logs", "width=1040,height=740");
       }
     } catch (error) {
       if (mountedRef.current) message.error(getErrorMessage(error));
@@ -522,6 +525,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
 
   const renderStatusCard = () => {
     const running = Boolean(aiApiInfo?.running);
+    const starting = Boolean(aiApiInfo?.starting);
     return (
       <section className="aiApiCard aiApiControlCard">
         <div className="aiApiSectionHeading">
@@ -541,12 +545,12 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
           </Tooltip>
         </div>
 
-        <div className={`aiApiServiceSurface ${running ? "is-running" : "is-stopped"}`} aria-live="polite">
+        <div className={`aiApiServiceSurface ${running ? "is-running" : starting ? "is-starting" : "is-stopped"}`} aria-live="polite">
           <div className="aiApiServiceState">
             <span className="aiApiServicePulse" aria-hidden="true" />
             <div>
-              <strong>{aiApiLoading ? "正在处理服务状态" : running ? "本地 API 正在运行" : "本地 API 已停止"}</strong>
-              <span>{running ? `监听 127.0.0.1:${aiApiInfo?.port ?? aiApiPort}` : "启动后即可通过本机地址调用"}</span>
+              <strong>{aiApiLoading ? "正在处理服务状态" : running ? "本地 API 正在运行" : starting ? "本地 API 正在启动" : aiApiInfo?.error ? "本地 API 启动失败" : "本地 API 已停止"}</strong>
+              <span>{running ? `监听 127.0.0.1:${aiApiInfo?.port ?? aiApiPort}` : starting ? `正在准备本机端口 ${aiApiInfo?.port ?? aiApiPort}，先等待 10 秒，必要时延长至 15 秒` : aiApiInfo?.error ?? "启动后即可通过本机地址调用"}</span>
             </div>
           </div>
           <div className="aiApiServiceActions">
@@ -562,14 +566,14 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
             )}
             <Tooltip title={aiApiStatusTooltip()}>
               <Button
-                className={`aiApiServiceToggle ${running ? "is-stop" : "is-start"}`}
-                type={running ? "default" : "primary"}
-                icon={running ? <PoweroffOutlined /> : <ThunderboltOutlined />}
+                className={`aiApiServiceToggle ${running || starting ? "is-stop" : "is-start"}`}
+                type={running || starting ? "default" : "primary"}
+                icon={running || starting ? <PoweroffOutlined /> : <ThunderboltOutlined />}
                 loading={aiApiLoading}
-                disabled={!running && selectedAiApiSessionIds.length === 0}
+                disabled={!running && !starting && selectedAiApiSessionIds.length === 0}
                 onClick={() => void toggleAiApiStatus()}
               >
-                {running ? "停止服务" : "启动服务"}
+                {running ? "停止服务" : starting ? "取消启动" : "启动服务"}
               </Button>
             </Tooltip>
           </div>
@@ -663,9 +667,9 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
             <strong>AI API 控制</strong>
             <span>管理本地接口、访问凭证与授权会话</span>
           </div>
-          <span className={`aiApiHeaderStatus ${aiApiInfo?.running ? "is-running" : "is-stopped"}`}>
+          <span className={`aiApiHeaderStatus ${aiApiInfo?.running ? "is-running" : aiApiInfo?.starting ? "is-starting" : "is-stopped"}`}>
             <i aria-hidden="true" />
-            {aiApiLoading ? "处理中" : aiApiInfo?.running ? "服务运行中" : "服务未运行"}
+            {aiApiLoading ? "处理中" : aiApiInfo?.running ? "服务运行中" : aiApiInfo?.starting ? "正在启动" : aiApiInfo?.error ? "启动失败" : "服务未运行"}
           </span>
         </header>
 

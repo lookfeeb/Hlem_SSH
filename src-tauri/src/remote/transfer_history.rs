@@ -143,6 +143,8 @@ impl RemoteRuntime {
                     cleanup_sftp: None,
                     cancel: Arc::new(AtomicBool::new(false)),
                     paused: Arc::new(AtomicBool::new(false)),
+                    control_notify: Arc::new(Notify::new()),
+                    started: false,
                     handle: None,
                 });
         }
@@ -304,6 +306,8 @@ mod tests {
                         cleanup_sftp: None,
                         cancel: Arc::new(AtomicBool::new(false)),
                         paused: Arc::new(AtomicBool::new(false)),
+                        control_notify: Arc::new(Notify::new()),
+                        started: false,
                         handle: None,
                     },
                 );
@@ -336,6 +340,8 @@ mod tests {
                         cleanup_sftp: None,
                         cancel: Arc::new(AtomicBool::new(false)),
                         paused: Arc::new(AtomicBool::new(false)),
+                        control_notify: Arc::new(Notify::new()),
+                        started: false,
                         handle: None,
                     },
                 );
@@ -378,6 +384,8 @@ mod tests {
                 cleanup_sftp: None,
                 cancel: Arc::new(AtomicBool::new(false)),
                 paused: Arc::new(AtomicBool::new(false)),
+                control_notify: Arc::new(Notify::new()),
+                started: false,
                 handle: None,
             },
         );

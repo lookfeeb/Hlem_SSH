@@ -32,7 +32,7 @@ export interface TerminalEntry {
   id: string;
   kind: "system" | "input" | "output" | "error";
   content: string;
-  dataBase64?: string;
+  dataBytes?: Uint8Array;
   timestamp: string;
 }
 
@@ -400,7 +400,8 @@ export interface TerminalOutputEvent {
   terminalId: string;
   kind: "system" | "output" | "error";
   data: string;
-  dataBase64?: string;
+  dataBytes?: Uint8Array;
+  onConsumed?: () => void;
 }
 
 export interface TerminalClosedEvent {

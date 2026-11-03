@@ -29,11 +29,11 @@ use commands::{
     sftp_read_text, sftp_rename, sftp_resolve_target, sftp_search, sftp_write_text,
     spawn_api_server_autostart, spawn_auto_backup_scheduler, ssh_connect, ssh_disconnect, ssh_exec,
     ssh_exec_on_connection, ssh_trust_host_key, telemetry_snapshot, telemetry_start,
-    telemetry_stop, terminal_close, terminal_open, terminal_resize, terminal_start, terminal_write,
-    transfer_cancel, transfer_download, transfer_history_clear_finished, transfer_history_snapshot,
-    transfer_pause, transfer_remove, transfer_resume, transfer_retry, transfer_upload,
-    tunnel_create, tunnel_delete, tunnel_update, vault_backup_export, vault_backup_import,
-    vault_migrate, vault_needs_migration, vault_skip_migration, AppState,
+    telemetry_stop, terminal_ack, terminal_close, terminal_open, terminal_resize, terminal_start,
+    terminal_write, transfer_cancel, transfer_download, transfer_history_clear_finished,
+    transfer_history_snapshot, transfer_pause, transfer_remove, transfer_resume, transfer_retry,
+    transfer_upload, tunnel_create, tunnel_delete, tunnel_update, vault_backup_export,
+    vault_backup_import, vault_migrate, vault_needs_migration, vault_skip_migration, AppState,
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -42,35 +42,77 @@ use tauri::{
 };
 
 const APP_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+static APP_STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+fn startup_elapsed_ms() -> u128 {
+    APP_STARTED
+        .get()
+        .map(|started| started.elapsed().as_millis())
+        .unwrap_or(0)
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum StartupPhase {
+    ShellCommitted,
+    AppCommitted,
+    ListenersReady,
+    WorkspaceReady,
+}
+
+#[tauri::command]
+fn startup_phase(window: tauri::WebviewWindow, phase: StartupPhase, navigation_ms: f64) {
+    if window.label() == "main" && navigation_ms.is_finite() && navigation_ms >= 0.0 {
+        log::info!(
+            "Startup phase: phase={phase:?} process_ms={} navigation_ms={navigation_ms:.1}",
+            startup_elapsed_ms()
+        );
+    }
+}
 
 pub fn run_direct_broker_from_args() -> bool {
     direct_broker::run_from_args_if_requested()
 }
 
 #[tauri::command]
-fn frontend_ready(app: tauri::AppHandle, state: tauri::State<'_, AppState>) {
-    state
-        .frontend_ready
-        .store(true, std::sync::atomic::Ordering::Release);
-    if let Ok(snapshot) = state
-        .vault
-        .lock()
-        .map_err(|_| ())
-        .and_then(|store| store.snapshot().map_err(|_| ()))
+fn frontend_ready(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+    navigation_ms: f64,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("仅主窗口可完成启动握手".into());
+    }
+    // Repeated effects or a later page reload must not raise a window hidden to
+    // the tray. The first committed shell owns the visibility transition.
+    if state.is_shutting_down()
+        || state
+            .frontend_ready
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
     {
-        crate::events::emit(&app, crate::events::CONFIG_CHANGED, snapshot);
+        return Ok(());
     }
-    if let Some(window) = app.get_webview_window("main") {
-        log_window_result("show main window on frontend ready", window.show());
-        log_window_result("focus main window on frontend ready", window.set_focus());
+    if let Err(error) = window.show() {
+        state
+            .frontend_ready
+            .store(false, std::sync::atomic::Ordering::Release);
+        return Err(error.to_string());
     }
+    log_window_result("focus main window on frontend ready", window.set_focus());
     if let Some(window) = app.get_webview_window("splash") {
         log_window_result("close splash window", window.close());
     }
+    log::info!(
+        "Startup main visible: process_ms={} navigation_ms={navigation_ms:.1}",
+        startup_elapsed_ms()
+    );
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    APP_STARTED.get_or_init(std::time::Instant::now);
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -90,7 +132,17 @@ pub fn run() {
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
                 .build(),
         )
+        .on_page_load(|window, payload| {
+            if window.label() == "main" {
+                log::info!(
+                    "Startup page: event={:?} process_ms={}",
+                    payload.event(),
+                    startup_elapsed_ms()
+                );
+            }
+        })
         .setup(|app| {
+            log::info!("Startup setup: process_ms={}", startup_elapsed_ms());
             let vault_path = resolve_vault_path(app.handle())?;
             let state = AppState::new(vault_path);
             // 启动死连接巡检：每 30s 扫描 SSH 连接表，把 russh keepalive_max 已经
@@ -128,6 +180,7 @@ pub fn run() {
             open_external_url,
             open_path_dir,
             frontend_ready,
+            startup_phase,
             vault_needs_migration,
             vault_migrate,
             vault_skip_migration,
@@ -163,6 +216,7 @@ pub fn run() {
             ssh_trust_host_key,
             terminal_open,
             terminal_start,
+            terminal_ack,
             terminal_write,
             terminal_resize,
             terminal_close,

@@ -30,6 +30,7 @@ import { formatFileSize } from "../lib/format";
 import { getErrorMessage } from "../lib/configMapping";
 import { readJsonStorage, writeJsonStorage } from "../lib/storage";
 import { EDITOR_CHANNEL_NAME, type EditorChannelMessage } from "../lib/editorChannel";
+import { closeDetachedEditorChannel, createDetachedEditorChannel, getOrCreateDetachedEditorChannel, queueDetachedEditorTab, getDetachedEditorWindow, setDetachedEditorWindow, postEditorMessage } from "../lib/detachedEditorBridge";
 import { getBaseName, getParentPath, joinPath, normalizePath } from "../lib/path";
 import { isTauriRuntime } from "../api/runtime";
 import { useMountedRef } from "../lib/reactLifecycle";
@@ -79,7 +80,6 @@ export type FileOperation =
   | { kind: "deleteMany"; sourcePaths: string[] };
 
 type ContextMenuState = { entry: RemoteFileEntry; x: number; y: number };
-type DetachedEditorTabPayload = { path: string; content: string; sessionId: string; sessionName: string; sessionHost: string };
 
 const DETACHED_EDITOR_WINDOW_LABEL = "editor-global";
 
@@ -230,110 +230,10 @@ function isStringKey(key: React.Key): key is string {
   return typeof key === "string";
 }
 
-function postEditorMessage(channel: BroadcastChannel, message: EditorChannelMessage): boolean {
-  try {
-    channel.postMessage(message);
-    return true;
-  } catch (error) {
-    console.warn("[helm] failed to post editor message:", getErrorMessage(error));
-    return false;
-  }
-}
-
 function editorSessionHost(session: RemoteSession) {
   return [session.telemetry.ip, session.telemetry.ipv6, session.host]
     .map((value) => value.trim())
     .find((value) => value && value !== "-" && value !== "未知") ?? "";
-}
-
-type EditorWriteText = (path: string, content: string, sessionId?: string) => Promise<void>;
-
-let sharedDetachedEditorChannel: BroadcastChannel | null = null;
-let sharedDetachedEditorWindow: Window | null = null;
-let sharedEditorWriteText: EditorWriteText | null = null;
-let sharedDetachedEditorReady = false;
-const pendingDetachedEditorTabs = new Map<string, DetachedEditorTabPayload>();
-
-function detachedEditorTabKey(tab: DetachedEditorTabPayload) {
-  return `${tab.sessionId}\u0000${tab.path}`;
-}
-
-function flushPendingDetachedEditorTabs(channel: BroadcastChannel) {
-  const tabs = Array.from(pendingDetachedEditorTabs.values());
-  if (tabs.length === 0) return;
-  tabs.forEach((tab, index) => {
-    const sent = postEditorMessage(channel, { type: index === 0 ? "init" : "addTab", ...tab });
-    if (sent) pendingDetachedEditorTabs.delete(detachedEditorTabKey(tab));
-  });
-}
-
-function queueDetachedEditorTab(channel: BroadcastChannel, tab: DetachedEditorTabPayload) {
-  if (sharedDetachedEditorReady && postEditorMessage(channel, { type: "addTab", ...tab })) return;
-  pendingDetachedEditorTabs.set(detachedEditorTabKey(tab), tab);
-}
-
-function closeDetachedEditorChannel(channel?: BroadcastChannel) {
-  if (channel && sharedDetachedEditorChannel !== channel) return;
-  const target = channel ?? sharedDetachedEditorChannel;
-  if (!target) return;
-  target.close();
-  if (sharedDetachedEditorChannel === target) sharedDetachedEditorChannel = null;
-  sharedDetachedEditorWindow = null;
-  sharedEditorWriteText = null;
-  sharedDetachedEditorReady = false;
-  pendingDetachedEditorTabs.clear();
-}
-
-export function closeSharedDetachedEditorChannel() {
-  closeDetachedEditorChannel();
-}
-
-function createDetachedEditorChannel(initialTab: DetachedEditorTabPayload, writeText: EditorWriteText) {
-  const channel = new BroadcastChannel(EDITOR_CHANNEL_NAME);
-  sharedDetachedEditorChannel = channel;
-  sharedEditorWriteText = writeText;
-  sharedDetachedEditorReady = false;
-  pendingDetachedEditorTabs.set(detachedEditorTabKey(initialTab), initialTab);
-  channel.onmessage = (event: MessageEvent<EditorChannelMessage>) => {
-    const payload = event.data;
-    if (payload.type === "ready") {
-      sharedDetachedEditorReady = true;
-      flushPendingDetachedEditorTabs(channel);
-    }
-    if (payload.type === "save") {
-      const save = sharedEditorWriteText;
-      if (!save) {
-        postEditorMessage(channel, {
-          type: "error",
-          message: "主窗口暂时无法处理文件保存",
-          path: payload.path,
-          sessionId: payload.sessionId,
-          saveId: payload.saveId,
-        });
-        return;
-      }
-      void save(payload.path, payload.content, payload.sessionId)
-        .then(() => {
-          if (sharedDetachedEditorChannel === channel) {
-            postEditorMessage(channel, { type: "saved", path: payload.path, sessionId: payload.sessionId, saveId: payload.saveId, content: payload.content });
-          }
-        })
-        .catch((error) => {
-          if (sharedDetachedEditorChannel === channel) {
-            postEditorMessage(channel, { type: "error", message: getErrorMessage(error), path: payload.path, sessionId: payload.sessionId, saveId: payload.saveId });
-          }
-        });
-    }
-    if (payload.type === "close") {
-      closeDetachedEditorChannel(channel);
-    }
-  };
-  return channel;
-}
-
-function getOrCreateDetachedEditorChannel(initialTab: DetachedEditorTabPayload, writeText: EditorWriteText) {
-  sharedEditorWriteText = writeText;
-  return sharedDetachedEditorChannel ?? createDetachedEditorChannel(initialTab, writeText);
 }
 
 function FileManagerView({
@@ -953,7 +853,7 @@ function FileManagerView({
           }),
         ]);
       } else {
-        const existingWindow = sharedDetachedEditorWindow;
+        const existingWindow = getDetachedEditorWindow();
         if (existingWindow?.closed) {
           closeDetachedEditorChannel();
         } else if (existingWindow) {
@@ -975,11 +875,11 @@ function FileManagerView({
         if (!editorWindow) {
           throw new Error("无法打开编辑器窗口，请检查弹窗拦截设置");
         }
-        sharedDetachedEditorWindow = editorWindow;
+        setDetachedEditorWindow(editorWindow);
       }
       if (mountedRef.current && openingEditorRequestRef.current === requestId) message.destroy(messageKey);
     } catch (error) {
-      if (createdChannel && sharedDetachedEditorChannel === createdChannel) {
+      if (createdChannel) {
         closeDetachedEditorChannel(createdChannel);
       }
       if (mountedRef.current && openingEditorRequestRef.current === requestId) {
@@ -1504,6 +1404,7 @@ function FileManagerView({
             }}
           >
             <Table
+              virtual
               rowKey={(entry) => entry.path || joinPath(path, entry.name)}
               size="small"
               columns={resizableColumns}

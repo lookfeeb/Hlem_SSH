@@ -13,6 +13,8 @@ export type ApiServerInfo = {
   running: boolean;
   port: number;
   apiKey: string;
+  starting?: boolean;
+  error?: string | null;
 };
 
 type ApiServerConfigureResult = {

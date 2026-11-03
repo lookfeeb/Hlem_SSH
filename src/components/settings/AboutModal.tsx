@@ -1,3 +1,4 @@
+import "../../styles/modals/modal-about.css";
 import {
   AppleOutlined,
   CheckCircleOutlined,

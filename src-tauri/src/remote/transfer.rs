@@ -667,7 +667,7 @@ where
     Ok(())
 }
 
-fn ensure_transfer_not_canceled(cancel: &AtomicBool) -> AppResult<()> {
+pub(super) fn ensure_transfer_not_canceled(cancel: &AtomicBool) -> AppResult<()> {
     if cancel.load(Ordering::Relaxed) {
         Err(AppError::Remote("传输已取消".to_string()))
     } else {

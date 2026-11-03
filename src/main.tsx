@@ -1,9 +1,10 @@
-import { Suspense, lazy } from "react";
+import { Suspense, lazy, useLayoutEffect } from "react";
 import ReactDOM from "react-dom/client";
 import "antd/dist/reset.css";
 import "./styles.css";
-import App from "./App";
+const App = lazy(() => import("./App"));
 import { ErrorBoundary } from "./components/shared/ErrorBoundary";
+import { recordStartupPhase, showMainWindow } from "./lib/startup";
 
 const isEditorWindow = new URLSearchParams(window.location.search).has("editorWindow");
 const isLogWindow = new URLSearchParams(window.location.search).has("logWindow");
@@ -26,6 +27,18 @@ function BootFallback() {
   );
 }
 
+function MainWindowRoot() {
+  useLayoutEffect(() => {
+    recordStartupPhase("shell-committed");
+    // The committed fallback can be displayed before the App module finishes.
+    // A hidden WebView must never wait for animation frames to show its window.
+    void showMainWindow().catch((error) => {
+      console.warn("[helm] failed to show main window:", error);
+    });
+  }, []);
+  return <ErrorBoundary><Suspense fallback={<BootFallback />}><App /></Suspense></ErrorBoundary>;
+}
+
 const rootElement = document.getElementById("root");
 if (!rootElement) throw new Error("HelM root element is missing");
 
@@ -40,7 +53,7 @@ ReactDOM.createRoot(rootElement).render(
         <EditorWindowApp />
       </Suspense>
     ) : (
-      <App />
+      <MainWindowRoot />
     )}
   </ErrorBoundary>,
 );

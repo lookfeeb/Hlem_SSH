@@ -490,7 +490,8 @@ body.isResizingQuickCommandDock * {
   display: none !important;
 }
 
-.fileContent .ant-table-tbody > tr > td {
+.fileContent .ant-table-tbody > tr > td,
+.fileContent .ant-table-tbody-virtual .ant-table-cell {
   height: 40px;
   padding: 0 16px !important;
 }
@@ -583,7 +584,8 @@ body.isResizingColumn .ant-table-cell {
   transition: all .22s cubic-bezier(.4, 0, .2, 1) !important;
 }
 
-.ant-table-tbody > tr:hover > td {
+.ant-table-tbody > tr:hover > td,
+.fileContent .ant-table-tbody-virtual .ant-table-row:hover .ant-table-cell {
   background: linear-gradient(90deg,
     rgba(99, 102, 241, .04) 0%,
     rgba(99, 102, 241, .09) 50%,
@@ -591,6 +593,7 @@ body.isResizingColumn .ant-table-cell {
 }
 
 .ant-table-tbody > tr.fileTableRow-focused > td,
+.fileContent .ant-table-tbody-virtual .fileTableRow-focused .ant-table-cell,
 .ant-table-tbody > tr.fileTableRow-focused:hover > td {
   background: linear-gradient(90deg,
     rgba(16, 185, 129, .08) 0%,

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -157,12 +157,32 @@ pub struct JobEvent {
     pub event: String,
     pub timestamp: String,
     pub data: Value,
+    #[serde(skip)]
+    sse_data: OnceLock<String>,
+}
+
+impl JobEvent {
+    pub fn sse_data(&self) -> &str {
+        self.sse_data.get_or_init(|| {
+            #[derive(Serialize)]
+            struct Envelope<'a> {
+                timestamp: &'a str,
+                payload: &'a Value,
+            }
+            serde_json::to_string(&Envelope {
+                timestamp: &self.timestamp,
+                payload: &self.data,
+            })
+            .expect("job events contain serializable JSON values")
+        })
+    }
 }
 
 pub struct JobSubscription {
-    pub initial: Vec<JobEvent>,
-    pub receiver: broadcast::Receiver<JobEvent>,
+    pub initial: Vec<Arc<JobEvent>>,
+    pub receiver: broadcast::Receiver<Arc<JobEvent>>,
     pub terminal: bool,
+    pub last_event_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,13 +194,13 @@ pub enum JobRegistryError {
 
 pub struct JobRecord {
     state: RwLock<JobState>,
-    event_tx: broadcast::Sender<JobEvent>,
+    event_tx: broadcast::Sender<Arc<JobEvent>>,
     cancel_tx: watch::Sender<bool>,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 struct StoredJobEvent {
-    event: JobEvent,
+    event: Arc<JobEvent>,
     bytes: usize,
 }
 
@@ -382,12 +402,13 @@ impl JobRecord {
             last_event_id: 1,
         };
         let initial_data = json!({ "job": JobSummary::from(&snapshot) });
-        let initial_event = JobEvent {
+        let initial_event = Arc::new(JobEvent {
             id: 1,
             event: "queued".to_string(),
             timestamp: created_at,
             data: initial_data,
-        };
+            sse_data: OnceLock::new(),
+        });
         snapshot.last_event_id = initial_event.id;
         let initial_bytes = estimate_event_bytes(&initial_event, None);
         let (event_tx, _) = broadcast::channel(256);
@@ -410,6 +431,10 @@ impl JobRecord {
             cancel_tx,
             handle: Mutex::new(None),
         }
+    }
+
+    pub async fn session_id(&self) -> String {
+        self.state.read().await.snapshot.session_id.clone()
     }
 
     pub async fn job_id(&self) -> String {
@@ -458,19 +483,21 @@ impl JobRecord {
                 .collect(),
             receiver,
             terminal: state.snapshot.status.is_terminal(),
+            last_event_id: state.snapshot.last_event_id.max(after_event_id),
         }
     }
 
-    pub async fn snapshot_event(&self) -> (JobEvent, bool) {
+    pub async fn snapshot_event(&self) -> (Arc<JobEvent>, bool) {
         let state = self.state.read().await;
         let terminal = state.snapshot.status.is_terminal();
         (
-            JobEvent {
+            Arc::new(JobEvent {
                 id: state.snapshot.last_event_id,
                 event: "snapshot".to_string(),
                 timestamp: Utc::now().to_rfc3339(),
                 data: json!({ "job": snapshot_from_state(&state) }),
-            },
+                sse_data: OnceLock::new(),
+            }),
             terminal,
         )
     }
@@ -494,8 +521,8 @@ impl JobRecord {
             state.snapshot.started_at = Some(Utc::now().to_rfc3339());
         }
         let event = push_event(&mut state, "running", None, None);
-        drop(state);
         let _ = self.event_tx.send(event);
+        drop(state);
         true
     }
 
@@ -516,8 +543,8 @@ impl JobRecord {
         state.snapshot.status = JobStatus::Connecting;
         state.snapshot.started_at = Some(Utc::now().to_rfc3339());
         let event = push_event(&mut state, "connecting", None, None);
-        drop(state);
         let _ = self.event_tx.send(event);
+        drop(state);
         true
     }
 
@@ -571,10 +598,10 @@ impl JobRecord {
             &mut state,
             kind,
             Some(json!({ "text": text })),
-            Some(text_bytes.saturating_add(32)),
+            Some(text_bytes.saturating_mul(7).saturating_add(128)),
         );
-        drop(state);
         let _ = self.event_tx.send(event);
+        drop(state);
     }
 
     pub async fn finish_result(&self, result: ExecResult) {
@@ -612,8 +639,8 @@ impl JobRecord {
         };
         state.snapshot.status = status;
         let event = push_event(&mut state, event_name, None, None);
-        drop(state);
         let _ = self.event_tx.send(event);
+        drop(state);
     }
 
     pub async fn finish_error(&self, error: String) {
@@ -644,8 +671,8 @@ impl JobRecord {
         state.snapshot.completed_at = Some(Utc::now().to_rfc3339());
         state.completed_at_instant = Some(Instant::now());
         let event = push_event(&mut state, "failed", None, None);
-        drop(state);
         let _ = self.event_tx.send(event);
+        drop(state);
     }
 
     pub async fn request_cancel(&self) -> bool {
@@ -679,8 +706,8 @@ impl JobRecord {
         state.snapshot.completed_at = Some(Utc::now().to_rfc3339());
         state.completed_at_instant = Some(Instant::now());
         let event = push_event(&mut state, "canceled", None, None);
-        drop(state);
         let _ = self.event_tx.send(event);
+        drop(state);
     }
 }
 
@@ -696,16 +723,17 @@ fn push_event(
     event_name: &str,
     data: Option<Value>,
     data_bytes_hint: Option<usize>,
-) -> JobEvent {
+) -> Arc<JobEvent> {
     let id = state.next_event_id;
     state.next_event_id = state.next_event_id.saturating_add(1);
     state.snapshot.last_event_id = id;
-    let event = JobEvent {
+    let event = Arc::new(JobEvent {
         id,
         event: event_name.to_string(),
         timestamp: Utc::now().to_rfc3339(),
         data: data.unwrap_or_else(|| json!({ "job": JobSummary::from(&state.snapshot) })),
-    };
+        sse_data: OnceLock::new(),
+    });
     let bytes = estimate_event_bytes(&event, data_bytes_hint);
     state.event_bytes = state.event_bytes.saturating_add(bytes);
     state.events.push_back(StoredJobEvent {
@@ -783,6 +811,41 @@ impl BoundedTextTail {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn concurrent_output_broadcasts_follow_committed_event_order() {
+        let record = std::sync::Arc::new(super::JobRecord::new("test".into(), "echo".into(), 1000));
+        let mut subscription = record.subscribe(0).await;
+        let mut tasks = Vec::new();
+        for index in 0..50 {
+            let record = record.clone();
+            tasks.push(tokio::spawn(async move {
+                record.append_stdout(format!("line {index}\n")).await;
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        for id in 2..52 {
+            assert_eq!(subscription.receiver.recv().await.unwrap().id, id);
+        }
+    }
+    #[tokio::test]
+    async fn replay_and_live_events_share_payload_and_sse_serialization() {
+        let record = super::JobRecord::new("test".into(), "echo".into(), 1000);
+        let mut live = record.subscribe(0).await;
+        record.append_stdout("中文\n".repeat(1000)).await;
+        let received = live.receiver.recv().await.unwrap();
+        let replay = record.subscribe(1).await;
+        assert!(std::sync::Arc::ptr_eq(&received, &replay.initial[0]));
+        assert_eq!(
+            received.sse_data().as_ptr(),
+            replay.initial[0].sse_data().as_ptr()
+        );
+        let wire: serde_json::Value = serde_json::from_str(received.sse_data()).unwrap();
+        assert_eq!(wire["payload"]["text"], "中文\n".repeat(1000));
+        assert_eq!(replay.last_event_id, received.id);
+        assert_eq!(record.session_id().await, "test");
+    }
     use super::{
         JobRegistry, JobRegistryError, JobStatus, MAX_ACTIVE_JOBS_PER_SESSION, MAX_JOB_EVENT_BYTES,
         MAX_JOB_OUTPUT_BYTES,

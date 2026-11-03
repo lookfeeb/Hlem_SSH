@@ -51,6 +51,7 @@ mod runtime_transfer;
 mod sftp;
 mod ssh;
 mod telemetry;
+mod terminal_stream;
 mod transfer;
 mod transfer_history;
 
@@ -60,6 +61,7 @@ use proxy::*;
 use sftp::*;
 use ssh::*;
 use telemetry::*;
+use terminal_stream::*;
 use transfer::*;
 
 fn lock_unpoisoned<'a, T>(mutex: &'a StdMutex<T>, context: &str) -> std::sync::MutexGuard<'a, T> {
@@ -83,6 +85,7 @@ const LATENCY_PROBE_TIMEOUT_MS: u64 = 2_000;
 const DEFAULT_LATENCY_PROBE_SAMPLES: u8 = 5;
 const MAX_LATENCY_PROBE_SAMPLES: u8 = 10;
 const MAX_SFTP_TRANSFER_CONCURRENCY: usize = 4;
+const MAX_PENDING_TRANSFERS_PER_SFTP: usize = 128;
 const SFTP_TRANSFER_POOL_SIZE: usize = 4;
 const SFTP_TRANSFER_POOL_WAIT: Duration = Duration::from_secs(3);
 const MAX_SFTP_SEARCH_CONCURRENCY: usize = 12;
@@ -695,6 +698,7 @@ struct TerminalRecord {
     info: TerminalInfo,
     writer: Arc<Mutex<TerminalWriter>>,
     output_gate: Arc<Mutex<TerminalOutputGate>>,
+    flow: Arc<TerminalFlowControl>,
     reader: Arc<StdMutex<Option<JoinHandle<()>>>>,
     closed: Arc<AtomicBool>,
 }
@@ -706,6 +710,8 @@ struct PendingTerminalOutput {
 }
 
 struct TerminalOutputGate {
+    channel: Option<tauri::ipc::Channel<tauri::ipc::Response>>,
+    flow: Arc<TerminalFlowControl>,
     streaming: bool,
     pending: VecDeque<PendingTerminalOutput>,
     pending_bytes: usize,
@@ -715,6 +721,8 @@ struct TerminalOutputGate {
 impl TerminalOutputGate {
     fn new(max_pending_bytes: usize) -> Self {
         Self {
+            channel: None,
+            flow: Arc::new(TerminalFlowControl::default()),
             streaming: false,
             pending: VecDeque::new(),
             pending_bytes: 0,
@@ -722,6 +730,7 @@ impl TerminalOutputGate {
         }
     }
 
+    #[cfg(test)]
     fn route(&mut self, kind: &str, data: &[u8]) -> Option<PendingTerminalOutput> {
         let output = PendingTerminalOutput {
             kind: kind.to_string(),
@@ -903,6 +912,8 @@ struct TransferRecord {
     cleanup_sftp: Option<Arc<SftpSession>>,
     cancel: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    control_notify: Arc<Notify>,
+    started: bool,
     handle: Option<JoinHandle<()>>,
 }
 

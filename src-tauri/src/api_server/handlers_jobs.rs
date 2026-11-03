@@ -11,7 +11,6 @@ use axum::{
 };
 use futures_util::{stream, StreamExt};
 use serde::Deserialize;
-use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::remote::ExecStreamChunk;
@@ -257,8 +256,7 @@ pub async fn rest_job_cancel(
 ) -> Result<Json<JobSnapshot>, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
     let record = find_job(&state, &path.job_id).await?;
-    let snapshot = record.snapshot().await;
-    verify_session_access(&state, &snapshot.session_id)?;
+    verify_session_access(&state, &record.session_id().await)?;
     let canceled = state
         .jobs
         .cancel(&path.job_id)
@@ -276,8 +274,7 @@ pub async fn rest_job_events(
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     require_auth(&state, &headers).await?;
     let record = find_job(&state, &path.job_id).await?;
-    let snapshot = record.snapshot().await;
-    verify_session_access(&state, &snapshot.session_id)?;
+    verify_session_access(&state, &record.session_id().await)?;
     let header_after = headers
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
@@ -292,27 +289,39 @@ pub async fn rest_job_events(
             .map(|event| Ok::<Event, Infallible>(to_sse_event(event))),
     );
     let live = stream::unfold(
-        (record, subscription.receiver, subscription.terminal),
-        |(record, mut receiver, done)| async move {
+        (
+            record,
+            subscription.receiver,
+            subscription.terminal,
+            subscription.last_event_id,
+        ),
+        |(record, mut receiver, done, mut last_id)| async move {
             if done {
                 return None;
             }
-            match receiver.recv().await {
-                Ok(event) => {
-                    let terminal = is_terminal_event(&event.event);
-                    Some((
-                        Ok::<Event, Infallible>(to_sse_event(event)),
-                        (record, receiver, terminal),
-                    ))
+            loop {
+                match receiver.recv().await {
+                    Ok(event) => {
+                        if event.id <= last_id {
+                            continue;
+                        }
+                        last_id = event.id;
+                        let terminal = is_terminal_event(&event.event);
+                        return Some((
+                            Ok::<Event, Infallible>(to_sse_event(event)),
+                            (record, receiver, terminal, last_id),
+                        ));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let (event, terminal) = record.snapshot_event().await;
+                        last_id = event.id;
+                        return Some((
+                            Ok::<Event, Infallible>(to_sse_event(event)),
+                            (record, receiver, terminal, last_id),
+                        ));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let (event, terminal) = record.snapshot_event().await;
-                    Some((
-                        Ok::<Event, Infallible>(to_sse_event(event)),
-                        (record, receiver, terminal),
-                    ))
-                }
-                Err(broadcast::error::RecvError::Closed) => None,
             }
         },
     );
@@ -348,17 +357,11 @@ fn map_registry_error(error: JobRegistryError) -> (StatusCode, Json<ApiError>) {
     (status, Json(ApiError { error: message }))
 }
 
-fn to_sse_event(event: JobEvent) -> Event {
+fn to_sse_event(event: std::sync::Arc<JobEvent>) -> Event {
     Event::default()
         .id(event.id.to_string())
-        .event(event.event)
-        .data(
-            json!({
-                "timestamp": event.timestamp,
-                "payload": event.data
-            })
-            .to_string(),
-        )
+        .event(&event.event)
+        .data(event.sse_data())
 }
 
 fn is_terminal_event(event: &str) -> bool {
