@@ -293,7 +293,7 @@ export function TunnelDrawer({
       <div className="tunnelTableScroll">
         <div className="tunnelTemplateTable">
           <div className="tunnelTableHead">
-            <span>名称</span><span>类型</span><span>会话</span><span>监听与目标</span><span>状态</span><span>操作</span>
+            <span>名称</span><span>类型</span><span>关联会话</span><span>监听与目标</span><span>状态</span><span>操作</span>
           </div>
           <div className="tunnelTableBody">
             {filteredTunnels.map((tunnel) => {
@@ -419,7 +419,7 @@ export function TunnelDrawer({
       <div className="tunnelTableScroll">
         <div className="tunnelRunningTable">
           <div className="tunnelTableHead">
-            <span>类型</span><span>会话</span><span>监听与目标</span><span>运行时长</span><span>状态</span><span>操作</span>
+            <span>类型</span><span>关联会话</span><span>监听与目标</span><span>运行时长</span><span>状态</span><span>操作</span>
           </div>
           <div className="tunnelTableBody">
             {filteredForwards.map((forward) => (
@@ -880,8 +880,7 @@ function TunnelConfigModal({
                   <Select
                     placeholder="选择 SSH 会话"
                     options={sessions.map((session) => ({ label: session.name, value: session.id }))}
-                    showSearch
-                    optionFilterProp="label"
+                    showSearch={false}
                     notFoundContent="暂无可用会话"
                   />
                 </Form.Item>

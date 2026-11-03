@@ -216,6 +216,70 @@ mod tests {
         ssh.ssh.connect_timeout_ms += 1_000;
         assert!(session_connection_config_changed(&previous, &ssh));
     }
+
+    #[test]
+    fn tunnel_binding_survives_session_edits_and_resolves_latest_connection_config() {
+        use crate::commands::{
+            build_session_for_connect, session_matches_current_connection_config,
+        };
+        use crate::config::TunnelInput;
+        use crate::vault::{VaultStore, AUTO_PASSWORD, VAULT_FILE_NAME};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VAULT_FILE_NAME);
+        let mut store = VaultStore::new(path.clone());
+        store.create(AUTO_PASSWORD).unwrap();
+        let snapshot = store.create_session(input()).unwrap();
+        let session_id = snapshot.data.sessions[0].id.clone();
+        let snapshot = store
+            .create_tunnel(TunnelInput {
+                name: "RDP".into(),
+                session_id: session_id.clone(),
+                forward_type: "local".into(),
+                bind_host: "127.0.0.1".into(),
+                bind_port: 13389,
+                target_host: "192.168.153.10".into(),
+                target_port: 3389,
+            })
+            .unwrap();
+        let tunnel_id = snapshot.data.tunnels[0].id.clone();
+        let tunnel = store
+            .set_tunnel_enabled(&tunnel_id, true)
+            .unwrap()
+            .data
+            .tunnels[0]
+            .clone();
+        let (original, _) = build_session_for_connect(&store, &session_id).unwrap();
+
+        let mut renamed = input();
+        renamed.name = "新名称".into();
+        store.update_session(&session_id, renamed).unwrap();
+        let (current, _) = build_session_for_connect(&store, &tunnel.session_id).unwrap();
+        assert_eq!(current.name, "新名称");
+        assert!(session_matches_current_connection_config(&store, &original).unwrap());
+        assert_eq!(store.tunnels().unwrap(), vec![tunnel.clone()]);
+
+        let mut changed = input();
+        changed.name = "新名称".into();
+        changed.host = "10.0.0.2".into();
+        changed.port = 2222;
+        changed.username = "admin".into();
+        changed.auth = crate::config::AuthConfig::password(Some("changed".into()));
+        store.update_session(&session_id, changed).unwrap();
+        assert!(!session_matches_current_connection_config(&store, &original).unwrap());
+        drop(store);
+
+        let mut store = VaultStore::new(path);
+        store.unlock(AUTO_PASSWORD).unwrap();
+        assert_eq!(store.tunnels().unwrap(), vec![tunnel.clone()]);
+        let (connection, _) = build_session_for_connect(&store, &tunnel.session_id).unwrap();
+        assert_eq!(connection.id, session_id);
+        assert_eq!(connection.name, "新名称");
+        assert_eq!(connection.host, "10.0.0.2");
+        assert_eq!(connection.port, 2222);
+        assert_eq!(connection.username, "admin");
+        assert_eq!(connection.auth.password.as_deref(), Some("changed"));
+    }
 }
 
 #[tauri::command]
