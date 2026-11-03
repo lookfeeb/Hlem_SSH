@@ -1,8 +1,8 @@
 import { CheckCircleFilled, CheckOutlined, ClockCircleOutlined, CloseCircleFilled, CodeOutlined, CopyOutlined, CalendarOutlined } from "@ant-design/icons";
-import { Button, Modal, Segmented } from "antd";
+import { Alert, Button, Modal, Segmented } from "antd";
 import { useMemo, useState } from "react";
 import type { ApiLogEntry } from "../../api/appApi";
-import { apiLogEntryKey, extractApiLogOutputs, formatApiLogResponse } from "../../lib/apiLogEntries";
+import { apiLogCommand, apiLogEntryKey, apiLogResponseNotices, extractApiLogOutputs, formatApiLogDecodedResponse, formatApiLogReadableResponse, formatApiLogResponse } from "../../lib/apiLogEntries";
 import { writeClipboardText } from "../../lib/clipboard";
 import { formatBeijingMonthDayTime } from "../../lib/format";
 import { useMountedRef, useTimeoutRegistry } from "../../lib/reactLifecycle";
@@ -20,11 +20,11 @@ export function ApiLogStatus({ success, detailed = false }: { success: boolean; 
 export function formatApiLogDetail(log: ApiLogEntry) {
   return [
     `时间: ${formatBeijingMonthDayTime(log.timestamp, log.timestamp, true)}`,
-    `状态: ${log.success ? "成功" : "失败"}`,
+    `调用状态: ${log.success ? "成功" : "失败"}`,
     `类型: ${log.action}`,
-    `命令: ${log.detail}`,
+    `命令: ${apiLogCommand(log)}`,
     `耗时: ${log.durationMs}ms`,
-    ...(log.response ? [`\n--- 响应 ---\n${log.response}`] : []),
+    ...(log.response ? [`\n--- 响应（可读） ---\n${formatApiLogDecodedResponse(log.response)}`] : []),
   ].join("\n");
 }
 
@@ -63,11 +63,11 @@ export function ApiLogDetailModal({ log, onClose }: { log: ApiLogEntry | null; o
         <dl className="logDetailFacts">
           <div><dt><CalendarOutlined />时间</dt><dd>{formatBeijingMonthDayTime(log.timestamp, log.timestamp, true)}</dd></div>
           <div><dt><CodeOutlined />类型</dt><dd><ApiLogTypeBadge action={log.action} /></dd></div>
-          <div><dt>{log.success ? <CheckCircleFilled /> : <CloseCircleFilled />}状态</dt><dd><ApiLogStatus success={log.success} detailed /></dd></div>
+          <div><dt>{log.success ? <CheckCircleFilled /> : <CloseCircleFilled />}调用状态</dt><dd><ApiLogStatus success={log.success} detailed /></dd></div>
           <div><dt><ClockCircleOutlined />耗时</dt><dd>{log.durationMs}<span className="logDetailUnit">ms</span></dd></div>
         </dl>
       </section>
-      <section className="logDetailSection" aria-labelledby="logCommandHeading"><h2 id="logCommandHeading">命令 / 操作</h2><LogCodeBlock text={log.detail} /></section>
+      <section className="logDetailSection" aria-labelledby="logCommandHeading"><h2 id="logCommandHeading">命令 / 操作</h2><LogCodeBlock text={apiLogCommand(log)} /></section>
       <LogResponse text={log.response ?? ""} />
     </div>}
   </Modal>;
@@ -75,11 +75,14 @@ export function ApiLogDetailModal({ log, onClose }: { log: ApiLogEntry | null; o
 
 function LogResponse({ text }: { text: string }) {
   const outputs = useMemo(() => extractApiLogOutputs(text), [text]);
+  const notices = useMemo(() => apiLogResponseNotices(text), [text]);
+  const readable = useMemo(() => formatApiLogReadableResponse(text), [text]);
   const [mode, setMode] = useState("output");
   const showOutputs = outputs.length > 0 && mode === "output";
   return <section className="logDetailSection" aria-labelledby="logResponseHeading">
-    <div className="logResponseHeading"><h2 id="logResponseHeading">响应</h2>{outputs.length > 0 && <Segmented size="small" aria-label="响应显示方式" value={mode} onChange={setMode} options={[{ label: "文本输出", value: "output" }, { label: "JSON", value: "json" }]} />}</div>
-    {showOutputs ? <div className="logResponseOutputs">{outputs.map((output, index) => <LogCodeBlock key={index} text={output.text} response outputLabel={output.label} />)}</div> : <LogCodeBlock key="json" text={text} response />}
+    <div className="logResponseHeading"><h2 id="logResponseHeading">响应</h2><Segmented size="small" aria-label="响应显示方式" value={mode} onChange={setMode} options={[{ label: "可读内容", value: "output" }, { label: "原始内容", value: "raw" }]} /></div>
+    {notices.map((notice) => <Alert key={notice} type="warning" showIcon title={notice} />)}
+    {showOutputs ? <div className="logResponseOutputs">{outputs.map((output, index) => <LogCodeBlock key={index} text={output.text} response outputLabel={output.label} />)}</div> : <LogCodeBlock key={mode} text={mode === "raw" ? text : readable} response outputLabel={mode === "raw" ? "原始响应" : "结构化 / 文本输出"} />}
   </section>;
 }
 

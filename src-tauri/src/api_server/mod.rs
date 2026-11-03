@@ -600,30 +600,84 @@ fn response_log_preview(command: &str, response: &str, max_chars: usize) -> Opti
         return Some("[响应已隐藏：命令可能包含敏感信息]".to_string());
     }
 
-    let candidate = take_chars(response, max_chars.saturating_mul(2).max(max_chars));
-    let mut redacted_lines = Vec::new();
+    let mut preview = String::new();
+    let mut remaining = max_chars;
     let mut private_key_block = false;
-    for line in candidate.lines() {
+    for line in response.split_inclusive('\n') {
         let lower = line.to_ascii_lowercase();
-        if lower.contains("-----begin ") && lower.contains("private key-----") {
+        let redacted = if lower.contains("-----begin ") && lower.contains("private key-----") {
             private_key_block = true;
-            redacted_lines.push("[私钥内容已隐藏]");
-            continue;
-        }
-        if private_key_block {
+            "[私钥内容已隐藏]\n"
+        } else if private_key_block {
             if lower.contains("-----end ") && lower.contains("private key-----") {
                 private_key_block = false;
             }
             continue;
-        }
-        if contains_sensitive_log_marker(line) {
-            redacted_lines.push("[敏感内容已隐藏]");
+        } else if contains_sensitive_log_marker(line) {
+            "[敏感内容已隐藏]\n"
         } else {
-            redacted_lines.push(line);
+            line
+        };
+        let part = take_chars(redacted, remaining);
+        remaining -= part.chars().count();
+        preview.push_str(&part);
+        if remaining == 0 {
+            break;
         }
     }
-    let preview = take_chars(&redacted_lines.join("\n"), max_chars);
     (!preview.is_empty()).then_some(preview)
+}
+
+const MAX_LOG_STREAM_CHARS: usize = 64 * 1024;
+const MAX_LOG_COMMAND_CHARS: usize = 64 * 1024;
+
+// The JSON envelope is serialized after bounding/redacting each stream, so a
+// large stdout can never cut the envelope or discard stderr and the exit code.
+fn execution_log_response(command: &str, result: &impl Serialize) -> Option<String> {
+    let source = serde_json::to_value(result).ok()?;
+    let mut record = serde_json::Map::new();
+    record.insert("logFormat".into(), serde_json::json!("exec-v1"));
+    record.insert(
+        "command".into(),
+        serde_json::json!(command_log_detail(command, MAX_LOG_COMMAND_CHARS)),
+    );
+    record.insert(
+        "commandTruncated".into(),
+        serde_json::json!(command.chars().count() > MAX_LOG_COMMAND_CHARS),
+    );
+    for key in [
+        "exitStatus",
+        "timedOut",
+        "outputTruncated",
+        "stdoutBytes",
+        "stderrBytes",
+        "durationMs",
+        "executionMs",
+        "queueMs",
+        "connectionMs",
+        "channelOpenMs",
+        "status",
+        "jobId",
+    ] {
+        if let Some(value) = source.get(key) {
+            record.insert(key.into(), value.clone());
+        }
+    }
+    for key in ["stdout", "stderr", "error"] {
+        if let Some(text) = source.get(key).and_then(serde_json::Value::as_str) {
+            record.insert(
+                key.into(),
+                serde_json::json!(
+                    response_log_preview(command, text, MAX_LOG_STREAM_CHARS).unwrap_or_default()
+                ),
+            );
+            record.insert(
+                format!("{key}Truncated"),
+                serde_json::json!(text.chars().count() > MAX_LOG_STREAM_CHARS),
+            );
+        }
+    }
+    Some(serde_json::Value::Object(record).to_string())
 }
 
 fn contains_sensitive_log_marker(value: &str) -> bool {
@@ -995,6 +1049,104 @@ mod tests {
             response_log_preview("uname -a", "Linux helm", 2_000).as_deref(),
             Some("Linux helm")
         );
+    }
+
+    #[test]
+    fn execution_logs_preserve_long_json_stderr_and_status() {
+        let stdout = serde_json::json!({"pid": 3352182, "source": "print('中文')\n".repeat(500)})
+            .to_string();
+        let result = serde_json::json!({"stdout": stdout, "stderr": "connection refused\n", "exitStatus": 1, "timedOut": false, "outputTruncated": false});
+        let command = "python3 - <<'PY'\nprint(1)\nPY";
+        let saved: serde_json::Value =
+            serde_json::from_str(&super::execution_log_response(command, &result).unwrap())
+                .unwrap();
+        assert_eq!(saved["command"], command);
+        assert_eq!(saved["stdout"], stdout);
+        assert_eq!(saved["stderr"], "connection refused\n");
+        assert_eq!(saved["exitStatus"], 1);
+        assert_eq!(saved["stdoutTruncated"], false);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(saved["stdout"].as_str().unwrap()).is_ok()
+        );
+    }
+
+    #[test]
+    fn execution_logs_bound_streams_without_breaking_the_envelope_or_redaction() {
+        let result = serde_json::json!({"stdout": "中".repeat(super::MAX_LOG_STREAM_CHARS + 1), "stderr": "password=do-not-save\n", "exitStatus": 2});
+        let saved: serde_json::Value =
+            serde_json::from_str(&super::execution_log_response("sample", &result).unwrap())
+                .unwrap();
+        assert_eq!(
+            saved["stdout"].as_str().unwrap().chars().count(),
+            super::MAX_LOG_STREAM_CHARS
+        );
+        assert_eq!(saved["stdoutTruncated"], true);
+        assert_eq!(saved["exitStatus"], 2);
+        assert!(!saved.to_string().contains("do-not-save"));
+        let hidden = super::execution_log_response("curl -H 'Authorization: Bearer private-value'", &serde_json::json!({"stdout":"private-value", "stderr":"private-value", "error":"private-value"})).unwrap();
+        assert!(!hidden.contains("private-value"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn api_listener_cannot_be_inherited_by_the_update_installer() {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
+        let listener = super::bind_api_listener(0).await.unwrap();
+        let mut flags = 0;
+        assert_ne!(
+            unsafe { GetHandleInformation(listener.as_raw_socket() as HANDLE, &mut flags) },
+            0
+        );
+        assert_eq!(
+            flags & HANDLE_FLAG_INHERIT,
+            0,
+            "an updater child can retain this listening socket after the application exits"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn api_port_is_reusable_while_the_updater_child_is_still_alive() {
+        use std::{
+            io::{BufRead, BufReader},
+            os::windows::process::CommandExt,
+            process::{Child, Command, Stdio},
+        };
+        struct OwnedChild(Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let listener = super::bind_api_listener(0).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut child = OwnedChild(
+            Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "[Console]::WriteLine('ready'); Start-Sleep -Seconds 20",
+                ])
+                .creation_flags(0x08000000)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut ready = String::new();
+        BufReader::new(child.0.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        drop(listener);
+        let replacement = super::bind_api_listener(port)
+            .await
+            .expect("the updater must not retain the old listening socket");
+        assert!(child.0.try_wait().unwrap().is_none());
+        drop(replacement);
     }
 
     #[test]

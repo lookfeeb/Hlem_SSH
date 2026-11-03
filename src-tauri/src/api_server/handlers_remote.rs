@@ -24,9 +24,9 @@ use super::field_catalog;
 use super::guard::check_dangerous_command;
 use super::openapi;
 use super::{
-    allowed_session_ids_snapshot, command_log_detail, friendly_error_detail, map_remote_error,
-    push_log, push_log_with_response, response_log_preview, ApiError, ApiExecutionPermit,
-    ApiServerState, MAX_UPLOAD_BODY,
+    allowed_session_ids_snapshot, command_log_detail, execution_log_response,
+    friendly_error_detail, map_remote_error, push_log, push_log_with_response, ApiError,
+    ApiExecutionPermit, ApiServerState, MAX_UPLOAD_BODY,
 };
 
 pub(super) const MAX_API_EXEC_TIMEOUT_MS: u64 = 5 * 60_000;
@@ -883,7 +883,7 @@ pub async fn rest_exec(
             result.duration_ms = request_started.elapsed().as_millis();
             let elapsed = elapsed_ms(request_started);
             let success = exec_success(&result);
-            let preview = response_log_preview(&body.command, &result.stdout, 2_000);
+            let preview = execution_log_response(&body.command, &result);
             push_log_with_response(&state, "rest/exec", &detail, success, elapsed, preview).await;
             Ok(Json(result))
         }

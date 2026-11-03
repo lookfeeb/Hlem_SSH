@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractApiLogOutputs, filterApiLogEntries, formatApiLogResponse, mergeApiLogEntries } from "../src/lib/apiLogEntries";
+import { apiLogCommand, apiLogResponseNotices, decodePowerShellOutput, extractApiLogOutputs, filterApiLogEntries, formatApiLogDecodedResponse, formatApiLogReadableResponse, formatApiLogResponse, mergeApiLogEntries } from "../src/lib/apiLogEntries";
 
 function log(timestamp: string, detail: string) {
   return { timestamp, action: "exec", detail, success: true, durationMs: 1 };
@@ -18,9 +18,60 @@ test("API log text view keeps stdout and stderr separate and ignores non-text pa
   assert.deepEqual(extractApiLogOutputs('{"stdout":"ok\\n","stderr":"error\\n"}'), [
     { label: "标准输出", text: "ok\n" }, { label: "错误输出", text: "error\n" },
   ]);
-  for (const response of ['{"output":5}', '{"return":{"out-data":"YWJj"}}', '{"output":"truncated...', "plain\\ntext"]) {
+  for (const response of ['{"output":5}', '{"output":"truncated...', "plain\\ntext"]) {
     assert.deepEqual(extractApiLogOutputs(response), []);
   }
+});
+
+test("QEMU Base64 and Chinese PowerShell errors are readable, with separate guest exit status", () => {
+  const xml = '#< CLIXML\r\n<Objs><S S="Error">连接 127.0.0.1:19108 被拒绝_x000D__x000A_</S><S S="Error">A &amp; B &lt; C_x000D__x000A_</S></Objs>';
+  const guest = { return: { exitcode: 1, "err-data": Buffer.from(xml).toString("base64"), "err-truncated": false, exited: true } };
+  for (const response of [JSON.stringify(guest), JSON.stringify({ logFormat: "exec-v1", stdout: JSON.stringify(guest), stderr: "", exitStatus: 0, timedOut: false })]) {
+    const readable = formatApiLogDecodedResponse(response);
+    assert.ok(readable.includes("退出码: 1"));
+    assert.ok(readable.includes("连接 127.0.0.1:19108 被拒绝\r\nA & B < C"));
+    assert.ok(!readable.includes("CLIXML"));
+    assert.ok(!readable.includes(guest.return["err-data"]));
+  }
+});
+
+test("Base64 decoding is limited to explicit output fields and preserves binary or invalid input", () => {
+  assert.equal(extractApiLogOutputs('{"return":{"out-data":"YWJj"}}')[0].text, "abc");
+  for (const payload of ["not-base64", "YWJ", "AP8=", "/w=="]) {
+    const result = extractApiLogOutputs(JSON.stringify({ return: { "out-data": payload } }));
+    assert.equal(result[0].text, payload);
+    assert.ok(result[0].label.includes("原始 Base64"));
+  }
+  assert.equal(extractApiLogOutputs('{"stdout":"YWJj"}')[0].text, "YWJj");
+});
+
+test("CLIXML decodes XML and PowerShell escapes once and never resolves external entities", () => {
+  assert.equal(decodePowerShellOutput('#< CLIXML\n<Objs><S>_x005F_x000D_ &amp;lt; &#x4e2d;</S></Objs>'), "_x000D_ &lt; 中");
+  const unsafe = '#< CLIXML\n<!DOCTYPE x [<!ENTITY external SYSTEM "file:///private">]><Objs><S>&external;</S></Objs>';
+  assert.equal(decodePowerShellOutput(unsafe), unsafe);
+  assert.equal(decodePowerShellOutput("plain _x000A_"), "plain _x000A_");
+});
+
+test("structured source output expands actual newlines, preserves source escapes and numeric precision", () => {
+  const source = "import socket\nheader='\\r\\n'\n" + "print('中文')\n".repeat(500);
+  const response = '{"pid":9223372036854775807,"source":' + JSON.stringify(source) + '}';
+  const readable = formatApiLogReadableResponse(response);
+  assert.ok(readable.includes('"pid": 9223372036854775807'));
+  assert.ok(readable.includes("import socket\n    header='\\r\\n'\n"));
+  assert.ok(readable.includes("print('中文')"));
+  assert.ok(formatApiLogDecodedResponse(JSON.stringify({ stdout: response })).includes(readable));
+});
+
+test("execution envelopes expose full commands, stderr, truncation and legacy fallback", () => {
+  const response = JSON.stringify({ logFormat: "exec-v1", command: "python3 - <<'PY'\nprint(1)\nPY", stdout: "partial", stderr: "failed", exitStatus: 1, timedOut: true, stdoutTruncated: true, outputTruncated: true });
+  assert.equal(apiLogCommand({ ...log("1", "python3..."), response }), "python3 - <<'PY'\nprint(1)\nPY");
+  assert.equal(apiLogCommand(log("1", "legacy")), "legacy");
+  const readable = formatApiLogDecodedResponse(response);
+  assert.ok(readable.includes("failed"));
+  assert.ok(readable.includes("超时: 是"));
+  assert.equal(apiLogResponseNotices(response).length, 2);
+  assert.equal(apiLogResponseNotices('{"pid":1,"source":"cut').length, 1);
+  assert.equal(apiLogResponseNotices(JSON.stringify({ stdout: JSON.stringify({ return: { "err-truncated": true } }) })).length, 1);
 });
 
 test("API log initial load preserves events received while the request was in flight", () => {

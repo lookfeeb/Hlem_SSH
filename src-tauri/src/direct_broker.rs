@@ -289,9 +289,10 @@ fn protocol_info_as_bytes(
 #[cfg(windows)]
 fn std_socket_from_protocol_info(protocol_info: &[u8]) -> std::io::Result<StdTcpStream> {
     use std::os::windows::io::{FromRawSocket, RawSocket};
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
     use windows_sys::Win32::Networking::WinSock::{
         WSAGetLastError, WSASocketW, FROM_PROTOCOL_INFO, INVALID_SOCKET, WSAPROTOCOL_INFOW,
-        WSA_FLAG_OVERLAPPED,
+        WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED,
     };
 
     if protocol_info.len() != windows_protocol_info_size() {
@@ -315,7 +316,7 @@ fn std_socket_from_protocol_info(protocol_info: &[u8]) -> std::io::Result<StdTcp
             FROM_PROTOCOL_INFO,
             &info,
             0,
-            WSA_FLAG_OVERLAPPED,
+            WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT,
         )
     };
     if socket == INVALID_SOCKET {
@@ -323,7 +324,13 @@ fn std_socket_from_protocol_info(protocol_info: &[u8]) -> std::io::Result<StdTcp
             WSAGetLastError()
         }));
     }
-    Ok(unsafe { StdTcpStream::from_raw_socket(socket as RawSocket) })
+    let stream = unsafe { StdTcpStream::from_raw_socket(socket as RawSocket) };
+    // Duplicated protocol info can retain the original inheritance attribute
+    // despite WSASocketW's flags. Clear it on the adopted handle as well.
+    if unsafe { SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(stream)
 }
 
 #[cfg(windows)]
@@ -572,6 +579,18 @@ mod tests {
         let mut protocol_info = vec![0u8; windows_protocol_info_size()];
         stream.read_exact(&mut protocol_info).unwrap();
         let mut duplicated = std_socket_from_protocol_info(&protocol_info).unwrap();
+        {
+            use std::os::windows::io::AsRawSocket;
+            use windows_sys::Win32::Foundation::{
+                GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+            };
+            let mut flags = 0;
+            assert_ne!(
+                unsafe { GetHandleInformation(duplicated.as_raw_socket() as HANDLE, &mut flags) },
+                0
+            );
+            assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        }
         stream.write_all(&[BROKER_SOCKET_ACK]).unwrap();
         duplicated.write_all(b"ping").unwrap();
         let mut response = [0u8; 4];

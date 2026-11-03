@@ -21,8 +21,8 @@ use super::handlers_remote::{
 };
 use super::jobs::{JobEvent, JobRecord, JobRegistryError, JobSnapshot, JobStatus, JobSummary};
 use super::{
-    allowed_session_set_snapshot, command_log_detail, friendly_error_detail, push_log,
-    push_log_with_response, response_log_preview, ApiError, ApiServerState,
+    allowed_session_set_snapshot, command_log_detail, execution_log_response,
+    friendly_error_detail, push_log, push_log_with_response, ApiError, ApiServerState,
 };
 
 const DEFAULT_API_JOB_TIMEOUT_MS: u64 = 30 * 60_000;
@@ -204,7 +204,7 @@ async fn execute_job(
 
     let finished = record.snapshot().await;
     let success = finished.status == JobStatus::Completed;
-    let preview = response_log_preview(&command, &finished.stdout, 2_000);
+    let preview = execution_log_response(&command, &finished);
     let detail = if let Some(error) = &finished.error {
         friendly_error_detail(&format!("{} → {}", command, error), &state)
     } else {

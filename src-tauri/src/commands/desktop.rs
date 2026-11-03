@@ -722,7 +722,8 @@ fn verify_manifest_signature(
 fn spawn_update_installer(installer: &Path) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     {
-        let script = windows_update_script(installer, std::process::id());
+        let script =
+            windows_update_script(installer, std::process::id(), current_process_start_time()?);
         let mut command = Command::new("powershell");
         command.args([
             "-NoProfile",
@@ -736,6 +737,9 @@ fn spawn_update_installer(installer: &Path) -> AppResult<()> {
         #[cfg(target_os = "windows")]
         command.creation_flags(CREATE_NO_WINDOW);
         command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|error| AppError::Io(error.to_string()))?;
         Ok(())
@@ -755,21 +759,66 @@ fn spawn_update_installer(installer: &Path) -> AppResult<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn windows_update_script(installer: &Path, current_pid: u32) -> String {
+fn current_process_start_time() -> AppResult<u64> {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetCurrentProcess, GetProcessTimes},
+    };
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    if unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return Err(AppError::Io(std::io::Error::last_os_error().to_string()));
+    }
+    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_update_script(installer: &Path, current_pid: u32, started: u64) -> String {
     let installer_path = installer.display().to_string().replace('\'', "''");
     format!(
         r#"
+$ErrorActionPreference = 'Stop'
 $installer = '{installer_path}'
 $currentPid = {current_pid}
-$deadline = (Get-Date).AddSeconds(30)
-while ((Get-Process -Id $currentPid -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)) {{
-  Start-Sleep -Milliseconds 100
+try {{
+  $previous = Get-Process -Id $currentPid -ErrorAction SilentlyContinue
+  if ($null -ne $previous) {{
+    try {{
+      # Hold the process handle so a recycled PID cannot identify another process.
+      $null = $previous.Handle
+      if (-not $previous.HasExited -and $previous.StartTime.ToUniversalTime().ToFileTimeUtc() -eq {started}) {{
+        if (-not $previous.WaitForExit(30000)) {{
+          $previous.Kill()
+          if (-not $previous.WaitForExit(10000)) {{ throw 'HelM did not exit; installation cancelled.' }}
+        }}
+      }}
+    }} catch {{
+      # The process can finish between HasExited, Handle, StartTime and Kill.
+      if (-not $previous.HasExited) {{ throw }}
+    }} finally {{ $previous.Dispose() }}
+  }}
+  $setup = Start-Process -FilePath $installer -ArgumentList '{installer_args}' -WindowStyle Hidden -PassThru
+  try {{
+    # Wait only for the installer, not the restarted application's process tree.
+    $setup.WaitForExit()
+    $setupCode = $setup.ExitCode
+  }} finally {{ $setup.Dispose() }}
+  exit $setupCode
+}} catch {{
+  $_ | Out-String | Add-Content -LiteralPath ($installer + '.update.log') -Encoding UTF8
+  exit 1
 }}
-if (Get-Process -Id $currentPid -ErrorAction SilentlyContinue) {{
-  Stop-Process -Id $currentPid -Force -ErrorAction SilentlyContinue
-  Wait-Process -Id $currentPid -ErrorAction SilentlyContinue
-}}
-Start-Process -FilePath $installer -ArgumentList '{installer_args}' -Wait
 "#,
         installer_args = windows_update_installer_args().replace('\'', "''")
     )
@@ -1107,11 +1156,63 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_updater_waits_for_the_current_process_only() {
-        let script = windows_update_script(Path::new("C:\\Temp\\HelM-setup.exe"), 4242);
+        let script = windows_update_script(Path::new("C:\\Temp\\HelM-setup.exe"), 4242, 12345);
         assert!(script.contains("Get-Process -Id $currentPid"));
-        assert!(script.contains("Stop-Process -Id $currentPid"));
+        assert!(script.contains("$previous.Kill()"));
+        assert!(script.contains("ToFileTimeUtc() -eq 12345"));
+        assert!(script.contains("$previous.WaitForExit(10000)"));
+        assert!(script.contains("$setup.WaitForExit()"));
+        assert!(!script.contains(" -Wait\n"));
         assert!(script.contains("Start-Process -FilePath $installer"));
         assert!(!script.contains("Get-Process -Name"));
         assert!(!script.contains("Stop-Process -Name"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_updater_confirms_exit_before_installing_and_preserves_restart_args() {
+        // Exercise the actual PowerShell script against only processes created by
+        // this test. Cover both graceful exit and the bounded forced-exit path.
+        for (delay, force) in [(1, false), (20, true)] {
+            let root = tempdir().unwrap();
+            let installer = root.path().join("mock setup.cmd");
+            let marker = root.path().join("installed.txt");
+            std::fs::write(
+                &installer,
+                format!(
+                    "@echo off\r\necho %1 %2 > \"{}\"\r\nexit /b 0\r\n",
+                    marker.display()
+                ),
+            )
+            .unwrap();
+            let mut script = windows_update_script(&installer, 0, 0)
+                .replace("$currentPid = 0", "$currentPid = $owned.Id")
+                .replace("-eq 0", "-eq $ownedStarted");
+            if force {
+                script = script.replace("WaitForExit(30000)", "WaitForExit(100)");
+            }
+            // Assert the old process is gone at the exact installation boundary.
+            script = script.replace("  $setup = Start-Process", "  if (-not $owned.HasExited) { throw 'Old process is still running' }\n  $setup = Start-Process");
+            let runner = format!(
+                r#"
+$ErrorActionPreference = 'Stop'
+$owned = Start-Process powershell -ArgumentList '-NoProfile -Command Start-Sleep -Seconds {delay}' -WindowStyle Hidden -PassThru
+$ownedStarted = $owned.StartTime.ToUniversalTime().ToFileTimeUtc()
+try {{ {script} }} finally {{ if (-not $owned.HasExited) {{ $owned.Kill(); $owned.WaitForExit() }}; $owned.Dispose() }}
+"#
+            );
+            let result = Command::new("powershell")
+                .args(["-NoProfile", "-Command", &runner])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}; {:?}",
+                String::from_utf8_lossy(&result.stderr),
+                std::fs::read_to_string(format!("{}.update.log", installer.display()))
+            );
+            assert_eq!(std::fs::read_to_string(marker).unwrap().trim(), "/S /R");
+        }
     }
 }
