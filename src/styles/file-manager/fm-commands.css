@@ -493,7 +493,16 @@ body.isResizingQuickCommandDock * {
 .fileContent .ant-table-tbody > tr > td,
 .fileContent .ant-table-tbody-virtual .ant-table-cell {
   height: 40px;
-  padding: 0 16px !important;
+  padding: 8px 16px !important;
+}
+
+.fileContent .ant-table-tbody-virtual .ant-table-cell {
+  display: flex;
+  align-items: center;
+}
+
+.fileContent .ant-table-tbody-virtual .ant-table-selection-column {
+  justify-content: center;
 }
 
 .fileSearchLoading {

@@ -13,6 +13,7 @@ import { useAnimationFrameRegistry } from "../lib/reactLifecycle";
 import { registerTerminalSink } from "../lib/terminalRegistry";
 import { TerminalViewportFollower } from "../lib/terminalViewportFollow";
 import { TerminalInputHighlight } from "../lib/terminalInputHighlight";
+import { TerminalPromptHighlight } from "../lib/terminalPromptHighlight";
 import { TerminalRenderer } from "../lib/terminalRenderer";
 import { extractPromptCwd } from "../app/appHelpers";
 import { recordPerformance } from "../lib/performanceMetrics";
@@ -44,6 +45,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
   const viewportFollowerRef = useRef<TerminalViewportFollower | null>(null);
   const rendererRef = useRef<TerminalRenderer | null>(null);
   const inputHighlightRef = useRef<TerminalInputHighlight | null>(null);
+  const promptHighlightRef = useRef<TerminalPromptHighlight | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const appliedRef = useRef<AppliedTerminalState | null>(null);
   const layoutScheduledRef = useRef(false);
@@ -204,8 +206,11 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     rendererRef.current = renderer;
     const inputHighlight = new TerminalInputHighlight(terminal);
     inputHighlightRef.current = inputHighlight;
-    const eraseScreen = terminal.parser.registerCsiHandler({ final: "J" }, () => { inputHighlight.clear(); return false; });
-    const resetScreen = terminal.parser.registerEscHandler({ final: "c" }, () => { inputHighlight.clear(); return false; });
+    const promptHighlight = new TerminalPromptHighlight(terminal);
+    promptHighlightRef.current = promptHighlight;
+    const eraseScreen = terminal.parser.registerCsiHandler({ final: "J" }, () => { inputHighlight.clear(); promptHighlight.clear(); return false; });
+    const resetScreen = terminal.parser.registerEscHandler({ final: "c" }, () => { inputHighlight.clear(); promptHighlight.clear(); return false; });
+    const promptResize = terminal.onResize(() => promptHighlight.readback());
     const cwdMarker = terminal.parser.registerOscHandler(777, (data) => {
       if (!data.startsWith("cwd=")) return false;
       cwdContextRef.current.onCwd(data.slice(4));
@@ -217,15 +222,19 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     const readback = () => {
       readbackTimer = undefined;
       lastReadback = performance.now();
+      const tail = promptHighlight.readback();
       if (terminal.buffer.active.type === "alternate") return;
       const context = cwdContextRef.current;
-      const tail = terminalPromptTail(terminal);
       if (!isTerminalAtBottom(terminal) && hasInteractiveTerminalMarker(tail)) terminal.scrollToBottom();
       const cwd = extractPromptCwd(tail, context.username, context.loginPath);
       if (cwd && cwd !== lastCwd) { lastCwd = cwd; context.onCwd(cwd); }
     };
     const parsed = terminal.onWriteParsed(() => {
       inputHighlight.parsed();
+      if (terminal.buffer.active.type === "alternate") {
+        promptHighlight.clear();
+        return;
+      }
       // Read the decoded screen at most 20 Hz (5 Hz in background), once for
       // both prompt detection and viewport heuristics, never per byte chunk.
       const remaining = (activeRef.current ? 50 : 200) - (performance.now() - lastReadback);
@@ -298,9 +307,12 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
       parsed.dispose();
       if (readbackTimer !== undefined) clearTimeout(readbackTimer);
       inputHighlight.clear();
+      promptHighlight.clear();
+      promptResize.dispose();
       eraseScreen.dispose();
       resetScreen.dispose();
       inputHighlightRef.current = null;
+      promptHighlightRef.current = null;
       renderer.dispose();
       rendererRef.current = null;
       host.removeEventListener("wheel", handleViewportWheel);
@@ -349,6 +361,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     const sessionKey = session.id;
     if (appliedRef.current?.sessionKey !== sessionKey) {
       inputHighlightRef.current?.clear();
+      promptHighlightRef.current?.clear();
       terminal.reset();
       appliedRef.current = { sessionKey, offsets: new Map() };
     }
@@ -358,6 +371,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
 
     if (session.terminal.length === 0 && applied.offsets.size > 0) {
       inputHighlightRef.current?.clear();
+      promptHighlightRef.current?.clear();
       terminal.clear();
       applied.offsets.clear();
       return;
@@ -380,8 +394,8 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     if (!terminal || !session.terminalId) return;
     return registerTerminalSink(session.terminalId, {
       writeEntry: (entry, onConsumed) => writeOutputToTerminal(terminal, terminalEntryData(entry), onConsumed, entry.hasBareCarriageReturn),
-      clear: () => { inputHighlightRef.current?.clear(); terminal.clear(); },
-      reset: () => { inputHighlightRef.current?.clear(); terminal.reset(); },
+      clear: () => { inputHighlightRef.current?.clear(); promptHighlightRef.current?.clear(); terminal.clear(); },
+      reset: () => { inputHighlightRef.current?.clear(); promptHighlightRef.current?.clear(); terminal.reset(); },
     });
   }, [session.terminalId]);
 
@@ -542,7 +556,6 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
         </div>
       </Dropdown>
       <div className="terminalToolbar">
-        <span className="terminalColorLegend" aria-label="蓝色为用户输入，服务器输出保留原有配色"><span>用户输入</span><span>服务器输出</span></span>
         <input
           ref={commandInputRef}
           className="terminalToolbarInput"
@@ -615,17 +628,6 @@ function sliceTerminalEntryData(value: TerminalWriteData, start: number): Termin
 function isTerminalAtBottom(terminal: XtermTerminal) {
   const buffer = terminal.buffer.active;
   return buffer.viewportY >= Math.max(0, buffer.baseY - 1);
-}
-
-function terminalPromptTail(terminal: XtermTerminal) {
-  const buffer = terminal.buffer.active;
-  const end = buffer.baseY + buffer.cursorY;
-  const lines: string[] = [];
-  // Reuse xterm's decoded screen. Work is bounded regardless of output size.
-  for (let index = Math.max(0, end - 7); index <= end; index++) {
-    lines.push(buffer.getLine(index)?.translateToString(true) ?? "");
-  }
-  return lines.join("\n").slice(-8192);
 }
 
 function hasBareCarriageReturn(value: TerminalWriteData) {

@@ -44,10 +44,6 @@
   transition: border-color .15s, box-shadow .15s, background .15s;
 }
 
-.terminalColorLegend { display: flex; flex-shrink: 0; gap: 10px; font-size: 11px; color: #1f2937; }
-.terminalColorLegend span:first-child { color: #1d4ed8; }
-@media (max-width: 680px) { .terminalColorLegend { display: none; } }
-
 .terminalToolbarInput:hover {
   border-color: rgba(96, 165, 250, .58);
 }

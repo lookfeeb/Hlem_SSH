@@ -36,6 +36,7 @@ $terminalTests = @(
   "terminalRegistry.test.ts",
   "terminalFrame.test.ts",
   "terminalInputHighlight.test.ts",
+  "terminalPromptHighlight.test.ts",
   "terminalRenderer.test.ts",
   "performanceMetrics.test.ts",
   "terminalViewportFollow.test.ts"
