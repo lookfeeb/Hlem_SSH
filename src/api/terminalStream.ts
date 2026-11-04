@@ -33,7 +33,7 @@ export async function startTerminalStream(terminalId: string) {
   const output = new Channel<ArrayBuffer>((buffer) => {
     if (streams.get(terminalId) !== consumption) return;
     try {
-    const { kind, bytes } = decodeTerminalFrame(buffer);
+    const { kind, bytes, hasBareCarriageReturn } = decodeTerminalFrame(buffer);
     if (kind === "closed") { terminalClosed({ terminalId }); return; }
     let consumed = false;
     const onConsumed = () => {
@@ -41,7 +41,7 @@ export async function startTerminalStream(terminalId: string) {
     };
     if (!outputHandlers.size) { onConsumed(); return; }
     const event: TerminalOutputEvent = {
-      terminalId, kind,
+      terminalId, kind, hasBareCarriageReturn,
       data: kind === "system" ? decoder.decode(bytes) : "",
       dataBytes: kind === "system" ? undefined : bytes,
       onConsumed,

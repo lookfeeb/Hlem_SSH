@@ -1,6 +1,6 @@
 [package]
 name = "helm"
-version = "0.0.53"
+version = "0.0.54"
 description = "A Tauri SSH and SFTP desktop workbench prototype"
 authors = ["HelM"]
 edition = "2021"
@@ -36,6 +36,7 @@ tauri-plugin-clipboard-manager = "=2.3.2"
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
 log = "0.4"
+memchr = "2.8"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "net", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }

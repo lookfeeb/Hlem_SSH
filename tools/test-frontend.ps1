@@ -35,6 +35,9 @@ $terminalTests = @(
   "sshConnectionState.test.ts",
   "terminalRegistry.test.ts",
   "terminalFrame.test.ts",
+  "terminalInputHighlight.test.ts",
+  "terminalRenderer.test.ts",
+  "performanceMetrics.test.ts",
   "terminalViewportFollow.test.ts"
 )
 $allTests = Get-ChildItem -LiteralPath (Join-Path $projectRoot "tests") -Filter "*.test.ts" -File |

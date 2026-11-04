@@ -37,3 +37,15 @@ test("consumption credits are cumulative and coalesced, then stop on close", asy
   await new Promise(resolve => setTimeout(resolve, 25));
   assert.deepEqual(credits, [65536, 65546]);
 });
+
+test("native scan metadata uses the original buffer and validates framing", () => {
+  const buffer = new Uint8Array([0x84, 13]).buffer;
+  const decoded = decodeTerminalFrame(buffer);
+  assert.equal(decoded.hasBareCarriageReturn, true);
+  assert.equal(decoded.bytes.buffer, buffer);
+  assert.equal(decodeTerminalFrame(new Uint8Array([0x81, 65]).buffer).hasBareCarriageReturn, false);
+  assert.equal(decodeTerminalFrame(new Uint8Array([0, 65]).buffer).hasBareCarriageReturn, undefined);
+  assert.throws(() => decodeTerminalFrame(new Uint8Array([0x88, 65]).buffer));
+  assert.throws(() => decodeTerminalFrame(new Uint8Array([0x83]).buffer));
+  assert.throws(() => decodeTerminalFrame(new ArrayBuffer(65538)));
+});

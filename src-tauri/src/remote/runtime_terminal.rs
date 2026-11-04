@@ -11,20 +11,26 @@ impl TerminalOutputBatch {
     fn push(&mut self, kind: &str, data: &[u8]) -> Vec<PendingTerminalOutput> {
         let mut ready = Vec::new();
         if self.pending.as_ref().is_some_and(|pending| {
-            pending.kind != kind || pending.data.len() + data.len() > TERMINAL_BATCH_BYTES
+            pending.kind() != kind || pending.payload().len() + data.len() > TERMINAL_BATCH_BYTES
         }) {
             ready.extend(self.pending.take());
         }
         if data.is_empty() {
             return ready;
         }
-        let pending = self.pending.get_or_insert_with(|| PendingTerminalOutput {
-            kind: kind.to_string(),
-            data: Vec::new(),
-        });
-        pending.data.extend_from_slice(data);
-        if pending.data.len() >= TERMINAL_BATCH_BYTES {
-            ready.extend(self.pending.take());
+        for chunk in data.chunks(TERMINAL_BATCH_BYTES) {
+            if let Some(pending) = &mut self.pending {
+                pending.data.extend_from_slice(chunk);
+            } else {
+                self.pending = Some(PendingTerminalOutput::new(kind, chunk));
+            }
+            if self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.payload().len() >= TERMINAL_BATCH_BYTES)
+            {
+                ready.extend(self.pending.take());
+            }
         }
         ready
     }
@@ -166,10 +172,10 @@ impl RemoteRuntime {
                         }
                         if emit_or_buffer_terminal_output(
                             &reader_output_gate,
-                            PendingTerminalOutput {
-                                kind: "system".into(),
-                                data: format!("进程退出，状态码 {exit_status}").into_bytes(),
-                            },
+                            PendingTerminalOutput::new(
+                                "system",
+                                format!("进程退出，状态码 {exit_status}").as_bytes(),
+                            ),
                         )
                         .await
                         .is_err()
@@ -309,11 +315,7 @@ impl RemoteRuntime {
         for output in output_gate.start() {
             output_gate
                 .flow
-                .send(
-                    output_gate.channel.as_ref().unwrap(),
-                    &output.kind,
-                    &output.data,
-                )
+                .send_frame(output_gate.channel.as_ref().unwrap(), output.data)
                 .await?;
         }
         Ok(())
@@ -421,10 +423,7 @@ async fn emit_or_buffer_terminal_output(
 ) -> AppResult<()> {
     let mut output_gate = output_gate.lock().await;
     if let Some(channel) = &output_gate.channel {
-        output_gate
-            .flow
-            .send(channel, &output.kind, &output.data)
-            .await?;
+        output_gate.flow.send_frame(channel, output.data).await?;
     } else if !output_gate.streaming {
         output_gate.push_pending(output);
     }
@@ -442,9 +441,9 @@ mod tests {
         assert!(batch.push("output", &text[..1]).is_empty());
         assert!(batch.push("output", &text[1..]).is_empty());
         let output = batch.push("error", b"error");
-        assert_eq!(output[0].data, text);
-        assert_eq!(output[0].kind, "output");
-        assert_eq!(batch.pending.take().unwrap().data, b"error");
+        assert_eq!(output[0].payload(), text);
+        assert_eq!(output[0].kind(), "output");
+        assert_eq!(batch.pending.take().unwrap().payload(), b"error");
     }
 
     #[test]
@@ -453,8 +452,29 @@ mod tests {
         let data = vec![b'x'; TERMINAL_BATCH_BYTES];
         let output = batch.push("output", &data);
         assert_eq!(output.len(), 1);
-        assert_eq!(output[0].data, data);
+        assert_eq!(output[0].payload(), data);
         assert!(batch.pending.is_none());
+    }
+
+    #[test]
+    fn oversized_ssh_messages_split_into_bounded_frames_without_reordering() {
+        let mut batch = TerminalOutputBatch::default();
+        let data: Vec<u8> = (0..TERMINAL_BATCH_BYTES * 2 + 17)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let mut frames = batch.push("output", &data);
+        frames.extend(batch.pending.take());
+        assert_eq!(frames.len(), 3);
+        assert!(frames
+            .iter()
+            .all(|frame| frame.payload().len() <= TERMINAL_BATCH_BYTES));
+        assert_eq!(
+            frames
+                .iter()
+                .flat_map(|frame| frame.payload().iter().copied())
+                .collect::<Vec<_>>(),
+            data
+        );
     }
 
     #[test]
@@ -467,8 +487,8 @@ mod tests {
 
         let pending = gate.start().into_iter().collect::<Vec<_>>();
         assert_eq!(pending.len(), 2);
-        assert_eq!(pending[0].data, b"Welcome to Ubuntu\r\n");
-        assert_eq!(pending[1].data, b"System information as of now\r\n");
+        assert_eq!(pending[0].payload(), b"Welcome to Ubuntu\r\n");
+        assert_eq!(pending[1].payload(), b"System information as of now\r\n");
         assert_eq!(gate.pending_bytes, 0);
     }
 
@@ -478,8 +498,8 @@ mod tests {
         assert!(gate.start().is_empty());
 
         let output = gate.route("output", b"root@host:~# ").unwrap();
-        assert_eq!(output.kind, "output");
-        assert_eq!(output.data, b"root@host:~# ");
+        assert_eq!(output.kind(), "output");
+        assert_eq!(output.payload(), b"root@host:~# ");
         assert!(gate.pending.is_empty());
     }
 
@@ -491,13 +511,13 @@ mod tests {
 
         let pending = gate.start().into_iter().collect::<Vec<_>>();
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].kind, "error");
-        assert_eq!(pending[0].data, b"def");
+        assert_eq!(pending[0].kind(), "error");
+        assert_eq!(pending[0].payload(), b"def");
 
         let mut oversized = TerminalOutputGate::new(5);
         assert!(oversized.route("output", b"1234567").is_none());
         let pending = oversized.start().into_iter().collect::<Vec<_>>();
-        assert_eq!(pending[0].data, b"34567");
+        assert_eq!(pending[0].payload(), b"34567");
     }
 
     #[test]
@@ -518,7 +538,7 @@ mod tests {
             assert!(gate.route("output", output).is_none(), "{connection_name}");
             let pending = gate.start().into_iter().collect::<Vec<_>>();
             assert_eq!(pending.len(), 1, "{connection_name}");
-            assert_eq!(pending[0].data, output, "{connection_name}");
+            assert_eq!(pending[0].payload(), output, "{connection_name}");
         }
     }
 }

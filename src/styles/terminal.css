@@ -36,13 +36,17 @@
   border: 1px solid rgba(148, 163, 184, .48);
   border-radius: 6px;
   background: rgba(255, 255, 255, .88);
-  color: #1f2937;
+  color: #1d4ed8;
   caret-color: #2563eb;
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
   font-size: 12px;
   outline: none;
   transition: border-color .15s, box-shadow .15s, background .15s;
 }
+
+.terminalColorLegend { display: flex; flex-shrink: 0; gap: 10px; font-size: 11px; color: #1f2937; }
+.terminalColorLegend span:first-child { color: #1d4ed8; }
+@media (max-width: 680px) { .terminalColorLegend { display: none; } }
 
 .terminalToolbarInput:hover {
   border-color: rgba(96, 165, 250, .58);

@@ -1,10 +1,11 @@
 use super::*;
 use tauri::ipc::{Channel as IpcChannel, Response};
 
-// One ordered binary channel per terminal. Header: 0=stdout, 1=stderr,
-// 2=system UTF-8, 3=closed; the remaining bytes are passed through unchanged.
+// One ordered binary channel per terminal. Header low bits: 0=stdout, 1=stderr,
+// 2=system UTF-8, 3=closed. 0x80 marks scan metadata, 0x04 marks a bare CR.
+// Closed uses exactly [3]; payload bytes are always passed through unchanged.
 pub(super) const TERMINAL_IN_FLIGHT_BYTES: usize = 1024 * 1024;
-pub(super) const TERMINAL_FRAME_BYTES: usize = 64 * 1024;
+pub(super) const TERMINAL_FRAME_BYTES: usize = terminal_bytes::FRAME_PAYLOAD_BYTES;
 
 pub(super) struct TerminalFlowControl {
     slots: Arc<Semaphore>,
@@ -40,33 +41,37 @@ impl TerminalFlowControl {
         self.slots.close();
     }
 
-    pub async fn send(
+    #[cfg(test)]
+    async fn send(&self, channel: &IpcChannel<Response>, kind: &str, data: &[u8]) -> AppResult<()> {
+        for chunk in data.chunks(TERMINAL_FRAME_BYTES) {
+            self.send_frame(channel, PendingTerminalOutput::new(kind, chunk).data)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn send_frame(
         &self,
         channel: &IpcChannel<Response>,
-        kind: &str,
-        data: &[u8],
+        mut frame: Vec<u8>,
     ) -> AppResult<()> {
-        for chunk in data.chunks(TERMINAL_FRAME_BYTES) {
-            let permit = self
-                .slots
-                .clone()
-                .acquire_many_owned(chunk.len() as u32)
-                .await
-                .map_err(remote_error)?;
-            let mut frame = Vec::with_capacity(chunk.len() + 1);
-            frame.push(match kind {
-                "error" => 1,
-                "system" => 2,
-                _ => 0,
-            });
-            frame.extend_from_slice(chunk);
-            self.sent.fetch_add(chunk.len() as u64, Ordering::Release);
-            // Credit is returned only after xterm has consumed the frame.
-            permit.forget();
-            if let Err(error) = channel.send(Response::new(frame)) {
-                self.close();
-                return Err(remote_error(error));
-            }
+        if frame.len() <= 1 || frame.len() > TERMINAL_FRAME_BYTES + 1 {
+            return Err(AppError::InvalidInput("终端帧长度无效".into()));
+        }
+        let payload_bytes = frame.len() - 1;
+        terminal_bytes::annotate_frame(&mut frame);
+        let permit = self
+            .slots
+            .clone()
+            .acquire_many_owned(payload_bytes as u32)
+            .await
+            .map_err(remote_error)?;
+        self.sent.fetch_add(payload_bytes as u64, Ordering::Release);
+        // Credit is returned only after xterm has consumed the frame.
+        permit.forget();
+        if let Err(error) = channel.send(Response::new(frame)) {
+            self.close();
+            return Err(remote_error(error));
         }
         Ok(())
     }
@@ -75,6 +80,24 @@ impl TerminalFlowControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn completed_frame_moves_into_ipc_without_a_second_payload_copy() {
+        let frame = terminal_bytes::new_frame(0, b"original payload\r\n");
+        let address = frame.as_ptr() as usize;
+        let channel = IpcChannel::new(move |body| {
+            let tauri::ipc::InvokeResponseBody::Raw(bytes) = body else {
+                panic!("expected raw frame")
+            };
+            assert_eq!(bytes.as_ptr() as usize, address);
+            assert_eq!(&bytes[1..], b"original payload\r\n");
+            Ok(())
+        });
+        TerminalFlowControl::default()
+            .send_frame(&channel, frame)
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn binary_stream_preserves_bytes_and_requires_consumption_credit() {
@@ -93,7 +116,7 @@ mod tests {
             .await
             .unwrap();
         let first = frames.lock().unwrap()[0].clone();
-        assert_eq!(first[0], 0);
+        assert_eq!(first[0], terminal_bytes::FRAME_METADATA);
         assert_eq!(&first[1..], "中文\x1b[31m".as_bytes());
         let consumed = (first.len() - 1) as u64;
         flow.acknowledge(consumed).unwrap();

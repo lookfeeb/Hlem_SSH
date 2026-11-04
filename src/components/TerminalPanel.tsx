@@ -12,6 +12,8 @@ import { getErrorMessage } from "../lib/configMapping";
 import { useAnimationFrameRegistry } from "../lib/reactLifecycle";
 import { registerTerminalSink } from "../lib/terminalRegistry";
 import { TerminalViewportFollower } from "../lib/terminalViewportFollow";
+import { TerminalInputHighlight } from "../lib/terminalInputHighlight";
+import { TerminalRenderer } from "../lib/terminalRenderer";
 import { extractPromptCwd } from "../app/appHelpers";
 import { recordPerformance } from "../lib/performanceMetrics";
 import type { RemoteSession, TerminalEntry } from "../types";
@@ -40,7 +42,8 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
   const terminalHostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XtermTerminal | null>(null);
   const viewportFollowerRef = useRef<TerminalViewportFollower | null>(null);
-  const webglAddonRef = useRef<{ dispose: () => void } | null>(null);
+  const rendererRef = useRef<TerminalRenderer | null>(null);
+  const inputHighlightRef = useRef<TerminalInputHighlight | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const appliedRef = useRef<AppliedTerminalState | null>(null);
   const layoutScheduledRef = useRef(false);
@@ -124,7 +127,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     terminalRef.current?.scrollToBottom();
   }
 
-  function writeOutputToTerminal(terminal: XtermTerminal, content: TerminalWriteData, onConsumed?: () => void) {
+  function writeOutputToTerminal(terminal: XtermTerminal, content: TerminalWriteData, onConsumed?: () => void, bareCarriageReturn?: boolean) {
     const terminalId = terminalIdRef.current;
     const received = performance.now();
     const consume = () => {
@@ -132,6 +135,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     };
     if (onConsumed) pendingConsumptionRef.current.add(consume);
     writeTerminalData(terminal, content, {
+      bareCarriageReturn,
       shouldForceFollow: () => viewportFollowerRef.current?.shouldFollow(terminalId) ?? false,
       onWriteComplete: () => {
         consume();
@@ -154,6 +158,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     if (!host) return;
 
     const terminal = new XtermTerminal({
+      allowProposedApi: true,
       allowTransparency: false,
       convertEol: false,
       cursorBlink: true,
@@ -195,16 +200,39 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
       });
     }));
     terminal.open(host);
+    const renderer = new TerminalRenderer(terminal);
+    rendererRef.current = renderer;
+    const inputHighlight = new TerminalInputHighlight(terminal);
+    inputHighlightRef.current = inputHighlight;
+    const eraseScreen = terminal.parser.registerCsiHandler({ final: "J" }, () => { inputHighlight.clear(); return false; });
+    const resetScreen = terminal.parser.registerEscHandler({ final: "c" }, () => { inputHighlight.clear(); return false; });
     const cwdMarker = terminal.parser.registerOscHandler(777, (data) => {
       if (!data.startsWith("cwd=")) return false;
       cwdContextRef.current.onCwd(data.slice(4));
       return true;
     });
-    const parsed = terminal.onWriteParsed(() => {
+    let readbackTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastReadback = -Infinity;
+    let lastCwd = "";
+    const readback = () => {
+      readbackTimer = undefined;
+      lastReadback = performance.now();
       if (terminal.buffer.active.type === "alternate") return;
       const context = cwdContextRef.current;
-      const cwd = extractPromptCwd(terminalPromptTail(terminal), context.username, context.loginPath);
-      if (cwd) context.onCwd(cwd);
+      const tail = terminalPromptTail(terminal);
+      if (!isTerminalAtBottom(terminal) && hasInteractiveTerminalMarker(tail)) terminal.scrollToBottom();
+      const cwd = extractPromptCwd(tail, context.username, context.loginPath);
+      if (cwd && cwd !== lastCwd) { lastCwd = cwd; context.onCwd(cwd); }
+    };
+    const parsed = terminal.onWriteParsed(() => {
+      inputHighlight.parsed();
+      // Read the decoded screen at most 20 Hz (5 Hz in background), once for
+      // both prompt detection and viewport heuristics, never per byte chunk.
+      const remaining = (activeRef.current ? 50 : 200) - (performance.now() - lastReadback);
+      if (remaining <= 0) {
+        if (readbackTimer !== undefined) clearTimeout(readbackTimer);
+        readback();
+      } else if (readbackTimer === undefined) readbackTimer = setTimeout(readback, remaining);
     });
     const viewportFollower = new TerminalViewportFollower(
       () => terminalRef.current?.scrollToBottom(),
@@ -241,6 +269,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     });
     const dataDisposable = terminal.onData((data) => {
       if (!activeRef.current || !terminalAvailableRef.current) return;
+      inputHighlight.input(data, pendingConsumptionRef.current.size === 0);
       prepareTerminalForInput();
       sendDataRef.current(data);
     });
@@ -267,6 +296,13 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
       dataDisposable.dispose();
       cwdMarker.dispose();
       parsed.dispose();
+      if (readbackTimer !== undefined) clearTimeout(readbackTimer);
+      inputHighlight.clear();
+      eraseScreen.dispose();
+      resetScreen.dispose();
+      inputHighlightRef.current = null;
+      renderer.dispose();
+      rendererRef.current = null;
       host.removeEventListener("wheel", handleViewportWheel);
       host.removeEventListener("pointerdown", handleViewportPointerDown);
       viewportFollower.dispose();
@@ -291,36 +327,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
   }, [scrollback]);
 
   useEffect(() => {
-    const terminal = terminalRef.current;
-    webglAddonRef.current?.dispose();
-    webglAddonRef.current = null;
-    if (!terminal || !webglEnabled || !active) return;
-    let disposed = false;
-    void import("@xterm/addon-webgl")
-      .then(({ WebglAddon }) => {
-        if (disposed || terminalRef.current !== terminal) return;
-        const addon = new WebglAddon();
-        addon.onContextLoss(() => {
-          addon.dispose();
-          if (webglAddonRef.current === addon) webglAddonRef.current = null;
-          console.warn("[helm] terminal WebGL context lost, fallback renderer enabled");
-        });
-        try {
-          terminal.loadAddon(addon);
-          webglAddonRef.current = addon;
-        } catch (error) {
-          addon.dispose();
-          console.warn("[helm] failed to enable terminal WebGL, fallback renderer enabled:", error);
-        }
-      })
-      .catch((error) => {
-        console.warn("[helm] failed to load terminal WebGL addon:", error);
-      });
-    return () => {
-      disposed = true;
-      webglAddonRef.current?.dispose();
-      webglAddonRef.current = null;
-    };
+    rendererRef.current?.update(webglEnabled, active);
   }, [webglEnabled, active]);
 
   useEffect(() => {
@@ -341,6 +348,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
 
     const sessionKey = session.id;
     if (appliedRef.current?.sessionKey !== sessionKey) {
+      inputHighlightRef.current?.clear();
       terminal.reset();
       appliedRef.current = { sessionKey, offsets: new Map() };
     }
@@ -349,6 +357,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     if (!applied) return;
 
     if (session.terminal.length === 0 && applied.offsets.size > 0) {
+      inputHighlightRef.current?.clear();
       terminal.clear();
       applied.offsets.clear();
       return;
@@ -356,7 +365,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
 
     for (const entry of session.terminal) {
       const content = terminalEntryData(entry);
-      const contentLength = terminalEntryDataLength(content);
+      const contentLength = content.length;
       const previousLength = applied.offsets.get(entry.id) ?? 0;
       if (previousLength < contentLength) {
         const nextContent = sliceTerminalEntryData(content, previousLength);
@@ -370,9 +379,9 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
     const terminal = terminalRef.current;
     if (!terminal || !session.terminalId) return;
     return registerTerminalSink(session.terminalId, {
-      writeEntry: (entry, onConsumed) => writeOutputToTerminal(terminal, terminalEntryData(entry), onConsumed),
-      clear: () => terminal.clear(),
-      reset: () => terminal.reset(),
+      writeEntry: (entry, onConsumed) => writeOutputToTerminal(terminal, terminalEntryData(entry), onConsumed, entry.hasBareCarriageReturn),
+      clear: () => { inputHighlightRef.current?.clear(); terminal.clear(); },
+      reset: () => { inputHighlightRef.current?.clear(); terminal.reset(); },
     });
   }, [session.terminalId]);
 
@@ -533,6 +542,7 @@ function TerminalPanelView({ session, active, scrollback, webglEnabled, onSendDa
         </div>
       </Dropdown>
       <div className="terminalToolbar">
+        <span className="terminalColorLegend" aria-label="蓝色为用户输入，服务器输出保留原有配色"><span>用户输入</span><span>服务器输出</span></span>
         <input
           ref={commandInputRef}
           className="terminalToolbarInput"
@@ -566,15 +576,15 @@ export const TerminalPanel = memo(TerminalPanelView, (previous, next) => (
 ));
 
 type TerminalWriteOptions = {
+  bareCarriageReturn?: boolean;
   shouldForceFollow?: () => boolean;
   onWriteComplete?: () => void;
 };
 
 function writeTerminalData(terminal: XtermTerminal, content: TerminalWriteData, options: TerminalWriteOptions = {}) {
-  const shouldStickToBottom = isTerminalAtBottom(terminal) || hasBareCarriageReturn(content);
+  const shouldStickToBottom = isTerminalAtBottom(terminal) || (options.bareCarriageReturn ?? hasBareCarriageReturn(content));
   terminal.write(content, () => {
-    if (shouldStickToBottom || terminal.buffer.active.type === "alternate" ||
-        hasInteractiveTerminalMarker(terminalPromptTail(terminal)) || options.shouldForceFollow?.()) terminal.scrollToBottom();
+    if (shouldStickToBottom || terminal.buffer.active.type === "alternate" || options.shouldForceFollow?.()) terminal.scrollToBottom();
     options.onWriteComplete?.();
   });
 }
@@ -598,12 +608,8 @@ function terminalEntryData(entry: TerminalEntry): TerminalWriteData {
   return entry.content;
 }
 
-function terminalEntryDataLength(value: TerminalWriteData) {
-  return typeof value === "string" ? value.length : value.length;
-}
-
 function sliceTerminalEntryData(value: TerminalWriteData, start: number): TerminalWriteData {
-  return typeof value === "string" ? value.slice(start) : value.slice(start);
+  return typeof value === "string" ? value.slice(start) : value.subarray(start);
 }
 
 function isTerminalAtBottom(terminal: XtermTerminal) {
@@ -624,7 +630,10 @@ function terminalPromptTail(terminal: XtermTerminal) {
 
 function hasBareCarriageReturn(value: TerminalWriteData) {
   if (typeof value === "string") return /\r(?!\n)/.test(value);
-  return value.some((byte, index) => byte === 13 && value[index + 1] !== 10);
+  for (let index = value.indexOf(13); index !== -1; index = value.indexOf(13, index + 1)) {
+    if (value[index + 1] !== 10) return true;
+  }
+  return false;
 }
 
 function hasInteractiveTerminalMarker(text: string) {

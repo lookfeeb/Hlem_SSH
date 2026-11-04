@@ -33,6 +33,7 @@ export interface TerminalEntry {
   kind: "system" | "input" | "output" | "error";
   content: string;
   dataBytes?: Uint8Array;
+  hasBareCarriageReturn?: boolean;
   timestamp: string;
 }
 
@@ -402,6 +403,7 @@ export interface TerminalOutputEvent {
   kind: "system" | "output" | "error";
   data: string;
   dataBytes?: Uint8Array;
+  hasBareCarriageReturn?: boolean;
   onConsumed?: () => void;
 }
 

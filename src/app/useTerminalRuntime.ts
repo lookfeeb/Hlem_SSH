@@ -5,7 +5,7 @@ import { shouldSkipTerminalEntry } from "./appHelpers";
 import { getErrorMessage } from "../lib/configMapping";
 import { normalizePath as normalizeRemotePath } from "../lib/path";
 import { useMountedRef } from "../lib/reactLifecycle";
-import { createTerminalEntry } from "../lib/session";
+import { createTerminalEntry, createTerminalOutputEntry } from "../lib/session";
 import {
   clearAllTerminalDirect,
   clearTerminalDirect,
@@ -49,10 +49,10 @@ export function useTerminalRuntime({
 
   function handleTerminalOutput(payload: TerminalOutputEvent) {
     if (!payload.data && !payload.dataBytes?.length) { payload.onConsumed?.(); return; }
-    writeTerminalEntryDirect(payload.terminalId, {
-      ...createTerminalEntry(payload.kind, payload.data),
-      dataBytes: payload.dataBytes,
-    }, payload.onConsumed);
+    const entry = payload.dataBytes
+      ? createTerminalOutputEntry(payload.kind, payload.dataBytes, payload.hasBareCarriageReturn)
+      : createTerminalEntry(payload.kind, payload.data);
+    writeTerminalEntryDirect(payload.terminalId, entry, payload.onConsumed);
   }
 
   function resetTerminalRuntime() {

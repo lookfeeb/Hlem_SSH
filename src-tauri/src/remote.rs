@@ -51,6 +51,7 @@ mod runtime_transfer;
 mod sftp;
 mod ssh;
 mod telemetry;
+mod terminal_bytes;
 mod terminal_stream;
 mod transfer;
 mod transfer_history;
@@ -705,8 +706,33 @@ struct TerminalRecord {
 
 #[derive(Debug, PartialEq, Eq)]
 struct PendingTerminalOutput {
-    kind: String,
+    // Includes the header from allocation onward; moved into IPC without repacking.
     data: Vec<u8>,
+}
+
+impl PendingTerminalOutput {
+    fn new(kind: &str, bytes: &[u8]) -> Self {
+        Self {
+            data: terminal_bytes::new_frame(
+                match kind {
+                    "error" => 1,
+                    "system" => 2,
+                    _ => 0,
+                },
+                bytes,
+            ),
+        }
+    }
+    fn kind(&self) -> &str {
+        match self.data[0] & 3 {
+            1 => "error",
+            2 => "system",
+            _ => "output",
+        }
+    }
+    fn payload(&self) -> &[u8] {
+        &self.data[1..]
+    }
 }
 
 struct TerminalOutputGate {
@@ -732,10 +758,7 @@ impl TerminalOutputGate {
 
     #[cfg(test)]
     fn route(&mut self, kind: &str, data: &[u8]) -> Option<PendingTerminalOutput> {
-        let output = PendingTerminalOutput {
-            kind: kind.to_string(),
-            data: data.to_vec(),
-        };
+        let output = PendingTerminalOutput::new(kind, data);
         if self.streaming {
             return Some(output);
         }
@@ -753,21 +776,21 @@ impl TerminalOutputGate {
     }
 
     fn push_pending(&mut self, mut output: PendingTerminalOutput) {
-        if self.max_pending_bytes == 0 || output.data.is_empty() {
+        if self.max_pending_bytes == 0 || output.payload().is_empty() {
             return;
         }
-        if output.data.len() > self.max_pending_bytes {
-            output.data = output
+        if output.payload().len() > self.max_pending_bytes {
+            output
                 .data
-                .split_off(output.data.len() - self.max_pending_bytes);
+                .drain(1..output.data.len() - self.max_pending_bytes);
         }
-        while self.pending_bytes.saturating_add(output.data.len()) > self.max_pending_bytes {
+        while self.pending_bytes.saturating_add(output.payload().len()) > self.max_pending_bytes {
             let Some(dropped) = self.pending.pop_front() else {
                 break;
             };
-            self.pending_bytes = self.pending_bytes.saturating_sub(dropped.data.len());
+            self.pending_bytes = self.pending_bytes.saturating_sub(dropped.payload().len());
         }
-        self.pending_bytes += output.data.len();
+        self.pending_bytes += output.payload().len();
         self.pending.push_back(output);
     }
 }

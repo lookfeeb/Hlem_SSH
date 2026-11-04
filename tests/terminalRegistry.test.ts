@@ -5,6 +5,7 @@ import {
   forgetTerminalDirect,
   registerTerminalSink,
   writeTerminalEntryDirect,
+  terminalReplaySnapshot,
 } from "../src/lib/terminalRegistry";
 import type { TerminalEntry } from "../src/types";
 
@@ -29,6 +30,27 @@ test("binary stderr chunks are not deduplicated and replay storage is byte bound
     assert.equal(replayed[0].dataBytes![0], 16);
     assert.equal(replayed[63].dataBytes![0], 79);
   } finally { forgetTerminalDirect(terminalId); }
+});
+
+test("aggregate replay memory stays bounded while live output keeps flowing", () => {
+  const ids = Array.from({length: 40}, (_, i) => `memory-${i}`);
+  let consumed = 0;
+  try {
+    for (const id of ids) {
+      for (let i = 0; i < 32; i++) writeTerminalEntryDirect(id, {...entry(String(i), ""), dataBytes: new Uint8Array(65536)}, () => consumed++);
+    }
+    const snapshot = terminalReplaySnapshot();
+    assert.ok(snapshot.bytes <= snapshot.maxBytes);
+    assert.ok(snapshot.terminals <= 32);
+    assert.equal(consumed, 40 * 32);
+    let liveBytes: Uint8Array | undefined;
+    registerTerminalSink(ids[0], {writeEntry: (item, done) => { liveBytes = item.dataBytes; done?.(); }});
+    const tinyView = new Uint8Array(8 * 1024 * 1024).subarray(0, 16);
+    writeTerminalEntryDirect(ids[0], {...entry("oversized-backing", ""), dataBytes: tinyView});
+    assert.equal(liveBytes, tinyView);
+    assert.ok(terminalReplaySnapshot().bytes <= snapshot.maxBytes);
+  } finally { ids.forEach(forgetTerminalDirect); }
+  assert.equal(terminalReplaySnapshot().bytes, 0);
 });
 
 test("terminal output remains replayable after an xterm sink is rebuilt", () => {
@@ -109,4 +131,19 @@ test("terminal credit follows parser consumption and is never replayed", () => {
   writeTerminalEntryDirect(id, entry("unmounted", "saved"), () => { credits++; });
   assert.equal(credits, 2);
   forgetTerminalDirect(id);
+});
+
+test("replay accounts for a shared backing buffer once without copying views", () => {
+  const id = "shared-buffer";
+  const buffer = new Uint8Array(2 * 1024 * 1024);
+  const views = Array.from({length: 100}, (_, index) => buffer.subarray(index * 1024, (index + 1) * 1024));
+  const replayed: Uint8Array[] = [];
+  try {
+    views.forEach((view, index) => writeTerminalEntryDirect(id, {...entry(String(index), ""), dataBytes: view}));
+    assert.equal(terminalReplaySnapshot().bytes, buffer.byteLength);
+    registerTerminalSink(id, {writeEntry: (item) => replayed.push(item.dataBytes!)});
+    assert.deepEqual(replayed, views);
+    assert.ok(replayed.every((view, index) => view === views[index]));
+  } finally { forgetTerminalDirect(id); }
+  assert.equal(terminalReplaySnapshot().bytes, 0);
 });

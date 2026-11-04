@@ -1,10 +1,11 @@
-/** Per-terminal native channel: one kind byte followed by the original bytes. */
+/** Header: low 2 bits = kind; 0x80 = scan metadata present; 0x04 = bare CR. Body is unchanged. */
 export function decodeTerminalFrame(buffer: ArrayBuffer) {
   const frame = new Uint8Array(buffer);
-  if (frame.length === 0 || frame[0] > 3) throw new Error("终端二进制帧无效");
-  const kind = (["output", "error", "system", "closed"] as const)[frame[0]];
-  if (kind === "closed" && frame.length !== 1) throw new Error("终端关闭帧无效");
-  return { kind, bytes: frame.subarray(1) };
+  const header = frame[0];
+  if (frame.length === 0 || frame.length > 65537 || (header & ~0x87) !== 0 || (!(header & 0x80) && header > 3)) throw new Error("终端二进制帧无效");
+  const kind = (["output", "error", "system", "closed"] as const)[header & 3];
+  if (kind === "closed" && (frame.length !== 1 || header !== 3)) throw new Error("终端关闭帧无效");
+  return { kind, bytes: frame.subarray(1), hasBareCarriageReturn: header & 0x80 ? Boolean(header & 4) : undefined };
 }
 
 /** Cumulative acknowledgments tolerate command completion reordering. */
