@@ -12,6 +12,7 @@ mod errors;
 mod events;
 mod http_client;
 mod remote;
+mod update_download;
 mod vault;
 
 use commands::{

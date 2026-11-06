@@ -7,7 +7,7 @@
 
 [下载安装包](https://github.com/lookfeeb/Hlem_SSH/releases/latest) · [开发与测试](#开发与测试) · [系统架构](#系统架构) · [目录与清理](#目录与清理)
 
-本文对应仓库版本 **0.0.56**。版本以 [package.json](package.json) 和 [Cargo.toml](src-tauri/Cargo.toml) 为准；发行工作流提供 Windows x64、x86、ARM64 安装包，其他平台目前没有对应发布流水线。
+本文对应仓库版本 **0.0.57**。版本以 [package.json](package.json) 和 [Cargo.toml](src-tauri/Cargo.toml) 为准；发行工作流提供 Windows x64、x86、ARM64 安装包，其他平台目前没有对应发布流水线。
 
 ## 功能概览
 
@@ -342,6 +342,8 @@ flowchart LR
 发布配置使用仓库变量 `HELM_UPDATE_PUBLIC_KEY_PEM` 和仓库 Secret `HELM_UPDATE_PRIVATE_KEY_PEM`。工作流默认采用 `package.json` 版本，不会自动递增版本号。
 
 安装更新使用 `latest.json` 与 `latest.json.sig.bin`，不再兼容旧文本 `.sig`。本地构建若要使用签名更新，应提供对应更新仓库和公钥；发布工作流通过 `HELM_UPDATE_REPO` 指定当前仓库。
+
+更新清单、签名或安装包直接下载失败时，客户端会通过 GitHub 官方 Release Assets API 回退下载，无需第三方镜像。清单与签名从同一次 Release 查询结果中配对获取，安装包按原版本标签查找；回退后仍校验清单签名和安装包 SHA256。两个入口都失败时，错误信息会分别显示直接下载与 API 回退的失败原因。
 
 `.cargo/config.toml` 将本地 Cargo 编译缓存及产物统一放到 `Z:/HelmBuildCache/target/`，主程序和 Rust 工具共用此目录。本机构建安装包通常位于 `Z:/HelmBuildCache/target/release/bundle/`；显式传入 target 时位于该缓存目录下的 `<rust-target>/release/bundle/`。`build.ps1` 会读取 Cargo 实际目录来查找产物和清理缓存。Z 盘需保持可访问；其他机器可用 `CARGO_TARGET_DIR` 覆盖路径，GitHub Actions 已覆盖为仓库根 `target/`。
 

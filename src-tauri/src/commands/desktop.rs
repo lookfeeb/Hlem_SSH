@@ -21,9 +21,9 @@ use tauri::{AppHandle, Manager, State};
 
 use super::{resolve_vault_path, AppError, AppResult, AppState};
 use crate::http_client::{http_client, send_with_retry};
+use crate::update_download::UpdateDownloader;
 
 const UPDATE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
-const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const UPDATE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_UPDATE_REPO: &str = "lookfeeb/Hlem_SSH";
 const HELM_UPDATE_REPO_ENV: &str = "HELM_UPDATE_REPO";
@@ -236,46 +236,13 @@ async fn fetch_text_url_inner(url: &str) -> AppResult<String> {
         .map_err(|error| AppError::Remote(format!("解析远程内容失败：{error}")))
 }
 
-async fn fetch_manifest_signature(manifest_url: &str) -> AppResult<Vec<u8>> {
-    let client = http_client(UPDATE_FETCH_TIMEOUT)?;
-    let url = format!("{manifest_url}.sig.bin");
-    let mut response = send_with_retry("读取更新签名", || {
-        client
-            .get(&url)
-            .header(reqwest::header::USER_AGENT, "HelM-Updater")
-    })
-    .await?;
-    if !response.status().is_success() {
-        return Err(AppError::Remote(format!(
-            "读取更新签名失败：HTTP {}",
-            response.status()
-        )));
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| AppError::Remote(error.to_string()))?
-    {
-        if bytes.len() + chunk.len() > 8192 {
-            return Err(AppError::Crypto("更新签名长度无效".into()));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
-}
-
 async fn check_signed_manifest(
     repo: &str,
     public_key: &str,
     current_version: String,
     current_arch: String,
 ) -> AppResult<UpdateInfo> {
-    let manifest_url = format!("https://github.com/{repo}/releases/latest/download/latest.json");
-    let (manifest_text, signature) = tokio::try_join!(
-        fetch_text_url_inner(&manifest_url),
-        fetch_manifest_signature(&manifest_url)
-    )?;
+    let (manifest_text, signature) = UpdateDownloader::new()?.signed_manifest(repo).await?;
     if !verify_manifest_signature(&manifest_text, &signature, public_key)? {
         return Err(AppError::Crypto("更新清单签名验证失败".to_string()));
     }
@@ -346,23 +313,7 @@ pub async fn download_update(
     sha256: Option<String>,
 ) -> AppResult<String> {
     let trimmed = validate_http_url(&url)?;
-    let client = http_client(UPDATE_DOWNLOAD_TIMEOUT)?;
-    let response = send_with_retry("下载更新", || {
-        client
-            .get(trimmed)
-            .header(reqwest::header::USER_AGENT, "HelM-Updater")
-    })
-    .await?;
-    if !response.status().is_success() {
-        return Err(AppError::Remote(format!(
-            "下载更新失败：HTTP {}",
-            response.status()
-        )));
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| AppError::Remote(format!("读取更新包失败：{error}")))?;
+    let bytes = UpdateDownloader::new()?.installer(trimmed).await?;
     if let Some(expected) = sha256
         .as_deref()
         .map(str::trim)
@@ -1139,6 +1090,29 @@ mod tests {
         let signature = signing_key.sign_with_rng(&mut rng, b"manifest").to_vec();
         assert!(verify_manifest_signature("manifest", &signature, &public_key).unwrap());
         assert!(!verify_manifest_signature("tampered", &signature, &public_key).unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "需要 GitHub 网络及 HELM_UPDATE_PUBLIC_KEY_PEM；只下载验证，不安装"]
+    async fn github_update_fallback_live() {
+        let public_key = env::var(HELM_UPDATE_PUBLIC_KEY_ENV).expect("release public key");
+        let info = check_signed_manifest(
+            DEFAULT_UPDATE_REPO,
+            &public_key,
+            env!("CARGO_PKG_VERSION").into(),
+            env::consts::ARCH.into(),
+        )
+        .await
+        .expect("fetch and verify signed release metadata");
+        assert!(info.signature_verified);
+        let asset = info.asset.expect("Windows installer");
+        let bytes = UpdateDownloader::new()
+            .unwrap()
+            .installer(&asset.download_url)
+            .await
+            .expect("download installer using official routes");
+        assert_eq!(bytes.len() as u64, asset.size);
+        assert_eq!(hex::encode(Sha256::digest(&bytes)), asset.sha256.unwrap());
     }
 
     #[cfg(target_os = "windows")]
