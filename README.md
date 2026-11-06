@@ -7,7 +7,7 @@
 
 [下载安装包](https://github.com/lookfeeb/Hlem_SSH/releases/latest) · [开发与测试](#开发与测试) · [系统架构](#系统架构) · [目录与清理](#目录与清理)
 
-本文对应仓库版本 **0.0.57**。版本以 [package.json](package.json) 和 [Cargo.toml](src-tauri/Cargo.toml) 为准；发行工作流提供 Windows x64、x86、ARM64 安装包，其他平台目前没有对应发布流水线。
+本文对应仓库版本 **0.0.58**。版本以 [package.json](package.json) 和 [Cargo.toml](src-tauri/Cargo.toml) 为准；发行工作流提供 Windows x64、x86、ARM64 安装包，其他平台目前没有对应发布流水线。
 
 ## 功能概览
 
@@ -20,7 +20,7 @@
 | 传输中心 | 并发队列、进度与历史记录、暂停 / 恢复 / 取消 |
 | 网络与监控 | 本地 / 远程 / SOCKS5 动态转发；直连、SOCKS5、HTTP CONNECT 代理；服务器遥测 |
 | 工作区与备份 | 本地 RPVAULT v2 工作区；手动与自动备份；本地目录、WebDAV、S3 |
-| AI API | 仅监听本机的 SSH / SFTP REST 网关、OpenAPI、批量命令、长任务与 SSE、接口调试台 |
+| AI API | 仅监听本机的 SSH / SFTP REST 网关、OpenAPI、批量命令、长任务与 SSE |
 | 桌面集成 | 启动页、系统托盘、独立日志窗口、签名校验更新 |
 
 工作区自动解锁采用内置固定口令。文件虽然经过加密，但不构成用户独有的保密保护；工作区和备份都应作为敏感数据保存，详见[工作区与安全边界](#工作区与安全边界)。
@@ -292,7 +292,7 @@ flowchart TB
 | `/api/tunnels` | 隧道配置与启动 / 停止 |
 | `/api/backup/settings`、`/api/backup/records`、`/api/backup/run` | 备份设置、记录及立即备份 |
 
-具体请求方法、字段和返回结构以运行中服务的 `/openapi.json` 为准。内置接口调试台支持普通请求与 SSE，可复制 PowerShell cURL。
+具体请求方法、字段和返回结构以运行中服务的 `/openapi.json` 为准。
 
 ```powershell
 $helmHeaders = @{ Authorization = "Bearer <api_key>" }
@@ -377,7 +377,7 @@ Helm/
 | 路径 | 引用与作用 | 清理结论 |
 | --- | --- | --- |
 | `public/splash.html` | [tauri.conf.json](src-tauri/tauri.conf.json) 的 `splash` 窗口直接加载 | 是启动资源；删除会使启动窗口失去页面 |
-| `public/Helm_icon.svg` | `splash.html`、[index.html](index.html)、主窗口启动外壳、顶栏、迁移页、关于页和 API 调试台引用 | 是界面资源；删除会导致图标加载失败 |
+| `public/Helm_icon.svg` | `splash.html`、[index.html](index.html)、主窗口启动外壳、顶栏、迁移页和关于页引用 | 是界面资源；删除会导致图标加载失败 |
 
 Vite 构建会把 `public/` 原样复制到 `dist/` 根目录，再由 Tauri 打包；这里的 SVG 与 `src-tauri/icons/` 分别服务 WebView 和原生应用，不能互相直接替代。
 

@@ -968,9 +968,6 @@ fn is_allowed_local_origin(origin: &HeaderValue) -> bool {
     let Ok(origin_str) = origin.to_str() else {
         return false;
     };
-    if origin_str == "tauri://localhost" {
-        return true;
-    }
     let stripped = origin_str
         .strip_prefix("http://")
         .or_else(|| origin_str.strip_prefix("https://"));
@@ -986,7 +983,7 @@ fn is_allowed_local_origin(origin: &HeaderValue) -> bool {
             .map(|(host, _)| host)
             .unwrap_or(authority)
     };
-    matches!(host, "localhost" | "127.0.0.1" | "::1" | "tauri.localhost")
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 #[cfg(test)]
@@ -1150,20 +1147,24 @@ mod tests {
     }
 
     #[test]
-    fn api_cors_accepts_browser_and_tauri_loopback_origins_only() {
+    fn api_cors_accepts_browser_loopback_origins_only() {
         for origin in [
             "http://127.0.0.1:1420",
             "http://localhost:1420",
-            "https://tauri.localhost",
-            "tauri://localhost",
+            "http://[::1]:1420",
         ] {
             assert!(is_allowed_local_origin(
                 &HeaderValue::from_str(origin).unwrap()
             ));
         }
-        assert!(!is_allowed_local_origin(&HeaderValue::from_static(
-            "https://example.com"
-        )));
+        for origin in [
+            "https://example.com",
+            "http://tauri.localhost",
+            "https://tauri.localhost",
+            "tauri://localhost",
+        ] {
+            assert!(!is_allowed_local_origin(&HeaderValue::from_static(origin)));
+        }
     }
 
     #[test]

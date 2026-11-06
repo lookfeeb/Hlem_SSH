@@ -2,7 +2,6 @@ import "../../styles/modals/modal-ai.css";
 import {
   ApiOutlined,
   CheckOutlined,
-  CodeOutlined,
   CopyOutlined,
   FundProjectionScreenOutlined,
   LockOutlined,
@@ -25,7 +24,6 @@ import { getErrorMessage } from "../../lib/configMapping";
 import { createAsyncQueue, isAsyncQueueInvalidatedError } from "../../lib/asyncQueue";
 import { mergeApiLogEntries } from "../../lib/apiLogEntries";
 import { useMountedRef, useTimeoutRegistry } from "../../lib/reactLifecycle";
-import { ApiExplorerModal } from "./ApiExplorerModal";
 
 interface AiApiPanelProps {
   open: boolean;
@@ -79,7 +77,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
   const [aiApiSessionRows, setAiApiSessionRows] = useState<Array<string | null>>(() => initialAiApiSessionRows(initialValue, sessions));
   const [aiApiLogs, setAiApiLogs] = useState<ApiLogEntry[]>([]);
   const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null);
-  const [apiExplorerOpen, setApiExplorerOpen] = useState(false);
   const availableAiApiSessionIdsKey = sessions.map((session) => session.id).join("|");
   const initialAiApiSessionIdsKey = [
     ...(initialValue.aiApiSessionIds ?? []),
@@ -91,12 +88,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
     [sessions],
   );
   const selectedAiApiSessionIds = useMemo(() => compactAiApiSessionRows(aiApiSessionRows), [aiApiSessionRows]);
-  const apiExplorerSessions = useMemo(
-    () => selectedAiApiSessionIds
-      .map((sessionId) => sessionsById.get(sessionId))
-      .filter((session): session is { id: string; name: string; host: string } => Boolean(session)),
-    [selectedAiApiSessionIds, sessionsById],
-  );
 
   useEffect(() => {
     if (!open) return;
@@ -118,7 +109,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
     serviceOperationVersionRef.current += 1;
     settingsSaveQueue.invalidate();
     setAiApiLoading(false);
-    setApiExplorerOpen(false);
   }, [open]);
 
   useEffect(() => {
@@ -554,11 +544,6 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
             </div>
           </div>
           <div className="aiApiServiceActions">
-            {running && aiApiInfo?.apiKey && (
-              <Button className="aiApiLogsButton is-explorer" icon={<CodeOutlined />} onClick={() => setApiExplorerOpen(true)}>
-                接口调试
-              </Button>
-            )}
             {aiApiLogs.length > 0 && (
               <Button className="aiApiLogsButton is-logs" icon={<FundProjectionScreenOutlined />} onClick={() => void openLogWindow()}>
                 操作日志
@@ -658,9 +643,8 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
   };
 
   return (
-    <>
-      <Modal open={open} title={null} className="aiApiModal" footer={null} onCancel={onClose} destroyOnHidden width={720} centered>
-        <div className="aiApiModalShell">
+    <Modal open={open} title={null} className="aiApiModal" footer={null} onCancel={onClose} destroyOnHidden width={720} centered>
+      <div className="aiApiModalShell">
         <header className="aiApiModalHeader">
           <span className="aiApiModalHeaderIcon" aria-hidden="true"><ThunderboltOutlined /></span>
           <div className="aiApiModalHeaderCopy">
@@ -698,15 +682,7 @@ export function AiApiPanel({ open, onClose, initialValue, sessions, onCreateSess
           </div>
           <Button className="aiApiCloseButton" onClick={onClose}>完成</Button>
         </footer>
-        </div>
-      </Modal>
-      <ApiExplorerModal
-        open={open && apiExplorerOpen && Boolean(aiApiInfo?.running && aiApiInfo.apiKey)}
-        onClose={() => setApiExplorerOpen(false)}
-        baseUrl={`http://127.0.0.1:${aiApiInfo?.port ?? aiApiPort}`}
-        apiKey={aiApiInfo?.apiKey ?? ""}
-        sessions={apiExplorerSessions}
-      />
-    </>
+      </div>
+    </Modal>
   );
 }

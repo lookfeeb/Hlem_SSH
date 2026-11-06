@@ -656,7 +656,7 @@ const API_FIELD_CATALOG_JSON: &str = r###"
   "selectionRules": [
     { "scope": "endpoint", "when": "只需验证密钥和服务可用性", "choose": "GET /api/auth", "avoid": "下载完整字段库", "reason": "响应最小且附带端点概览" },
     { "scope": "endpoint", "when": "AI 需要一次获得全部端点、字段、约束、规则和示例", "choose": "GET /api/fields", "avoid": "每次执行前重新读取", "reason": "按 version 或 ETag 缓存，If-None-Match 命中时返回 304" },
-    { "scope": "endpoint", "when": "OpenAPI 客户端、代码生成器或内置调试台需要标准描述", "choose": "GET /openapi.json", "avoid": "自行转换字段库", "reason": "文档由同一字段库动态生成" },
+    { "scope": "endpoint", "when": "OpenAPI 客户端或代码生成器需要标准描述", "choose": "GET /openapi.json", "avoid": "自行转换字段库", "reason": "文档由同一字段库动态生成" },
     { "scope": "endpoint", "when": "需要提前完成 SSH 握手或单独确认连接", "choose": "POST /api/connect", "avoid": "所有操作前固定调用 connect", "reason": "exec、jobs、latency 和文件端点会自动连接并复用" },
     { "scope": "endpoint", "when": "执行一条可在 5 分钟内完成且无需实时输出的命令", "choose": "POST /api/exec", "avoid": "POST /api/jobs", "reason": "单次响应最简单" },
     { "scope": "endpoint", "when": "同一会话需要执行 1–32 条短命令", "choose": "POST /api/exec/batch", "avoid": "循环发送大量独立 exec", "reason": "支持顺序或最多 4 路并行并保持输入顺序" },
