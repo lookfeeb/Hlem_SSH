@@ -93,11 +93,10 @@ await b.gpu(true);
 
 ```powershell
 cargo run --release --manifest-path tools/terminal-native-bench/Cargo.toml --locked --offline
-npm test
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml --locked --lib
 ```
 
-本轮前端 130 项通过，后端 221 项通过、2 项需要 Paramiko 环境的既有 SFTP 测试跳过；生产构建通过。回归覆盖原始字节与元数据、SIMD 边界、超长 SSH 消息拆帧保序、IPC 所有权移交、累计消费确认、全局/共享缓冲计量、着色不泄露隐藏密码/不覆盖服务器 ANSI、服务器改写和退格、GPU 配额/超时/迟到加载、诊断环形覆盖。
+以下为当时的验证记录，前端测试源码及运行入口现已移除：前端 130 项通过，后端 221 项通过、2 项需要 Paramiko 环境的既有 SFTP 测试跳过；生产构建通过。回归覆盖原始字节与元数据、SIMD 边界、超长 SSH 消息拆帧保序、IPC 所有权移交、累计消费确认、全局/共享缓冲计量、着色不泄露隐藏密码/不覆盖服务器 ANSI、服务器改写和退格、GPU 配额/超时/迟到加载、诊断环形覆盖。
 
 实际 Chrome 验证了用户输入蓝色与服务器红绿 ANSI、快速标签切换复用同一 canvas、禁用 GPU 后持续输出及恢复，并通过 `WEBGL_lose_context` 注入真实上下文丢失，约 3.25 秒后确认回退和中文输出正常。原生扫描模块通过 i686 和 aarch64 Windows 目标编译检查；ARM64 SIMD 没有在实机执行。本轮未连接真实 SSH 压测，也未执行安装版 WebView2 全链路或多终端 GPU 显存剖析。

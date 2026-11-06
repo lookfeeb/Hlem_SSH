@@ -44,19 +44,33 @@ function Install-NodeDeps {
     }
 }
 
-function Show-Artifact {
-    # tauri build 生成安装包在 target/release/bundle 下
-    $bundleDir = "$Root\target\release\bundle"
-    $installers = @()
-    if (Test-Path $bundleDir) {
-        $installers = Get-ChildItem -Path $bundleDir -Recurse `
-                        -Include "*.msi","*.exe","*.nsis" -ErrorAction SilentlyContinue
+function Get-CargoTargetDirectory {
+    Push-Location $Root
+    try {
+        $metadata = cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 --no-deps --locked --offline
+        if ($LASTEXITCODE -ne 0) { throw "无法读取 Cargo 编译目录" }
+        return [IO.Path]::GetFullPath(($metadata | ConvertFrom-Json).target_directory)
+    } finally {
+        Pop-Location
     }
-    # 也检查 src-tauri 路径
-    $bundleDir2 = "$Root\src-tauri\target\release\bundle"
-    if (Test-Path $bundleDir2) {
-        $installers += Get-ChildItem -Path $bundleDir2 -Recurse `
-                        -Include "*.msi","*.exe","*.nsis" -ErrorAction SilentlyContinue
+}
+
+function Show-Artifact {
+    $targetDir = Get-CargoTargetDirectory
+    # 同时支持默认构建和显式指定 Rust target 的构建。
+    $releaseDirs = @("$targetDir\release")
+    if (Test-Path -LiteralPath $targetDir) {
+        $releaseDirs += Get-ChildItem -LiteralPath $targetDir -Directory |
+            ForEach-Object { Join-Path $_.FullName "release" } |
+            Where-Object { Test-Path -LiteralPath $_ }
+    }
+    $installers = @()
+    foreach ($releaseDir in $releaseDirs) {
+        $bundleDir = Join-Path $releaseDir "bundle"
+        if (Test-Path -LiteralPath $bundleDir) {
+            $installers += Get-ChildItem -LiteralPath $bundleDir -Recurse -File |
+                Where-Object { $_.Extension -in @(".msi", ".exe", ".nsis") }
+        }
     }
 
     Write-Host ""
@@ -68,7 +82,7 @@ function Show-Artifact {
         }
     } else {
         # fallback: 找 exe
-        $exe = Get-ChildItem -Path "$Root\target\release","$Root\src-tauri\target\release" `
+        $exe = Get-ChildItem -LiteralPath $releaseDirs `
                              -Filter "helm.exe" -ErrorAction SilentlyContinue |
                Select-Object -First 1
         if ($exe) {
@@ -116,12 +130,21 @@ function Invoke-BuildNormal {
 function Invoke-Clean {
     Write-Step "清理编译缓存"
 
-    # 项目根 .cargo/config.toml 已把 target-dir 重定向到根目录的 target/
-    # 因此真正需要清理的目录分散在多处，逐一收集
+    $targetDir = Get-CargoTargetDirectory
+    $projectDir = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $targetDir = $targetDir.TrimEnd('\')
+    if ($targetDir -eq [IO.Path]::GetPathRoot($targetDir).TrimEnd('\') -or
+        $projectDir -eq $targetDir -or
+        $projectDir.StartsWith($targetDir + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "拒绝清理磁盘根目录或项目所在目录: $targetDir"
+    }
+    # 使用 Cargo 实际配置目录，同时收集仓库内的旧缓存。
     $candidates = @(
-        @{ Path = "$Root\target";                  Label = "Cargo target (主)" },
+        @{ Path = $targetDir;                      Label = "Cargo target (当前配置)" },
+        @{ Path = "$Root\target";                  Label = "Cargo target (旧)" },
         @{ Path = "$Root\src-tauri\target";        Label = "Cargo target (旧/备用)" },
         @{ Path = "$Root\tools\free-port\target";  Label = "free-port 工具 target" },
+        @{ Path = "$Root\tools\terminal-native-bench\target"; Label = "终端基准工具 target" },
         @{ Path = "$Root\dist";                    Label = "Vite 构建产物 dist" },
         @{ Path = "$Root\.vite";                   Label = "Vite 缓存 .vite" },
         @{ Path = "$Root\node_modules\.vite";      Label = "Vite 模块缓存" },
@@ -130,9 +153,10 @@ function Invoke-Clean {
 
     $present = @()
     $totalBytes = 0
-    foreach ($entry in $candidates) {
-        if (Test-Path $entry.Path) {
-            $bytes = (Get-ChildItem $entry.Path -Recurse -Force -ErrorAction SilentlyContinue |
+    foreach ($entry in ($candidates | Sort-Object -Property { $_.Path } -Unique)) {
+        $entry.Path = [IO.Path]::GetFullPath($entry.Path)
+        if (Test-Path -LiteralPath $entry.Path) {
+            $bytes = (Get-ChildItem -LiteralPath $entry.Path -Recurse -Force -File -ErrorAction SilentlyContinue |
                       Measure-Object -Property Length -Sum).Sum
             if (-not $bytes) { $bytes = 0 }
             $entry["Bytes"] = [int64]$bytes
@@ -167,11 +191,8 @@ function Invoke-Clean {
     try {
         if (Test-Path "$Root\src-tauri\Cargo.toml") {
             Write-Host "  cargo clean (src-tauri)" -ForegroundColor DarkGray
-            cargo clean --manifest-path src-tauri/Cargo.toml 2>$null | Out-Null
-        }
-        if (Test-Path "$Root\tools\free-port\Cargo.toml") {
-            Write-Host "  cargo clean (free-port)" -ForegroundColor DarkGray
-            cargo clean --manifest-path tools/free-port/Cargo.toml 2>$null | Out-Null
+            cargo clean --manifest-path src-tauri/Cargo.toml --target-dir $targetDir
+            if ($LASTEXITCODE -ne 0) { throw "cargo clean 失败" }
         }
     } finally {
         Pop-Location
@@ -180,9 +201,14 @@ function Invoke-Clean {
     # cargo clean 之后，残留的目录（dist、.vite、test-results 等）逐一删除
     $failed = @()
     foreach ($entry in $present) {
-        if (-not (Test-Path $entry.Path)) { continue }
+        if (-not (Test-Path -LiteralPath $entry.Path)) { continue }
         try {
-            Remove-Item -Path $entry.Path -Recurse -Force -ErrorAction Stop
+            $resolvedPath = (Get-Item -LiteralPath $entry.Path -Force).FullName.TrimEnd('\')
+            if ($resolvedPath -ne $targetDir -and
+                -not $resolvedPath.StartsWith($projectDir + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                throw "缓存目录超出预期范围: $resolvedPath"
+            }
+            Remove-Item -LiteralPath $resolvedPath -Recurse -Force -ErrorAction Stop
             Write-Host ("  ✔ 已删除  {0}" -f $entry.Path) -ForegroundColor Green
         } catch {
             $failed += $entry.Path

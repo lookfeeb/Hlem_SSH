@@ -423,27 +423,29 @@ function NetworkInterfacesPanel({ interfaces }: { interfaces: NetworkInterfaceMe
           <strong>{formatBytes(total.rxBytes)}</strong>
         </div>
       </div>
-      {interfaces.map((item) => {
-        const linkSpeed = formatLinkSpeed(item.linkSpeedMbps);
-        return (
-          <div className="networkInterfaceRow" key={item.interfaceName}>
-            <span className="networkInterfaceName" title={item.interfaceName}>{item.interfaceName}</span>
-            <div className="networkInterfaceMetrics">
-              <span className="networkInterfaceRate" title="上传速率">
-                <ArrowUpOutlined /> {formatNetworkRate(item.uploadKbps)}
-              </span>
-              <span className="networkInterfaceRate" title="下载速率">
-                <ArrowDownOutlined /> {formatNetworkRate(item.downloadKbps)}
-              </span>
+      <div className="networkInterfacesList" role="region" aria-label="网卡接口列表" tabIndex={0}>
+        {interfaces.map((item) => {
+          const linkSpeed = formatLinkSpeed(item.linkSpeedMbps);
+          return (
+            <div className="networkInterfaceRow" key={item.interfaceName}>
+              <span className="networkInterfaceName" title={item.interfaceName}>{item.interfaceName}</span>
+              <div className="networkInterfaceMetrics">
+                <span className="networkInterfaceRate" title="上传速率">
+                  <ArrowUpOutlined /> {formatNetworkRate(item.uploadKbps)}
+                </span>
+                <span className="networkInterfaceRate" title="下载速率">
+                  <ArrowDownOutlined /> {formatNetworkRate(item.downloadKbps)}
+                </span>
+              </div>
+              {linkSpeed ? (
+                <span className="networkInterfaceSpeed" title="接口链路速率">
+                  {linkSpeed}
+                </span>
+              ) : null}
             </div>
-            {linkSpeed ? (
-              <span className="networkInterfaceSpeed" title="接口链路速率">
-                {linkSpeed}
-              </span>
-            ) : null}
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
     </div>
   );
 }

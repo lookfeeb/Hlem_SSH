@@ -65,7 +65,7 @@ Rust 日志中的 `Startup vault ready: duration_ms=...` 用于定位配置初�
 
 这些结果证明大目录 DOM 规模与首屏样式负担下降，不能替代安装版冷启动、真实网络吞吐或用户操作 P95。浏览器手动复验覆盖目录/文件单选、多选表头、滚动到底、右键菜单，以及终端中文按两字节分块、后台输出和 WebGL 切换恢复。
 
-自动检查使用 `npm test`、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml --lib --locked`。新增回归覆盖队列无空位取消、暂停恢复的槽位约束、并发配置初始化、终端分块字节顺序、中文流式解码和二进制回放上限。
+当时的自动检查包括前端回归测试、`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml --lib --locked`。回归覆盖队列无空位取消、暂停恢复的槽位约束、并发配置初始化、终端分块字节顺序、中文流式解码和二进制回放上限。前端测试源码及运行入口现已移除，当前保留构建检查与 Rust 测试；此处覆盖范围为历史验证记录。
 
 后续终端隔离验证复用实际 TerminalPanel，模拟 5 ms 服务器回显，覆盖单次发送、回车清空和焦点、中文两字节分块、OSC 目录标记、后台 WebGL 释放及恢复。一次 640016 字节模拟输出在约 80 ms 内完成消费确认，全部字节收到；不包含原生 IPC、SSH 和最终绘制，不能当作安装版吞吐。
 

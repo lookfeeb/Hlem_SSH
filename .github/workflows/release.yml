@@ -58,6 +58,8 @@ jobs:
     name: Build ${{ matrix.label }} exe
     runs-on: windows-latest
     needs: version
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     strategy:
       fail-fast: false
       matrix:

@@ -429,12 +429,33 @@
 
 .networkInterfacesPanel {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 6px;
   width: 320px;
   max-width: min(320px, calc(100vw - 48px));
+  /* Leave room for the title, arrow and trigger on either side of the viewport. */
+  max-height: min(420px, calc(50dvh - 96px));
 }
 
-.networkInterfacesPopover .ant-popover-inner {
+.networkInterfacesList {
+  display: grid;
+  grid-auto-rows: max-content;
+  gap: 6px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.networkInterfacesList::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.networkInterfacesPopover .ant-popover-container {
   overflow: hidden;
   border: 1px solid rgba(191, 219, 254, .9);
   background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
