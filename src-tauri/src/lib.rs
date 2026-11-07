@@ -12,6 +12,8 @@ mod errors;
 mod events;
 mod http_client;
 mod remote;
+#[cfg(windows)]
+mod single_instance;
 mod update_download;
 mod vault;
 
@@ -114,7 +116,10 @@ fn frontend_ready(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     APP_STARTED.get_or_init(std::time::Instant::now);
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(windows)]
+    let builder = builder.plugin(single_instance::init());
+    builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
