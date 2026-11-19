@@ -23,6 +23,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
   type SetStateAction,
 } from "react";
 import { writeClipboardText } from "../lib/clipboard";
@@ -66,6 +67,7 @@ interface FileManagerProps {
   onWriteText: (path: string, content: string, sessionId?: string) => Promise<void>;
   onSendCommand: (command: string) => Promise<void>;
   quickCommands: QuickCommand[];
+  toolbarLeading?: ReactNode;
   onQuickCommandUpsert: (command: QuickCommand) => Promise<void>;
   onQuickCommandDelete: (commandId: string) => Promise<void>;
   filesLoading?: boolean;
@@ -250,6 +252,7 @@ function FileManagerView({
   onWriteText,
   onSendCommand,
   quickCommands,
+  toolbarLeading,
   onQuickCommandUpsert,
   onQuickCommandDelete,
   filesLoading = false,
@@ -1313,6 +1316,7 @@ function FileManagerView({
     <section className="filePanel">
       <div className="fileWorkspace">
         <QuickCommandTopArea
+          leading={toolbarLeading}
           dockId={quickCommandDockId}
           open={quickCommandsOpen}
           onOpenChange={(open) => {

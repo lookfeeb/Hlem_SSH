@@ -123,6 +123,56 @@
   box-shadow: 0 6px 12px -4px rgba(99, 102, 241, .25) !important;
 }
 
+.fileToolbar .fileApiButton.ant-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 0;
+  color: #ef4444 !important;
+  border-color: rgba(239, 68, 68, .4) !important;
+  background: rgba(239, 68, 68, .08) !important;
+}
+
+.fileToolbar .fileApiButton .ant-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  font-size: 14px;
+}
+
+.fileToolbar .fileApiButton-running.ant-btn,
+.fileToolbar .fileApiButton-stopped.ant-btn:hover {
+  color: #10b981 !important;
+  border-color: rgba(16, 185, 129, .4) !important;
+  background: rgba(16, 185, 129, .08) !important;
+}
+
+.fileToolbar .fileApiButton-running.ant-btn:hover {
+  color: #ef4444 !important;
+  border-color: rgba(239, 68, 68, .4) !important;
+  background: rgba(239, 68, 68, .08) !important;
+}
+
+.fileApiButton-running .anticon {
+  animation: fileApiPulse 2s ease-in-out infinite;
+}
+
+.fileApiButton-running:hover .anticon {
+  animation: none;
+}
+
+.fileToolbar .fileApiButton-starting.ant-btn {
+  color: #3973f6 !important;
+  border-color: #cbdcff !important;
+  background: #edf3ff !important;
+}
+
+@keyframes fileApiPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .4; }
+}
+
 .fileToolbar .fileCommandDropdownButton {
   position: relative;
   width: 24px !important;

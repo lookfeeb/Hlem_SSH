@@ -1,4 +1,4 @@
-import {
+import Icon, {
   CodeOutlined, DatabaseOutlined, ExportOutlined,
   FileExcelOutlined, FileImageOutlined, FileMarkdownOutlined,
   FilePdfOutlined, FilePptOutlined, FileTextOutlined, FileWordOutlined,
@@ -8,6 +8,18 @@ import {
 import type { ReactNode } from "react";
 import type { RemoteFileEntry } from "../../types";
 import { fileCategory, fileExtension, type FileCategory } from "../../lib/fileClassify";
+
+function DatabaseFileGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" aria-hidden="true" focusable="false">
+      <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5" fill="currentColor" fillOpacity=".12" />
+      <g stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <ellipse cx="12" cy="5" rx="8" ry="3" />
+        <path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3" />
+      </g>
+    </svg>
+  );
+}
 
 export function documentIcon(name: string): ReactNode {
   const ext = fileExtension(name.toLowerCase());
@@ -32,6 +44,7 @@ export function fileCategoryMeta(entry: RemoteFileEntry): { category: FileCatego
     env: { label: "环境变量", description: "环境变量或 dotenv 配置", icon: <SettingOutlined style={{ color: "#fa8c16" }} /> },
     config: { label: "配置", description: "配置文件", icon: <SettingOutlined style={{ color: "#722ed1" }} /> },
     data: { label: "数据", description: "JSON / YAML / CSV / SQL 等数据文件", icon: <DatabaseOutlined style={{ color: "#1890ff" }} /> },
+    database: { label: "数据库", description: "数据库文件及 WAL 日志、SHM 共享内存、回滚日志", icon: <Icon component={DatabaseFileGlyph} style={{ color: "#7c3aed" }} /> },
     cert: { label: "证书", description: "SSL/TLS 证书或密钥文件", icon: <LockOutlined style={{ color: "#d48806" }} /> },
     binary: { label: "可执行", description: "可执行程序或二进制文件", icon: <PlaySquareOutlined style={{ color: "#f5222d" }} /> },
     symlink: { label: "链接", description: "符号链接", icon: <ExportOutlined style={{ color: "#2f54eb" }} /> },

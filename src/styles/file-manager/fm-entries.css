@@ -74,7 +74,8 @@
   --file-icon-shadow: rgba(5, 150, 105, .28);
 }
 
-.fileName-data {
+.fileName-data,
+.fileName-database {
   --file-icon-color: #7c3aed;
   --file-icon-hover: #6d28d9;
   --file-icon-shadow: rgba(124, 58, 237, .28);
@@ -131,7 +132,8 @@
 .fileTypeBadge-media { --file-type-color: #be185d; background: rgba(252, 231, 243, .58); border-color: rgba(219, 39, 119, .22); }
 .fileTypeBadge-env,
 .fileTypeBadge-config { --file-type-color: #047857; background: rgba(209, 250, 229, .54); border-color: rgba(5, 150, 105, .22); }
-.fileTypeBadge-data { --file-type-color: #6d28d9; background: rgba(237, 233, 254, .58); border-color: rgba(124, 58, 237, .22); }
+.fileTypeBadge-data,
+.fileTypeBadge-database { --file-type-color: #6d28d9; background: rgba(237, 233, 254, .58); border-color: rgba(124, 58, 237, .22); }
 .fileTypeBadge-cert { --file-type-color: #d48806; background: rgba(255, 247, 230, .6); border-color: rgba(212, 136, 6, .25); }
 .fileTypeBadge-directory { --file-type-color: #b45309; background: rgba(254, 243, 199, .58); border-color: rgba(245, 158, 11, .28); }
 .fileTypeBadge-symlink { --file-type-color: #0f766e; background: rgba(204, 251, 241, .48); border-color: rgba(15, 118, 110, .22); }

@@ -119,44 +119,47 @@ body.isResizingQuickCommandDock * {
   white-space: nowrap;
 }
 
-.quickCommandDockState {
-  display: inline-flex;
-  flex: 0 0 auto;
-  height: 21px;
-  align-items: center;
-  gap: 5px;
-  padding: 0 7px;
-  color: #5b55d5;
-  font-size: 9px;
-  font-weight: 750;
-  white-space: nowrap;
-  background: #f0efff;
-  border: 1px solid #dcd9ff;
-  border-radius: 999px;
-}
-
-.quickCommandDockState::before {
-  content: "";
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: #685df0;
-}
-
 .quickCommandDockControls {
   display: flex;
   flex: 0 0 auto;
   min-width: 0;
   align-items: center;
   gap: 7px;
-  padding: 9px 9px 7px;
+}
+
+.quickCommandSearchButton {
+  display: grid;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
+  color: #7d889b;
+  background: #ffffff;
+  border: 1px solid #d9dfeb;
+  border-radius: 8px;
+  font-size: 12px;
+  transition: color .18s ease, background .18s ease, border-color .18s ease;
+}
+
+.quickCommandSearchButton:hover,
+.quickCommandSearchButton-active {
+  color: var(--accent-2);
+  background: #f0efff;
+  border-color: #dcd9ff;
+}
+
+.quickCommandSearchButton:focus-visible,
+.quickCommandCreateButton:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
 }
 
 .quickCommandSearch {
   display: flex;
+  width: min(280px, calc(100vw - 48px));
   min-width: 0;
   height: 32px;
-  flex: 1;
   align-items: center;
   gap: 8px;
   padding: 0 9px;
@@ -432,12 +435,7 @@ body.isResizingQuickCommandDock * {
 }
 
 @container quick-command-dock (max-width: 315px) {
-  .quickCommandDockState {
-    display: none;
-  }
-
-  .quickCommandDockHeader,
-  .quickCommandDockControls {
+  .quickCommandDockHeader {
     padding-right: 8px;
     padding-left: 8px;
   }

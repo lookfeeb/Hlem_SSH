@@ -3,12 +3,10 @@ import {
   CloseOutlined,
   FullscreenExitOutlined,
   LeftOutlined,
-  LoadingOutlined,
   MinusOutlined,
   ProfileOutlined,
   RightOutlined,
   SettingOutlined,
-  ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { App as AntdApp, Badge, Button, Space, Tooltip } from "antd";
@@ -27,11 +25,6 @@ interface TopBarProps {
   onSettingsOpen: () => void;
   connectingSessionIds: ReadonlySet<string>;
   transfers: TransferInfo[];
-  apiServerRunning: boolean;
-  apiServerStarting?: boolean;
-  apiServerError?: string | null;
-  apiConfigured: boolean;
-  onApiServerStart: () => void;
 }
 
 export function TopBar({
@@ -46,11 +39,6 @@ export function TopBar({
   onSettingsOpen,
   connectingSessionIds,
   transfers,
-  apiServerRunning,
-  apiServerStarting = false,
-  apiServerError,
-  apiConfigured,
-  onApiServerStart,
 }: TopBarProps) {
   const { modal } = AntdApp.useApp();
   const activeTransferTotal = activeTransferCount(transfers);
@@ -227,17 +215,6 @@ export function TopBar({
           <span>HelM</span>
         </span>
         <Space size={6} className="brandActions">
-          {apiConfigured && (
-            <Tooltip title={apiServerRunning ? "AI API 运行中" : apiServerStarting ? "AI API 正在启动" : apiServerError ? `AI API 启动失败：${apiServerError}` : "AI API 已停止"} placement="bottom">
-              <Button
-                aria-label="AI API"
-                className={`brandApiButton${apiServerRunning ? " brandApiButton-running" : apiServerStarting ? " brandApiButton-starting" : " brandApiButton-stopped"}`}
-                icon={apiServerStarting ? <LoadingOutlined /> : <ThunderboltOutlined />}
-                size="small"
-                onClick={onApiServerStart}
-              />
-            </Tooltip>
-          )}
           <Tooltip title="设置" placement="bottom">
             <Button
               aria-label="设置"

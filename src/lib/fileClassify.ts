@@ -7,7 +7,7 @@ const nameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 
 
 export type FileCategory =
   | "directory" | "archive" | "script" | "document" | "log" | "text"
-  | "media" | "env" | "config" | "data" | "cert" | "binary" | "symlink" | "other";
+  | "media" | "env" | "config" | "data" | "database" | "cert" | "binary" | "symlink" | "other";
 
 export function fileExtension(name: string): string {
   const trimmed = name.replace(/\.+$/g, "");
@@ -36,7 +36,8 @@ export function fileCategory(entry: RemoteFileEntry): FileCategory {
   if (["log", "out", "err", "trace"].includes(ext) || name.endsWith(".log.1")) return "log";
   if (["txt", "text", "ini", "properties", "service"].includes(ext)) return "text";
   if (["png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "bmp", "tiff", "tif", "psd", "ai", "raw", "cr2", "nef", "heic", "avif", "mp4", "mov", "avi", "mkv", "wmv", "flv", "webm", "m4v", "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus"].includes(ext)) return "media";
-  if (["json", "yaml", "yml", "toml", "xml", "csv", "tsv", "sql", "db", "sqlite", "parquet", "avro", "proto", "graphql", "types"].includes(ext)) return "data";
+  if (/^(?:db|db3|sqlite|sqlite3)(?:-(?:wal|shm|journal))?$/.test(ext)) return "database";
+  if (["json", "yaml", "yml", "toml", "xml", "csv", "tsv", "sql", "parquet", "avro", "proto", "graphql", "types"].includes(ext)) return "data";
   if (["config", "conf", "cnf", "cfg", "htaccess", "editorconfig", "gitignore", "dockerignore"].includes(ext) || ["dockerfile", "nginx.conf", "package.json", "tsconfig.json", "makefile", "cmakelists.txt", "vagrantfile"].includes(name)) return "config";
   if (["exe", "bin", "run", "appimage", "msi", "dll", "so", "dylib", "a", "o", "elf", "com"].includes(ext) || isExecutable(entry)) return "binary";
   return "other";

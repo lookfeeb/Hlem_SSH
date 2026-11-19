@@ -7,7 +7,7 @@
 
 [下载安装包](https://github.com/lookfeeb/Hlem_SSH/releases/latest) · [开发与测试](#开发与测试) · [系统架构](#系统架构) · [目录与清理](#目录与清理)
 
-本文对应仓库版本 **0.0.59**。版本以 [package.json](package.json) 和 [Cargo.toml](src-tauri/Cargo.toml) 为准；发行工作流提供 Windows x64、x86、ARM64 安装包，其他平台目前没有对应发布流水线。
+本文对应仓库版本 **0.0.60**。版本以 [package.json](package.json) 和 [Cargo.toml](src-tauri/Cargo.toml) 为准；发行工作流提供 Windows x64、x86、ARM64 安装包，其他平台目前没有对应发布流水线。
 
 ## 功能概览
 
@@ -34,8 +34,8 @@ Windows 下同一台电脑只允许运行一个 HelM 主实例（不同安装目
 - Windows，安装 Microsoft Edge WebView2 Runtime。
 - Node.js **22.12+** 与 npm；Vite 8 的 Node 要求为 `^20.19.0 || >=22.12.0`，CI 使用 Node 22。
 - Rust stable、MSVC 工具链，以及 Visual Studio Build Tools 的“使用 C++ 的桌面开发”工作负载和 Windows SDK。
-- PowerShell 7（`pwsh`），用于仓库测试脚本。
-- Python + `paramiko` 仅用于 SFTP 集成 / 性能测试，日常启动不需要。
+- PowerShell 7（`pwsh`），用于管理员开发启动脚本和仓库测试脚本。
+- Python 3，用于可选的管理员开发启动脚本；SFTP 集成 / 性能测试还需要 `paramiko`。直接使用 npm 启动不需要 Python。
 
 在仓库根目录执行：
 
@@ -46,11 +46,16 @@ npm run tauri:dev
 
 Tauri 会启动 `npm run dev`，Vite 固定监听 `http://127.0.0.1:5177`。`predev` 先运行 [free-port](tools/free-port/src/main.rs)，尝试释放本项目占用的 5177 端口。单独运行 Vite 只提供前端页面，SSH、文件系统和窗口功能需要 Tauri 运行环境。
 
+需要以管理员身份开发时，先完成 `npm ci`，再双击根目录的 [run-dev-admin.py](run-dev-admin.py)，或执行 `python run-dev-admin.py`。双击需要 Windows 已将 `.py` 文件关联到 Python。脚本会请求 UAC 提权，在 PowerShell 7 中进入项目目录并执行 `npm run tauri:dev`，保留窗口以便查看输出；已是管理员时直接启动。启动脚本仅使用 Python 标准库，不需要 `paramiko`。
+
+脚本会透传当前 PATH、已设置的 `CARGO_HOME` / `RUSTUP_HOME`，并在提权前通过 `cargo metadata` 解析实际编译缓存目录，支持 `.cargo/config.toml` 和 `CARGO_TARGET_DIR` 覆盖。端口清理复用现有 `predev`。HelM 采用系统单实例，启动开发版前请先从托盘退出已运行的 HelM。
+
 ### 常用命令
 
 | 命令 | 用途 |
 | --- | --- |
 | `npm run tauri:dev` | 启动桌面开发环境 |
+| `python run-dev-admin.py` | 通过 PowerShell 7 以管理员身份启动桌面开发环境 |
 | `npm run build` | TypeScript 检查与 Vite 生产构建，输出到 `dist/` |
 | `npm run tauri:build` | 构建桌面程序和安装包 |
 | `npm run check:rust` | Rust 编译检查 |

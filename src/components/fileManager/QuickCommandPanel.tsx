@@ -1,4 +1,4 @@
-import { Button, Dropdown, Space, Tooltip, type MenuProps } from "antd";
+import { Button, Dropdown, Popover, Space, Tooltip, type MenuProps } from "antd";
 import {
   CloseOutlined,
   CodeOutlined,
@@ -9,22 +9,24 @@ import {
   PlusOutlined,
   SearchOutlined,
 } from "@ant-design/icons";
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { getErrorMessage } from "../../lib/configMapping";
 import type { QuickCommand } from "../../types";
 
 export interface QuickCommandTopAreaProps {
   children: ReactNode;
+  leading?: ReactNode;
   dockId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export function QuickCommandTopArea({ children, dockId, open, onOpenChange }: QuickCommandTopAreaProps) {
+export function QuickCommandTopArea({ children, leading, dockId, open, onOpenChange }: QuickCommandTopAreaProps) {
   return (
     <div className="fileTopArea">
       <div className="fileToolbar">
         <Space className="fileToolbarActions" size={4}>
+          {leading}
           <Tooltip title={open ? "关闭常用命令" : "常用命令"}>
             <Button
               aria-controls={dockId}
@@ -53,6 +55,9 @@ export interface QuickCommandDockProps {
 
 export function QuickCommandDock({ id, commandItems, onSendCommand, onEditCommand, onDeleteCommand }: QuickCommandDockProps) {
   const [searchText, setSearchText] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchButtonRef = useRef<HTMLButtonElement>(null);
 
   const visibleCommands = useMemo(() => {
     const keyword = searchText.trim().toLocaleLowerCase();
@@ -102,29 +107,64 @@ export function QuickCommandDock({ id, commandItems, onSendCommand, onEditComman
             <small>运行后发送到当前终端</small>
           </span>
         </div>
-        <span className="quickCommandDockState">已停靠</span>
-      </div>
-
-      <div className="quickCommandDockControls">
-        <label className="quickCommandSearch">
-          <SearchOutlined />
-          <input
-            aria-label="搜索常用命令"
-            placeholder="搜索命令名称或内容…"
-            value={searchText}
-            onChange={(event) => setSearchText(event.target.value)}
-          />
-          {searchText ? (
-            <button type="button" aria-label="清除搜索" title="清除搜索" onClick={() => setSearchText("")}>
-              <CloseOutlined />
+        <div className="quickCommandDockControls">
+          <Popover
+            trigger="click"
+            placement="bottomRight"
+            open={searchOpen}
+            onOpenChange={setSearchOpen}
+            afterOpenChange={(open) => {
+              if (open) searchInputRef.current?.focus();
+            }}
+            content={(
+              <div
+                id={`${id}-search`}
+                className="quickCommandSearch"
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.stopPropagation();
+                    setSearchOpen(false);
+                    searchButtonRef.current?.focus();
+                  }
+                }}
+              >
+                <SearchOutlined />
+                <input
+                  ref={searchInputRef}
+                  aria-label="搜索常用命令"
+                  placeholder="搜索命令名称或内容…"
+                  value={searchText}
+                  onChange={(event) => setSearchText(event.target.value)}
+                />
+                {searchText ? (
+                  <button type="button" aria-label="清除搜索" title="清除搜索" onClick={() => {
+                    setSearchText("");
+                    searchInputRef.current?.focus();
+                  }}>
+                    <CloseOutlined />
+                  </button>
+                ) : null}
+              </div>
+            )}
+          >
+            <button
+              ref={searchButtonRef}
+              type="button"
+              className={`quickCommandSearchButton${searchOpen || searchText.trim() ? " quickCommandSearchButton-active" : ""}`}
+              aria-label="搜索常用命令"
+              aria-expanded={searchOpen}
+              aria-controls={searchOpen ? `${id}-search` : undefined}
+              title={searchText.trim() ? `搜索：${searchText}` : "搜索常用命令"}
+            >
+              <SearchOutlined />
             </button>
-          ) : null}
-        </label>
-        <Tooltip title="新建命令">
-          <button type="button" className="quickCommandCreateButton" aria-label="新建命令" onClick={() => onEditCommand()}>
-            <PlusOutlined />
-          </button>
-        </Tooltip>
+          </Popover>
+          <Tooltip title="新建命令">
+            <button type="button" className="quickCommandCreateButton" aria-label="新建命令" onClick={() => onEditCommand()}>
+              <PlusOutlined />
+            </button>
+          </Tooltip>
+        </div>
       </div>
 
       <div className="quickCommandDockBody">

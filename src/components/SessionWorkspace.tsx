@@ -1,4 +1,4 @@
-import { memo, useLayoutEffect, useRef, type RefObject } from "react";
+import { memo, useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
 import type { RemoteDownloadSelection } from "../app/remoteDownloadPlan";
 import type { QuickCommand, RemoteFileEntry, RemoteSession } from "../types";
 import { FileManager, type FileOperation } from "./FileManager";
@@ -30,6 +30,7 @@ interface SessionWorkspaceProps {
   active: boolean;
   filesLoading: boolean;
   quickCommands: QuickCommand[];
+  fileToolbarLeading?: ReactNode;
   scrollback: number;
   webglEnabled: boolean;
   actionsRef: RefObject<SessionWorkspaceActions | null>;
@@ -40,6 +41,7 @@ function SessionWorkspaceView({
   active,
   filesLoading,
   quickCommands,
+  fileToolbarLeading,
   scrollback,
   webglEnabled,
   actionsRef,
@@ -92,6 +94,7 @@ function SessionWorkspaceView({
               onWriteText={(path, content, sessionId) => actions().writeRemoteText(path, content, sessionId ?? session.id)}
               onSendCommand={(command) => actions().sendTerminalCommand(session.id, session.terminalId, command)}
               quickCommands={quickCommands}
+              toolbarLeading={fileToolbarLeading}
               onQuickCommandUpsert={(command) => actions().upsertQuickCommand(command)}
               onQuickCommandDelete={(commandId) => actions().deleteQuickCommand(commandId)}
               filesLoading={filesLoading}

@@ -49,6 +49,7 @@ import { ConnectionSidebar } from "./components/ConnectionSidebar";
 import { closeSharedDetachedEditorChannel } from "./lib/detachedEditorBridge";
 import type { SessionWorkspaceActions } from "./components/SessionWorkspace";
 import { TopBar } from "./components/TopBar";
+import { ApiServerButton } from "./components/fileManager/ApiServerButton";
 import { EmptyWorkspace } from "./components/shared/EmptyWorkspace";
 import { configToRemoteSession, getErrorMessage } from "./lib/configMapping";
 import { isConfigSnapshotCurrent } from "./lib/configSnapshot";
@@ -747,6 +748,15 @@ function App() {
   };
 
   const currentSettings = configSnapshot?.data.settings ?? { proxy: null, backup: defaultBackupSettings(), quickCommands: [] };
+  const apiConfigured = !!currentSettings.aiApiKey;
+  const fileToolbarLeading = useMemo(() => apiConfigured ? (
+    <ApiServerButton
+      running={apiServerRunning}
+      starting={apiServerStarting}
+      error={apiServerError}
+      onOpen={() => setAiApiOpen(true)}
+    />
+  ) : null, [apiConfigured, apiServerRunning, apiServerStarting, apiServerError]);
   const quickCommands = currentSettings.quickCommands ?? EMPTY_QUICK_COMMANDS;
   const transferMounted = useOpenedPanel(transferCenterOpen);
   const backupMounted = useOpenedPanel(backupOpen);
@@ -772,13 +782,6 @@ function App() {
                   onSettingsOpen={() => setSettingsOpen(true)}
                   connectingSessionIds={connectingSessionIds}
                   transfers={transfers}
-                  apiServerRunning={apiServerRunning}
-                  apiServerStarting={apiServerStarting}
-                  apiServerError={apiServerError}
-                  apiConfigured={!!currentSettings.aiApiKey}
-                  onApiServerStart={() => {
-                    setAiApiOpen(true);
-                  }}
                 />
                 {activeSession ? (
                   <main className="workspace">
@@ -808,6 +811,7 @@ function App() {
                           active={session.id === activeSession.id}
                           filesLoading={fileLoadingSessionIds.has(session.id)}
                           quickCommands={quickCommands}
+                          fileToolbarLeading={fileToolbarLeading}
                           scrollback={TERMINAL_SCROLLBACK}
                           webglEnabled={TERMINAL_WEBGL_ENABLED}
                           actionsRef={sessionWorkspaceActionsRef}

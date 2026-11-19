@@ -367,8 +367,11 @@ impl RemoteRuntime {
         let mut data = Vec::with_capacity(size as usize);
         remote.read_to_end(&mut data).await.map_err(remote_error)?;
         remote.shutdown().await.map_err(remote_error)?;
-        String::from_utf8(data)
-            .map_err(|_| AppError::InvalidInput("只支持 UTF-8 文本文件编辑".to_string()))
+        String::from_utf8(data).map_err(|_| {
+            AppError::InvalidInput(
+                "仅支持 UTF-8 文本编辑。其他编码文本请先转换；二进制或加密文件请使用专用工具。".to_string(),
+            )
+        })
     }
 
     pub async fn sftp_exists(&self, sftp_id: &str, path: String) -> AppResult<bool> {

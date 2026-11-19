@@ -140,55 +140,6 @@
   font-size: 14px;
 }
 
-.brandApiButton.ant-btn {
-  color: #ef4444 !important;
-  border-color: rgba(239, 68, 68, .4) !important;
-  background: rgba(239, 68, 68, .08) !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-}
-
-.brandApiButton.ant-btn .ant-btn-icon {
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  margin: 0 !important;
-}
-
-.brandApiButton-running.ant-btn {
-  color: #10b981 !important;
-  border-color: rgba(16, 185, 129, .4) !important;
-  background: rgba(16, 185, 129, .08) !important;
-}
-
-.brandApiButton-running.ant-btn:hover {
-  color: #ef4444 !important;
-  border-color: rgba(239, 68, 68, .4) !important;
-  background: rgba(239, 68, 68, .08) !important;
-}
-
-.brandApiButton-running .anticon {
-  animation: brandApiPulse 2s ease-in-out infinite;
-}
-
-.brandApiButton-running:hover .anticon {
-  animation: none;
-}
-
-.brandApiButton-stopped.ant-btn:hover {
-  color: #10b981 !important;
-  border-color: rgba(16, 185, 129, .4) !important;
-  background: rgba(16, 185, 129, .08) !important;
-}
-
-.brandApiButton-starting.ant-btn { color: #3973f6; border-color: #cbdcff; background: #edf3ff; }
-
-@keyframes brandApiPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: .4; }
-}
-
 .sessionTabs {
   --session-tab-height: 28px;
   display: grid;
