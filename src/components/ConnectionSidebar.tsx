@@ -1,18 +1,19 @@
 import {
+  CheckOutlined,
   DeleteOutlined,
   DesktopOutlined,
-  DisconnectOutlined,
   DownOutlined,
   EditOutlined,
   LoginOutlined,
   LoadingOutlined,
   PlusOutlined,
-  PlusSquareOutlined,
+  PoweroffOutlined,
+  RobotOutlined,
   SearchOutlined,
   StarFilled,
   StarOutlined,
 } from "@ant-design/icons";
-import { Button, Input, Modal, Tooltip } from "antd";
+import { Button, Input, Modal, Tooltip, message } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   normalizeCollapsedConnectionSectionIds,
@@ -20,6 +21,12 @@ import {
   toggleCollapsedConnectionSectionId,
 } from "../app/connectionSectionState";
 import { sortConnectionsByCount, sortConnectionsByCreatedAt } from "../app/connectionOrdering";
+import { appApi } from "../api/appApi";
+import { buildAiApiSessionCommand } from "../lib/aiApiCommand";
+import { writeClipboardText } from "../lib/clipboard";
+import { getErrorMessage } from "../lib/configMapping";
+import { useMountedRef, useTimeoutRegistry } from "../lib/reactLifecycle";
+import { remoteSessionConfigId } from "../lib/session";
 import type { ConnectionState, RemoteSession, SessionGroup } from "../types";
 
 interface ConnectionSidebarProps {
@@ -66,12 +73,19 @@ export function ConnectionSidebar({
   onCollapsedSectionIdsChange,
 }: ConnectionSidebarProps) {
   const [searchQuery, setSearchQuery] = useState("");
+  const [copiedApiSessionId, setCopiedApiSessionId] = useState<string | null>(null);
+  const [copyingApiSessionId, setCopyingApiSessionId] = useState<string | null>(null);
+  const copyingApiRef = useRef(false);
+  const copyVersionRef = useRef(0);
+  const mountedRef = useMountedRef();
+  const setSafeTimeout = useTimeoutRegistry();
   const normalizedCollapsedSectionIds = normalizeCollapsedConnectionSectionIds(collapsedSectionIds);
   const persistedCollapsedKey = normalizedCollapsedSectionIds.join("\u0000");
   const [localCollapsedSectionIds, setLocalCollapsedSectionIds] = useState<Set<string>>(
     () => new Set(normalizedCollapsedSectionIds),
   );
   const collapseChangeVersionRef = useRef(0);
+  const firstCardClickRef = useRef<{ element: HTMLDivElement; connected: boolean } | null>(null);
   const query = searchQuery.trim().toLowerCase();
 
   useEffect(() => {
@@ -156,6 +170,40 @@ export function ConnectionSidebar({
     }
   }
 
+  async function copySessionApi(session: RemoteSession) {
+    if (copyingApiRef.current) return;
+    copyingApiRef.current = true;
+    const version = ++copyVersionRef.current;
+    setCopyingApiSessionId(session.id);
+    setCopiedApiSessionId(null);
+    try {
+      // Read current credentials so a port change or key rotation cannot copy stale values.
+      const info = await appApi.apiServerStatus();
+      if (!mountedRef.current) return;
+      if (!info.running || !info.apiKey) {
+        message.info("请先在 AI API 控制中启动服务");
+        return;
+      }
+      const text = buildAiApiSessionCommand(info, { ...session, id: remoteSessionConfigId(session) });
+      const copied = await writeClipboardText(text);
+      if (!mountedRef.current) return;
+      if (!copied) {
+        message.error("复制失败");
+        return;
+      }
+      setCopiedApiSessionId(session.id);
+      setSafeTimeout(() => {
+        if (copyVersionRef.current === version) setCopiedApiSessionId(null);
+      }, 2000);
+      message.success(`已复制「${session.name}」的 AI API 调用信息`);
+    } catch (error) {
+      if (mountedRef.current) message.error(`复制失败：${getErrorMessage(error)}`);
+    } finally {
+      copyingApiRef.current = false;
+      if (mountedRef.current) setCopyingApiSessionId(null);
+    }
+  }
+
   function toggleFavorite(session: RemoteSession) {
     onFavoriteChange(session.id, !session.favorite);
   }
@@ -236,8 +284,21 @@ export function ConnectionSidebar({
                           className={`connectionItem connectionItem-${state}${active ? " connectionItem-active" : ""}`}
                           role="button"
                           tabIndex={0}
-                          onClick={() => openSession(session)}
+                          title={connected ? "单击切换终端，双击新开终端" : connecting ? "正在连接…" : "单击连接"}
+                          onClick={(event) => {
+                            if (event.detail > 1) return;
+                            firstCardClickRef.current = { element: event.currentTarget, connected };
+                            openSession(session);
+                          }}
+                          onDoubleClick={(event) => {
+                            const firstClick = firstCardClickRef.current;
+                            firstCardClickRef.current = null;
+                            // 未连接时，首击已经发起连接，双击不能再多开一次。
+                            if (!connected || !firstClick?.connected || firstClick.element !== event.currentTarget) return;
+                            onConnect(session);
+                          }}
                           onKeyDown={(event) => {
+                            if (event.target !== event.currentTarget) return;
                             if (event.key !== "Enter" && event.key !== " ") return;
                             event.preventDefault();
                             openSession(session);
@@ -253,7 +314,7 @@ export function ConnectionSidebar({
                               {session.username}@{session.host}
                             </span>
                           </span>
-                          <span className="connectionItemActions">
+                          <span className="connectionItemActions" onDoubleClick={(event) => event.stopPropagation()}>
                             <Tooltip title={favorite ? "取消收藏" : "收藏"}>
                               <Button
                                 aria-label={favorite ? `取消收藏 ${session.name}` : `收藏 ${session.name}`}
@@ -266,10 +327,33 @@ export function ConnectionSidebar({
                                 }}
                               />
                             </Tooltip>
+                            <Tooltip title={copiedApiSessionId === session.id ? "AI API 已复制" : "复制 AI API 调用信息"}>
+                              <Button
+                                aria-label={`复制 AI API ${session.name}`}
+                                icon={copiedApiSessionId === session.id ? <CheckOutlined /> : <RobotOutlined />}
+                                loading={copyingApiSessionId === session.id}
+                                size="small"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void copySessionApi(session);
+                                }}
+                              />
+                            </Tooltip>
+                            <Tooltip title="编辑">
+                              <Button
+                                aria-label={`编辑 ${session.name}`}
+                                icon={<EditOutlined />}
+                                size="small"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onEdit(session.id);
+                                }}
+                              />
+                            </Tooltip>
                             <Tooltip title={connected ? "断开" : connecting ? "取消连接" : "连接"}>
                               <Button
                                 aria-label={connected ? `断开 ${session.name}` : connecting ? `取消连接 ${session.name}` : `连接 ${session.name}`}
-                                icon={connected ? <DisconnectOutlined /> : connecting ? <LoadingOutlined /> : <LoginOutlined />}
+                                icon={connected ? <PoweroffOutlined /> : connecting ? <LoadingOutlined /> : <LoginOutlined />}
                                 size="small"
                                 danger={connected || connecting}
                                 onClick={(event) => {
@@ -281,30 +365,6 @@ export function ConnectionSidebar({
                                   } else {
                                     openSession(session);
                                   }
-                                }}
-                              />
-                            </Tooltip>
-                            {connected && (
-                              <Tooltip title="新开终端">
-                                <Button
-                                  aria-label={`新开终端 ${session.name}`}
-                                  icon={<PlusSquareOutlined />}
-                                  size="small"
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    onConnect(session);
-                                  }}
-                                />
-                              </Tooltip>
-                            )}
-                            <Tooltip title="编辑">
-                              <Button
-                                aria-label={`编辑 ${session.name}`}
-                                icon={<EditOutlined />}
-                                size="small"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  onEdit(session.id);
                                 }}
                               />
                             </Tooltip>

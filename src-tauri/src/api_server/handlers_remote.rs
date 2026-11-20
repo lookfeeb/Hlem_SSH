@@ -671,7 +671,7 @@ pub async fn rest_openapi(
 
 // ─── REST: 会话生命周期 / 命令执行 / 文件列出 ───────────────────────────────────
 
-/// `GET /api/sessions` — 列出已授权的配置会话及实时连接状态。
+/// `GET /api/sessions` — 列出全部已保存主机及实时连接状态。
 pub async fn rest_sessions(
     headers: HeaderMap,
     AxumState(state): AxumState<ApiServerState>,

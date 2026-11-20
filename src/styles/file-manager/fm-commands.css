@@ -503,6 +503,18 @@ body.isResizingQuickCommandDock * {
   justify-content: center;
 }
 
+.fileContent .ant-table-header th.ant-table-selection-column,
+.fileContent .ant-table-tbody > tr > td.ant-table-selection-column,
+.fileContent .ant-table-tbody-virtual .ant-table-cell.ant-table-selection-column {
+  padding-inline: 8px !important;
+}
+
+.fileContent .ant-table-header th.fileNameColumn,
+.fileContent .ant-table-tbody > tr > td.fileNameColumn,
+.fileContent .ant-table-tbody-virtual .ant-table-cell.fileNameColumn {
+  padding-left: 8px !important;
+}
+
 .fileSearchLoading {
   color: var(--accent);
   font-size: 12px;
@@ -562,6 +574,11 @@ body.isResizingQuickCommandDock * {
   border-radius: 999px;
   transition: background .18s, right .18s;
   pointer-events: none;
+}
+
+/* Keep the final resize handle inside the table's horizontal scroll range. */
+.fileTableSurface .ant-table-thead > tr > th:last-child .columnResizer {
+  right: 0;
 }
 
 .columnResizer:hover::before {

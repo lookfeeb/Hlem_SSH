@@ -43,6 +43,7 @@ import { QuickCommandDock, QuickCommandTopArea } from "./fileManager/QuickComman
 import { FileDialogs, operationLabel, type FileDialogState } from "./fileManager/FileDialogs";
 import { DirectoryTree, buildTreeData } from "./fileManager/DirectoryTree";
 import { contextMenuPositionInContainer } from "./fileManager/contextMenuPosition";
+import { useFileTableScrollSync } from "./fileManager/useFileTableScrollSync";
 import type { RemoteDownloadSelection } from "../app/remoteDownloadPlan";
 import {
   expandDirectoryParentsForPathChange,
@@ -90,6 +91,7 @@ const baseColumns: ColumnsType<RemoteFileEntry> = [
     title: "文件名",
     key: "name",
     dataIndex: "name",
+    className: "fileNameColumn",
     sorter: (a, b) => compareEntryGroup(a, b) || compareEntryName(a, b),
     render: (name: string, entry) => {
       const meta = fileCategoryMeta(entry);
@@ -129,6 +131,7 @@ const baseColumns: ColumnsType<RemoteFileEntry> = [
   { title: "用户/组", key: "owner", dataIndex: "owner", render: (value: string) => <span title={value}>{value || "-"}</span> },
 ];
 
+const SELECTION_COLUMN_WIDTH = 36;
 const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   name: 260,
   size: 88,
@@ -440,6 +443,7 @@ function FileManagerView({
     () => (lowerSearchText ? allFiles.filter((f) => f.name.toLowerCase().includes(lowerSearchText)) : allFiles),
     [allFiles, lowerSearchText],
   );
+  useFileTableScrollSync(tableSurfaceRef, files.length > 0);
   const effectiveColumnWidths = useMemo<Record<string, number>>(
     () => ({
       ...columnWidths,
@@ -563,7 +567,7 @@ function FileManagerView({
   );
 
   const tableColumnWidth = useMemo(
-    () => 48 + Object.keys(DEFAULT_COLUMN_WIDTHS).reduce(
+    () => SELECTION_COLUMN_WIDTH + Object.keys(DEFAULT_COLUMN_WIDTHS).reduce(
       (sum, key) => sum + (quickCommandHiddenColumnKeys.has(key) ? 0 : (effectiveColumnWidths[key] ?? DEFAULT_COLUMN_WIDTHS[key])),
       0,
     ),
@@ -585,14 +589,20 @@ function FileManagerView({
   }, []);
 
   useLayoutEffect(() => {
-    const element = contentRef.current;
+    const element = tableSurfaceRef.current;
     if (!element) return;
+    const header = element.querySelector<HTMLElement>(".ant-table-header");
     const update = () => {
-      setTableScrollY(Math.max(120, element.clientHeight - 30));
+      const headerHeight = header?.getBoundingClientRect().height ?? 30;
+      const scrollbarHeight = Number.parseFloat(
+        getComputedStyle(element).getPropertyValue("--file-table-scrollbar-height"),
+      ) || 10;
+      setTableScrollY(Math.max(1, element.getBoundingClientRect().height - headerHeight - scrollbarHeight));
     };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(element);
+    if (header) observer.observe(header);
     return () => observer.disconnect();
   }, []);
 
@@ -1423,7 +1433,7 @@ function FileManagerView({
                   setContextMenu(null);
                   setSelectedRowKeys(keys.filter(isStringKey));
                 },
-                columnWidth: 48,
+                columnWidth: SELECTION_COLUMN_WIDTH,
               }}
               rowClassName={(entry) => (focusedPath && entry.path === focusedPath ? "fileTableRow-focused" : "")}
               pagination={false}

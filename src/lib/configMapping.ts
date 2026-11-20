@@ -23,7 +23,7 @@ export function configToRemoteSession(config: SessionConfig, index: number): Rem
     loginPath: null,
     connectionId: null,
     connectedAt: null,
-    sshVersion: null,
+    systemInfo: null,
     terminalId: null,
     sftpId: null,
     telemetryJobId: null,

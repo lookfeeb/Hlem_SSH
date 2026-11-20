@@ -4,7 +4,8 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 
-pub const VAULT_DATA_VERSION: u16 = 2;
+pub const VAULT_DATA_VERSION: u16 = 4;
+pub const DEFAULT_AI_API_PORT: u16 = 19880;
 pub const DEFAULT_GROUP_NAME: &str = "默认分组";
 const GROUP_NAME_MAX_HAN_CHARS: usize = 8;
 const GROUP_NAME_MAX_CHARS: usize = 10;
@@ -133,15 +134,15 @@ pub struct AppSettings {
     #[serde(default)]
     pub ai_api_key: Option<String>,
     #[serde(default)]
-    pub ai_api_session_id: Option<String>,
-    #[serde(default)]
-    pub ai_api_session_ids: Vec<String>,
-    #[serde(default)]
     pub ai_api_port: Option<u16>,
     #[serde(default)]
-    pub ai_api_auto_start: bool,
-    #[serde(default)]
     pub collapsed_connection_section_ids: Vec<String>,
+}
+
+impl AppSettings {
+    pub fn ai_api_listen_port(&self) -> u16 {
+        self.ai_api_port.unwrap_or(DEFAULT_AI_API_PORT)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -402,30 +403,6 @@ pub fn migrate_vault_data(data: &mut VaultData) -> bool {
     let mut changed = false;
     if data.version < VAULT_DATA_VERSION {
         data.version = VAULT_DATA_VERSION;
-        changed = true;
-    }
-    // Older builds stored only one authorized AI API session. Keep that
-    // authorization when the vector field is first introduced, then make the
-    // legacy field follow the normalized vector as a compatibility mirror.
-    if data.settings.ai_api_session_ids.is_empty() {
-        if let Some(session_id) = data
-            .settings
-            .ai_api_session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|session_id| !session_id.is_empty())
-        {
-            data.settings.ai_api_session_ids = vec![session_id.to_string()];
-            changed = true;
-        }
-    }
-    let normalized_legacy_id = data.settings.ai_api_session_ids.first().cloned();
-    if data.settings.ai_api_session_id != normalized_legacy_id {
-        data.settings.ai_api_session_id = normalized_legacy_id;
-        changed = true;
-    }
-    if data.settings.ai_api_session_ids.is_empty() && data.settings.ai_api_auto_start {
-        data.settings.ai_api_auto_start = false;
         changed = true;
     }
     if changed {
@@ -1076,28 +1053,45 @@ mod tests {
     }
 
     #[test]
-    fn migration_preserves_legacy_single_ai_api_authorization() {
-        let mut data = VaultData::empty();
-        data.settings.ai_api_session_id = Some(" session-a ".to_string());
-        data.settings.ai_api_auto_start = true;
-
+    fn migration_removes_api_bindings_and_autostart_setting_but_preserves_credentials() {
+        let mut legacy = serde_json::to_value(VaultData::empty()).unwrap();
+        legacy["version"] = serde_json::json!(2);
+        legacy["settings"]["aiApiSessionId"] = serde_json::json!("old-session");
+        legacy["settings"]["aiApiSessionIds"] = serde_json::json!(["old-session"]);
+        legacy["settings"]["aiApiKey"] = serde_json::json!("helm_test_key");
+        legacy["settings"]["aiApiPort"] = serde_json::json!(19880);
+        legacy["settings"]["aiApiAutoStart"] = serde_json::json!(true);
+        let mut data: VaultData = serde_json::from_value(legacy).unwrap();
         assert!(migrate_vault_data(&mut data));
-        assert_eq!(data.settings.ai_api_session_ids, vec!["session-a"]);
-        assert_eq!(
-            data.settings.ai_api_session_id.as_deref(),
-            Some("session-a")
-        );
-        assert!(data.settings.ai_api_auto_start);
+        assert_eq!(data.settings.ai_api_port, Some(19880));
+        assert_eq!(data.settings.ai_api_key.as_deref(), Some("helm_test_key"));
         assert!(!migrate_vault_data(&mut data));
+        let settings = serde_json::to_value(&data.settings).unwrap();
+        assert!(settings.get("aiApiSessionId").is_none());
+        assert!(settings.get("aiApiSessionIds").is_none());
+        assert!(settings.get("aiApiAutoStart").is_none());
     }
 
     #[test]
-    fn migration_disables_ai_api_autostart_without_authorized_sessions() {
-        let mut data = VaultData::empty();
-        data.settings.ai_api_auto_start = true;
-
-        assert!(migrate_vault_data(&mut data));
-        assert!(!data.settings.ai_api_auto_start);
+    fn api_startup_uses_default_or_saved_port_regardless_of_legacy_switch() {
+        assert_eq!(AppSettings::default().ai_api_listen_port(), 19880);
+        for legacy_switch in [None, Some(false), Some(true)] {
+            for port in [None, Some(23456)] {
+                let mut legacy = serde_json::to_value(VaultData::empty()).unwrap();
+                legacy["version"] = serde_json::json!(3);
+                legacy["settings"]["aiApiPort"] = serde_json::json!(port);
+                if let Some(enabled) = legacy_switch {
+                    legacy["settings"]["aiApiAutoStart"] = serde_json::json!(enabled);
+                }
+                let mut data: VaultData = serde_json::from_value(legacy).unwrap();
+                assert!(migrate_vault_data(&mut data));
+                assert_eq!(data.settings.ai_api_listen_port(), port.unwrap_or(19880));
+                assert!(serde_json::to_value(&data.settings)
+                    .unwrap()
+                    .get("aiApiAutoStart")
+                    .is_none());
+            }
+        }
     }
 
     #[test]

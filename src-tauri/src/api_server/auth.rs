@@ -36,9 +36,9 @@ pub(super) fn verify_session_access(
     let allowed_session_ids = allowed_session_set_snapshot(state);
     if !allowed_session_ids.contains(session_id) {
         return Err((
-            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
             Json(ApiError {
-                error: format!("无权访问会话 {}，仅允许访问指定会话", session_id),
+                error: format!("会话 {} 不存在或已删除", session_id),
             }),
         ));
     }
@@ -77,5 +77,15 @@ mod tests {
     #[test]
     fn empty_api_key_never_authenticates() {
         assert!(verify_auth(&HeaderMap::new(), "").is_err());
+    }
+
+    #[test]
+    fn bearer_key_is_required_even_without_session_bindings() {
+        let mut headers = HeaderMap::new();
+        assert!(verify_auth(&headers, "helm_test_key").is_err());
+        headers.insert("authorization", "Bearer wrong_key".parse().unwrap());
+        assert!(verify_auth(&headers, "helm_test_key").is_err());
+        headers.insert("authorization", "Bearer helm_test_key".parse().unwrap());
+        assert!(verify_auth(&headers, "helm_test_key").is_ok());
     }
 }

@@ -24,9 +24,7 @@ pub const VAULT_FILE_NAME: &str = "vault.rpvault";
 
 #[derive(Debug, Clone)]
 pub struct AiApiSettingsUpdate {
-    pub session_ids: Vec<String>,
     pub port: Option<u16>,
-    pub auto_start: bool,
 }
 
 #[cfg(test)]
@@ -269,31 +267,7 @@ impl VaultStore {
                     "AI API 端口必须在 1024-65535 之间".to_string(),
                 ));
             }
-            let mut session_ids: Vec<String> = Vec::new();
-            for session_id in settings.session_ids {
-                let session_id = session_id.trim();
-                if session_id.is_empty() || session_ids.iter().any(|id| id.as_str() == session_id) {
-                    continue;
-                }
-                if session_ids.len() >= 20 {
-                    return Err(AppError::InvalidInput(
-                        "AI API 最多允许 20 个会话".to_string(),
-                    ));
-                }
-                if !data.sessions.iter().any(|session| session.id == session_id) {
-                    return Err(AppError::NotFound(format!("会话 {session_id}")));
-                }
-                session_ids.push(session_id.to_string());
-            }
-            if settings.auto_start && (session_ids.is_empty() || settings.port.is_none()) {
-                return Err(AppError::InvalidInput(
-                    "AI API 自动启动需要端口和至少一个授权会话".to_string(),
-                ));
-            }
-            data.settings.ai_api_session_id = session_ids.first().cloned();
-            data.settings.ai_api_session_ids = session_ids;
             data.settings.ai_api_port = settings.port;
-            data.settings.ai_api_auto_start = settings.auto_start;
             validate_settings(&data.settings)
         })
     }
@@ -717,22 +691,6 @@ impl VaultStore {
             }
             data.tunnels
                 .retain(|tunnel| tunnel.session_id != session_id);
-            data.settings
-                .ai_api_session_ids
-                .retain(|id| id != session_id);
-            if data.settings.ai_api_session_ids.is_empty()
-                && data.settings.ai_api_session_id.as_deref() != Some(session_id)
-            {
-                if let Some(legacy_id) = data.settings.ai_api_session_id.take() {
-                    if data.sessions.iter().any(|session| session.id == legacy_id) {
-                        data.settings.ai_api_session_ids.push(legacy_id);
-                    }
-                }
-            }
-            data.settings.ai_api_session_id = data.settings.ai_api_session_ids.first().cloned();
-            if data.settings.ai_api_session_ids.is_empty() {
-                data.settings.ai_api_auto_start = false;
-            }
             Ok(())
         })
     }
@@ -1093,75 +1051,41 @@ mod tests {
     }
 
     #[test]
-    fn ai_api_settings_are_normalized_and_validated_against_sessions() {
+    fn ai_api_settings_allow_default_port_without_sessions_and_validate_ports() {
         let path = store_path();
         let mut store = VaultStore::new(path);
         store.create("pass-123456").unwrap();
-        let snapshot = store.create_session(session_input("节点A", None)).unwrap();
-        let session_id = snapshot.data.sessions[0].id.clone();
-
         let snapshot = store
-            .settings_ai_api_update(AiApiSettingsUpdate {
-                session_ids: vec![session_id.clone(), session_id.clone(), " ".to_string()],
-                port: Some(19880),
-                auto_start: true,
-            })
+            .settings_ai_api_update(AiApiSettingsUpdate { port: Some(19880) })
             .unwrap();
-        assert_eq!(
-            snapshot.data.settings.ai_api_session_id,
-            Some(session_id.clone())
-        );
-        assert_eq!(snapshot.data.settings.ai_api_session_ids, vec![session_id]);
-        assert!(snapshot.data.settings.ai_api_auto_start);
-
-        assert!(store
-            .settings_ai_api_update(AiApiSettingsUpdate {
-                session_ids: vec!["missing".to_string()],
-                port: Some(19880),
-                auto_start: false,
-            })
-            .is_err());
-        assert!(store
-            .settings_ai_api_update(AiApiSettingsUpdate {
-                session_ids: Vec::new(),
-                port: Some(19880),
-                auto_start: true,
-            })
-            .is_err());
+        assert!(snapshot.data.sessions.is_empty());
+        assert_eq!(snapshot.data.settings.ai_api_listen_port(), 19880);
+        for port in [Some(0), Some(80), Some(1023)] {
+            assert!(store
+                .settings_ai_api_update(AiApiSettingsUpdate { port })
+                .is_err());
+            assert_eq!(store.snapshot().unwrap().data, snapshot.data);
+        }
+        let snapshot = store
+            .settings_ai_api_update(AiApiSettingsUpdate { port: None })
+            .unwrap();
+        assert_eq!(snapshot.data.settings.ai_api_port, None);
+        assert_eq!(snapshot.data.settings.ai_api_listen_port(), 19880);
     }
 
     #[test]
-    fn deleting_session_prunes_ai_api_authorization_and_disables_empty_autostart() {
+    fn deleting_last_session_preserves_ai_api_settings() {
         let path = store_path();
         let mut store = VaultStore::new(path);
         store.create("pass-123456").unwrap();
         let first = store.create_session(session_input("节点A", None)).unwrap();
         let first_id = first.data.sessions[0].id.clone();
-        let second = store.create_session(session_input("节点B", None)).unwrap();
-        let second_id = second.data.sessions[1].id.clone();
         store
-            .settings_ai_api_update(AiApiSettingsUpdate {
-                session_ids: vec![first_id.clone(), second_id.clone()],
-                port: Some(19880),
-                auto_start: true,
-            })
+            .settings_ai_api_update(AiApiSettingsUpdate { port: Some(19880) })
             .unwrap();
-
         let snapshot = store.delete_session(&first_id).unwrap();
-        assert_eq!(
-            snapshot.data.settings.ai_api_session_ids,
-            vec![second_id.clone()]
-        );
-        assert_eq!(
-            snapshot.data.settings.ai_api_session_id,
-            Some(second_id.clone())
-        );
-        assert!(snapshot.data.settings.ai_api_auto_start);
-
-        let snapshot = store.delete_session(&second_id).unwrap();
-        assert!(snapshot.data.settings.ai_api_session_ids.is_empty());
-        assert_eq!(snapshot.data.settings.ai_api_session_id, None);
-        assert!(!snapshot.data.settings.ai_api_auto_start);
+        assert!(snapshot.data.sessions.is_empty());
+        assert_eq!(snapshot.data.settings.ai_api_port, Some(19880));
     }
 
     #[test]

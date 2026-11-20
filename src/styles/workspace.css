@@ -429,47 +429,75 @@
 
 .networkInterfacesPanel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 6px;
-  width: 320px;
-  max-width: min(320px, calc(100vw - 48px));
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 10px;
+  width: 344px;
+  max-width: calc(100vw - 56px);
   /* Leave room for the title, arrow and trigger on either side of the viewport. */
-  max-height: min(420px, calc(50dvh - 96px));
+  max-height: min(440px, max(180px, calc(50dvh - 96px)));
 }
 
 .networkInterfacesList {
   display: grid;
   grid-auto-rows: max-content;
-  gap: 6px;
+  gap: 8px;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior-y: contain;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
 }
 
-.networkInterfacesList::-webkit-scrollbar {
-  display: none;
-  width: 0;
-  height: 0;
+.networkInterfacesList:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 10px;
 }
 
 .networkInterfacesPopover .ant-popover-container {
   overflow: hidden;
-  border: 1px solid rgba(191, 219, 254, .9);
-  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  padding: 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 12px 36px -10px rgba(15, 23, 42, .2), 0 2px 8px rgba(15, 23, 42, .04);
 }
 
 .networkInterfacesPopover .ant-popover-title {
-  margin: -12px -12px 10px;
-  padding: 10px 12px;
-  border-bottom: 1px solid rgba(191, 219, 254, .76);
-  background: linear-gradient(135deg, rgba(37, 99, 235, .12) 0%, rgba(20, 184, 166, .1) 100%);
-  color: #1d4ed8;
+  margin: 0 0 14px;
+  color: var(--text-primary);
   font-size: 12px;
-  font-weight: 800;
-  letter-spacing: .2px;
+  font-weight: 700;
+}
+
+.networkInterfacesTitle,
+.networkInterfaceHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.networkInterfacesTitle > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.networkInterfacesTitle .anticon {
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.networkInterfacesCount {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 500;
 }
 
 .networkInterfacesSummary {
@@ -480,54 +508,85 @@
 
 .networkInterfaceSummaryItem {
   display: grid;
-  gap: 3px;
+  gap: 8px;
   min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid rgba(191, 219, 254, .74);
-  border-radius: 8px;
-  background: linear-gradient(180deg, rgba(239, 246, 255, .9) 0%, rgba(255, 255, 255, .86) 100%);
+  padding: 12px;
+  border: 1px solid transparent;
+  border-radius: 10px;
 }
 
-.networkInterfaceSummaryItem span {
+.networkInterfaceSummaryLabel {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   color: var(--text-secondary);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 500;
   white-space: nowrap;
 }
 
 .networkInterfaceSummaryItem strong {
   overflow: hidden;
   color: var(--text-primary);
-  font-size: 15px;
-  font-weight: 800;
+  font-size: 20px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  line-height: 1.15;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.networkInterfaceSummaryUpload .anticon {
+.networkInterfaceSummaryUpload {
+  border-color: #d1fae5;
+  background: linear-gradient(135deg, #ecfdf5, #f6fefa);
+}
+
+.networkInterfaceSummaryDownload {
+  border-color: #dbeafe;
+  background: linear-gradient(135deg, #eff6ff, #f8fbff);
+}
+
+.networkInterfaceSummaryUpload .anticon,
+.networkInterfaceUpload > span {
+  color: #059669;
+}
+
+.networkInterfaceSummaryDownload .anticon,
+.networkInterfaceDownload > span {
   color: #2563eb;
 }
 
-.networkInterfaceSummaryDownload .anticon {
-  color: #0f766e;
+.networkInterfacesListHeading {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
 }
 
 .networkInterfaceRow {
   display: grid;
-  grid-template-columns: minmax(58px, .75fr) minmax(132px, 1.65fr) minmax(56px, .6fr);
-  align-items: center;
   gap: 10px;
   min-width: 0;
-  min-height: 44px;
-  padding: 8px 10px;
-  border: 1px solid rgba(232, 238, 246, .9);
-  border-radius: 8px;
-  background: rgba(248, 251, 255, .86);
+  padding: 12px;
+  border: 1px solid #e8eef5;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.networkInterfaceIdentity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.networkInterfaceIdentity > .anticon {
+  flex: 0 0 auto;
+  padding: 5px;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .networkInterfaceName {
@@ -542,33 +601,60 @@
 }
 
 .networkInterfaceSpeed {
-  justify-self: end;
-  color: var(--text-primary);
-  font-size: 11px;
-  font-weight: 700;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: #f8fafc;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.networkInterfaceSpeed > span {
+  color: var(--text-muted);
+  font-weight: 400;
 }
 
 .networkInterfaceMetrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 10px;
   min-width: 0;
+  padding-top: 10px;
+  border-top: 1px solid #f1f5f9;
 }
 
 .networkInterfaceRate {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--text-secondary);
-  font-size: 11px;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.networkInterfaceRate .anticon {
-  color: var(--accent);
+.networkInterfaceRate + .networkInterfaceRate {
+  padding-left: 14px;
+  border-left: 1px solid #f1f5f9;
+}
+
+.networkInterfaceRate > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+}
+
+.networkInterfaceRate > strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
 }
 
 .networkInterfacesEmpty {
@@ -1057,6 +1143,40 @@
   gap: 6px;
 }
 
+.connectionInfoHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.connectionInfoHeader .sectionTitle {
+  flex-shrink: 0;
+}
+
+.connectionInfoDuration {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.connectionInfoDuration .anticon {
+  flex-shrink: 0;
+  color: #64748b;
+}
+
+.connectionInfoDuration > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .metric-ring-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1370,15 +1490,15 @@
   flex-direction: column;
   gap: 10px;
   position: relative;
-  padding-left: 14px;
-  margin-left: 4px;
+  padding-left: 8px;
+  margin-left: 0;
 }
 
 /* 贯穿各节点的垂直科技感线条 */
 .connectionInfoList::before {
   content: "";
   position: absolute;
-  left: 3px;
+  left: 0;
   top: 10px;
   bottom: 10px;
   width: 1px;
@@ -1413,7 +1533,7 @@
 
 .connection-node-dot {
   position: absolute;
-  left: -14px;
+  left: -8px;
   top: 50%;
   transform: translate(-50%, -50%);
   width: 7px;
@@ -1468,6 +1588,11 @@
 .connectionInfoCopyValue .anticon {
   color: #64748b;
   font-size: 12px;
+}
+
+.connectionInfoTextValue {
+  display: block;
+  text-align: right;
 }
 
 .connectionInfoCopyValue {

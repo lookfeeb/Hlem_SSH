@@ -1,4 +1,5 @@
 import {
+  ApiOutlined,
   ArrowDownOutlined,
   ArrowUpOutlined,
   ClockCircleOutlined,
@@ -105,7 +106,8 @@ const TelemetrySidebarView = forwardRef<TelemetrySidebarHandle, TelemetrySidebar
     ? activeLatencyProbe.medianMs
     : telemetry.network.latencyMs;
   const latencyText = formatLatency(isConnected ? measuredLatency : 0);
-  const sshVersionText = isConnected ? session.sshVersion || "-" : "-";
+  const operatingSystemText = isConnected ? session.systemInfo?.operatingSystem || "-" : "-";
+  const kernelText = isConnected ? session.systemInfo?.kernel || "-" : "-";
   const ipv6Text = isConnected && telemetry.ipv6 && telemetry.ipv6 !== "//" ? telemetry.ipv6 : "//";
   const uptimeSeconds = isConnected && typeof telemetry.uptimeSeconds === "number" && Number.isFinite(telemetry.uptimeSeconds)
     ? Math.max(0, telemetry.uptimeSeconds)
@@ -261,15 +263,22 @@ const TelemetrySidebarView = forwardRef<TelemetrySidebarHandle, TelemetrySidebar
                   setNetworkPopoverOpen(open);
                 }}
                 trigger="click"
-                placement="bottomRight"
+                placement="bottom"
                 classNames={{ root: "networkInterfacesPopover" }}
-                title={`网卡接口 · ${networkInterfaces.length} 个`}
+                title={(
+                  <div className="networkInterfacesTitle">
+                    <span><ApiOutlined />网卡接口</span>
+                    <span className="networkInterfacesCount">{networkInterfaces.length} 个接口</span>
+                  </div>
+                )}
                 content={<NetworkInterfacesPanel interfaces={networkInterfaces} />}
               >
                 <button
                   type="button"
                   className="metricNetworkButton"
                   disabled={!isConnected || networkInterfaces.length === 0}
+                  aria-label="查看网卡接口"
+                  aria-expanded={networkPopoverOpen}
                   title={telemetry.network.interfaceName || undefined}
                 >
                   {telemetry.network.interfaceName || "-"}
@@ -297,9 +306,17 @@ const TelemetrySidebarView = forwardRef<TelemetrySidebarHandle, TelemetrySidebar
       </section>
 
       <section className="sidebarSection connectionInfoSection">
-        <div className="sectionTitle">
-          <FileSearchOutlined />
-          <span>连接信息</span>
+        <div className="connectionInfoHeader">
+          <div className="sectionTitle">
+            <FileSearchOutlined />
+            <span>连接信息</span>
+          </div>
+          <span className="connectionInfoDuration" title="当前 SSH 连接持续时间">
+            <ClockCircleOutlined />
+            <span ref={connectedDurationRef}>
+              {isConnected ? formatElapsedSince(session.connectedAt, Date.now()) : "-"}
+            </span>
+          </span>
         </div>
         <div className="connectionInfoList">
           <div className="connectionInfoItem">
@@ -329,13 +346,13 @@ const TelemetrySidebarView = forwardRef<TelemetrySidebarHandle, TelemetrySidebar
           </div>
           <div className="connectionInfoItem">
             <span className="connection-node-dot" />
-            <span className="connectionInfoLabel">用户名</span>
-            <span className="connectionInfoValue" title={session.username}>{session.username}</span>
+            <span className="connectionInfoLabel">系统版本</span>
+            <span className="connectionInfoValue connectionInfoTextValue" title={operatingSystemText}>{operatingSystemText}</span>
           </div>
           <div className="connectionInfoItem">
             <span className="connection-node-dot" />
-            <span className="connectionInfoLabel">SSH版本</span>
-            <span className="connectionInfoValue" title={sshVersionText}>{sshVersionText}</span>
+            <span className="connectionInfoLabel">内核版本</span>
+            <span className="connectionInfoValue connectionInfoTextValue" title={kernelText}>{kernelText}</span>
           </div>
           <div className="connectionInfoItem">
             <span className="connection-node-dot" />
@@ -343,16 +360,6 @@ const TelemetrySidebarView = forwardRef<TelemetrySidebarHandle, TelemetrySidebar
             <span className="connectionInfoValue" title="服务器累计运行时间（实时）">
               <ClockCircleOutlined />
               <span ref={serverUptimeRef}>{uptimeSeconds === null ? "-" : formatUptimeSeconds(uptimeSeconds)}</span>
-            </span>
-          </div>
-          <div className="connectionInfoItem">
-            <span className="connection-node-dot" />
-            <span className="connectionInfoLabel">连接时长</span>
-            <span className="connectionInfoValue" title="当前 SSH 连接持续时间">
-              <ClockCircleOutlined />
-              <span ref={connectedDurationRef}>
-                {isConnected ? formatElapsedSince(session.connectedAt, Date.now()) : "-"}
-              </span>
             </span>
           </div>
         </div>
@@ -367,8 +374,7 @@ export const TelemetrySidebar = memo(TelemetrySidebarView, (previous, next) => (
   && previous.session.connectionId === next.session.connectionId
   && previous.session.connectedAt === next.session.connectedAt
   && previous.session.host === next.session.host
-  && previous.session.username === next.session.username
-  && previous.session.sshVersion === next.session.sshVersion
+  && previous.session.systemInfo === next.session.systemInfo
   && previous.session.telemetry === next.session.telemetry
 ));
 
@@ -407,41 +413,49 @@ function NetworkInterfacesPanel({ interfaces }: { interfaces: NetworkInterfaceMe
   );
   return (
     <div className="networkInterfacesPanel">
-      <div className="networkInterfacesSummary">
+      <div className="networkInterfacesSummary" title="所有网卡累计流量，网卡计数器重置后重新累计">
         <div className="networkInterfaceSummaryItem networkInterfaceSummaryUpload">
-          <span>
+          <span className="networkInterfaceSummaryLabel">
             <ArrowUpOutlined />
             上传总量
           </span>
           <strong>{formatBytes(total.txBytes)}</strong>
         </div>
         <div className="networkInterfaceSummaryItem networkInterfaceSummaryDownload">
-          <span>
+          <span className="networkInterfaceSummaryLabel">
             <ArrowDownOutlined />
             下载总量
           </span>
           <strong>{formatBytes(total.rxBytes)}</strong>
         </div>
       </div>
+      <div className="networkInterfacesListHeading">实时速率</div>
       <div className="networkInterfacesList" role="region" aria-label="网卡接口列表" tabIndex={0}>
         {interfaces.map((item) => {
           const linkSpeed = formatLinkSpeed(item.linkSpeedMbps);
           return (
             <div className="networkInterfaceRow" key={item.interfaceName}>
-              <span className="networkInterfaceName" title={item.interfaceName}>{item.interfaceName}</span>
-              <div className="networkInterfaceMetrics">
-                <span className="networkInterfaceRate" title="上传速率">
-                  <ArrowUpOutlined /> {formatNetworkRate(item.uploadKbps)}
+              <div className="networkInterfaceHeader">
+                <span className="networkInterfaceIdentity">
+                  <ApiOutlined />
+                  <span className="networkInterfaceName" title={item.interfaceName}>{item.interfaceName}</span>
                 </span>
-                <span className="networkInterfaceRate" title="下载速率">
-                  <ArrowDownOutlined /> {formatNetworkRate(item.downloadKbps)}
-                </span>
+                {linkSpeed ? (
+                  <span className="networkInterfaceSpeed" title="接口链路速率">
+                    <span>链路</span>{linkSpeed}
+                  </span>
+                ) : null}
               </div>
-              {linkSpeed ? (
-                <span className="networkInterfaceSpeed" title="接口链路速率">
-                  {linkSpeed}
-                </span>
-              ) : null}
+              <div className="networkInterfaceMetrics">
+                <div className="networkInterfaceRate networkInterfaceUpload" title="上传速率">
+                  <span><ArrowUpOutlined />上传</span>
+                  <strong>{formatNetworkRate(item.uploadKbps)}</strong>
+                </div>
+                <div className="networkInterfaceRate networkInterfaceDownload" title="下载速率">
+                  <span><ArrowDownOutlined />下载</span>
+                  <strong>{formatNetworkRate(item.downloadKbps)}</strong>
+                </div>
+              </div>
             </div>
           );
         })}

@@ -456,27 +456,13 @@
   padding: 19px 21px;
   overflow-x: hidden;
   overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
-}
-
-.settingsModalScroll:hover,
-.settingsModalScroll:focus-within {
-  scrollbar-color: rgba(123, 139, 162, .34) transparent;
+  scrollbar-width: none;
 }
 
 .settingsModalScroll::-webkit-scrollbar {
-  width: 6px;
-}
-
-.settingsModalScroll::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: transparent;
-}
-
-.settingsModalScroll:hover::-webkit-scrollbar-thumb,
-.settingsModalScroll:focus-within::-webkit-scrollbar-thumb {
-  background: rgba(123, 139, 162, .34);
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .settingsWorkspacePanel {

@@ -1,5 +1,4 @@
 import type {
-  AiApiSettings,
   AppProxyOptions,
   BackupSettings,
   ConfigSnapshot,
@@ -32,12 +31,6 @@ export const vaultApi = {
     call<ConfigSnapshot>("quick_command_upsert", { command }),
   quickCommandDelete: (commandId: string) =>
     call<ConfigSnapshot>("quick_command_delete", { commandId }),
-  settingsAiApiUpdate: (settings: AiApiSettings) =>
-    call<ConfigSnapshot>("settings_ai_api_update", {
-      sessionIds: settings.sessionIds,
-      port: settings.port ?? null,
-      autoStart: settings.autoStart,
-    }),
   settingsIgnoreUpdateVersion: (version: string) =>
     call<ConfigSnapshot>("settings_ignore_update_version", { version }),
   connectionSectionStateUpdate: (collapsedSectionIds: string[]) =>

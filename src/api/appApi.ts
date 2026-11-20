@@ -47,8 +47,8 @@ export const appApi = {
   createLocalDirectories: (paths: string[]) => call<void>("local_create_directories", { paths }),
   openExternalUrl: (url: string) => call<void>("open_external_url", { url }),
   expandLocalPaths: (paths: string[]) => call<LocalExpandedEntry[]>("local_expand_paths", { paths }, { timeoutMs: 5 * 60_000 }),
-  apiServerConfigureAndStart: (port: number, allowedSessionIds: string[], autoStart: boolean) =>
-    call<ApiServerConfigureResult>("api_server_configure_and_start", { port, allowedSessionIds, autoStart }),
+  apiServerConfigureAndStart: (port: number) =>
+    call<ApiServerConfigureResult>("api_server_configure_and_start", { port }),
   apiServerStop: () => call<void>("api_server_stop"),
   apiServerStatus: () => call<ApiServerInfo>("api_server_status", undefined, { retries: 1 }),
   apiServerRegenerateKey: () => call<ApiServerInfo>("api_server_regenerate_key"),

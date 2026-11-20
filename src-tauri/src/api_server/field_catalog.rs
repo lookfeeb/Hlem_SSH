@@ -44,7 +44,7 @@ const API_FIELD_CATALOG_JSON: &str = r###"
       "category": "会话",
       "method": "GET",
       "path": "/api/sessions",
-      "summary": "查看授权会话与连接状态",
+      "summary": "查看全部已保存主机与连接状态",
       "responseSchema": "SessionItem[]"
     },
     {
@@ -92,7 +92,7 @@ const API_FIELD_CATALOG_JSON: &str = r###"
       "category": "长任务",
       "method": "GET",
       "path": "/api/jobs",
-      "summary": "查看授权会话的命令任务",
+      "summary": "查看已保存主机的命令任务",
       "responseSchema": "JobSummary[]"
     },
     {
@@ -542,7 +542,7 @@ const API_FIELD_CATALOG_JSON: &str = r###"
     ],
     "TunnelPatch": [
       { "name": "name", "type": "string", "required": false, "description": "新的隧道名称", "example": "SSH Tunnel Updated" },
-      { "name": "sessionId", "type": "string", "required": false, "description": "新的会话 ID；原会话和目标会话都必须已授权" },
+      { "name": "sessionId", "type": "string", "required": false, "description": "新的会话 ID；原会话和目标会话都必须是已保存主机" },
       { "name": "forwardType", "type": "local | remote | dynamic", "required": false, "description": "新的转发类型" },
       { "name": "bindHost", "type": "string", "required": false, "description": "新的监听地址" },
       { "name": "bindPort", "type": "number", "required": false, "description": "新的监听端口", "minimum": 0, "maximum": 65535 },
@@ -675,7 +675,7 @@ const API_FIELD_CATALOG_JSON: &str = r###"
   ],
   "examples": {
     "listSessions": {
-      "title": "查询授权会话",
+      "title": "查询全部已保存主机",
       "method": "GET",
       "path": "/api/sessions"
     },
@@ -796,14 +796,14 @@ const API_FIELD_CATALOG_JSON: &str = r###"
   },
   "rules": [
     "所有端点都使用 Authorization: Bearer <api_key>；JSON 请求使用 application/json，upload 使用 application/octet-stream；字段库与 OpenAPI 支持 ETag 重验证。",
-    "会话操作仅限授权列表；exec、jobs、latency、files、upload、download 和隧道启动会自动连接并复用 SSH/SFTP，未知主机指纹仍需在主窗口确认。",
+    "API 可访问全部已保存主机，无需预先绑定且无会话数量限制；exec、jobs、latency、files、upload、download 和隧道启动会自动连接并复用 SSH/SFTP，未知主机指纹仍需在主窗口确认。",
     "exec、exec/batch 与 jobs 共用执行配额：每会话 4 条、全局 16 条，排队超过 3 秒返回 429 或任务失败。",
     "exec 默认 30 秒且最长 5 分钟；超时固定 exitStatus=124、timedOut=true，并终止已跟踪的远端进程组。stdout/stderr 各保留尾部 1 MiB，耗时由 durationMs 等字段拆分。",
     "长任务默认 30 分钟、最长 24 小时；创建立即返回 202，connecting 和排队阶段均可取消；每会话最多 4 个、总记录最多 100 个，完成后保留 30 分钟。",
     "SSE 历史最多 1024 个事件或 4 MiB，支持 Last-Event-ID/after 续传；终态事件后关闭，追赶失败时发送 snapshot。",
     "upload 必须单次提交完整文件，最大 512 MiB，可选 sha256 在原子替换前校验；download 仅支持单段 Range，格式错误返回 400，多段或越界返回 416。",
     "balanced 只拦截灾难性操作，strict 额外拦截常见高风险管理命令；API 日志会脱敏令牌、密码、认证头和私钥。",
-    "授权会话为空时服务不会启动；运行中清空授权列表会停止服务并取消相关长任务。"
+    "无主机时也可启动服务；主机列表变化会自动生效，删除主机会取消其任务与自动化连接，不会停止 API 服务。"
   ]
 }
 "###;

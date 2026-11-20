@@ -8,8 +8,6 @@ use crate::events;
 use super::api_startup::{retry_api_start, API_STARTUP_MAX_WAIT, API_STARTUP_NORMAL_WAIT};
 use super::{ensure_vault_unlocked, with_store, AppState};
 
-const MAX_ALLOWED_API_SESSIONS: usize = 20;
-
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiServerConfigureResult {
@@ -22,19 +20,11 @@ pub async fn api_server_configure_and_start(
     app: AppHandle,
     state: State<'_, AppState>,
     port: u16,
-    allowed_session_ids: Vec<String>,
-    auto_start: bool,
 ) -> AppResult<ApiServerConfigureResult> {
     state.api_startup.cancel();
     let ticket = state.config_mutations.ticket();
     let _operation_guard = state.api_server_operation.lock().await;
     ensure_vault_unlocked(&state)?;
-    let allowed_session_ids = normalize_allowed_session_ids(Some(allowed_session_ids), None);
-    if allowed_session_ids.is_empty() {
-        return Err(AppError::InvalidInput(
-            "AI API 至少需要一个授权会话".to_string(),
-        ));
-    }
     let effective_port = {
         let handle = state.api_server.lock().await;
         handle
@@ -46,15 +36,13 @@ pub async fn api_server_configure_and_start(
     let mutation_guard = state.config_mutations.lock(ticket).await?;
     let snapshot = with_store(&state, |store| {
         store.settings_ai_api_update(crate::vault::AiApiSettingsUpdate {
-            session_ids: allowed_session_ids.clone(),
             port: Some(effective_port),
-            auto_start,
         })
     })?;
     sync_api_server_authorization_cache(&state, &snapshot).await;
     drop(mutation_guard);
     events::emit(&app, events::CONFIG_CHANGED, snapshot.clone());
-    match start_api_server_inner(app.clone(), &state, effective_port, allowed_session_ids).await {
+    match start_api_server_inner(app.clone(), &state, effective_port).await {
         Ok(info) => {
             // Starting the server may generate and persist the API key, which
             // advances the config revision beyond the settings snapshot above.
@@ -73,23 +61,14 @@ async fn start_api_server_inner(
     app: AppHandle,
     state: &State<'_, AppState>,
     port: u16,
-    allowed_session_ids: Vec<String>,
 ) -> AppResult<ApiServerInfo> {
     if state.is_shutting_down() {
         return Err(AppError::InvalidInput("应用正在退出".to_string()));
     }
     ensure_vault_unlocked(state)?;
-    if allowed_session_ids.is_empty() {
-        return Err(AppError::InvalidInput(
-            "AI API 至少需要一个授权会话".to_string(),
-        ));
-    }
-    let allowed_session_names = allowed_session_names_for_ids(state, &allowed_session_ids)?;
-    if allowed_session_names.len() != allowed_session_ids.len() {
-        return Err(AppError::InvalidInput(
-            "AI API 授权会话包含不存在的配置".to_string(),
-        ));
-    }
+    let (allowed_session_ids, allowed_session_names) = with_store(state, |store| {
+        Ok(configured_api_sessions(&store.snapshot()?))
+    })?;
     let mut handle_guard = state.api_server.lock().await;
     if handle_guard
         .as_ref()
@@ -176,8 +155,8 @@ async fn start_api_server_inner(
     Ok(info)
 }
 
-/// 在 Rust 主进程启动后直接恢复 AI API，不依赖 WebView 初始化时序。
-/// 前端仍会查询运行状态，但即使页面加载失败，IDE/AI 也能使用已配置的 API。
+/// 在 Rust 主进程启动后默认启动 AI API，不依赖前端操作或 WebView 初始化时序。
+/// 未配置端口时使用默认端口，已有配置继续沿用。
 pub fn spawn_api_server_autostart(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
@@ -197,18 +176,11 @@ pub fn spawn_api_server_autostart(app: AppHandle) {
                 // Every attempt uses current settings, not a snapshot captured
                 // before waiting for the outgoing process to release its port.
                 let snapshot = with_store(&state, |store| store.snapshot())?;
-                let settings = &snapshot.data.settings;
-                let Some(port) = settings.ai_api_port else {
-                    return Ok(None);
-                };
-                let (allowed_session_ids, _) = configured_allowed_sessions(&snapshot);
-                if !settings.ai_api_auto_start || allowed_session_ids.is_empty() {
-                    return Ok(None);
-                }
+                let port = snapshot.data.settings.ai_api_listen_port();
                 if state.api_startup.waiting(port) {
                     emit_api_status(&app, &stopped_api_server_info());
                 }
-                start_api_server_inner(app.clone(), &state, port, allowed_session_ids)
+                start_api_server_inner(app.clone(), &state, port)
                     .await
                     .map(Some)
             },
@@ -380,68 +352,26 @@ fn generate_api_key() -> String {
     format!("helm_{}", hex::encode(bytes))
 }
 
-fn normalize_allowed_session_ids(
-    allowed_session_ids: Option<Vec<String>>,
-    allowed_session_id: Option<String>,
-) -> Vec<String> {
-    let mut ids = Vec::new();
-    for id in allowed_session_ids
-        .unwrap_or_default()
-        .into_iter()
-        .chain(allowed_session_id)
-    {
-        let value = id.trim().to_string();
-        if value.is_empty() || ids.contains(&value) {
-            continue;
-        }
-        ids.push(value);
-        if ids.len() >= MAX_ALLOWED_API_SESSIONS {
-            break;
-        }
-    }
-    ids
-}
-
-fn allowed_session_names_for_ids(
-    state: &State<'_, AppState>,
-    allowed_session_ids: &[String],
-) -> AppResult<Vec<(String, String)>> {
-    with_store(state, |store| {
-        let snapshot = store.snapshot()?;
-        let names = allowed_session_ids
-            .iter()
-            .filter_map(|sid| {
-                snapshot
-                    .data
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == *sid)
-                    .map(|s| (sid.clone(), format!("{} ({})", s.name, s.host)))
-            })
-            .collect::<Vec<_>>();
-        Ok(names)
-    })
-}
-
-fn configured_allowed_sessions(snapshot: &ConfigSnapshot) -> (Vec<String>, Vec<(String, String)>) {
-    let existing_sessions = snapshot
+// Every saved host is available through the authenticated API. Keep this cache
+// synchronized on create/update/delete; it is not a user-managed allowlist.
+fn configured_api_sessions(snapshot: &ConfigSnapshot) -> (Vec<String>, Vec<(String, String)>) {
+    let ids = snapshot
         .data
         .sessions
         .iter()
-        .map(|session| (session.id.as_str(), session))
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut ids = Vec::new();
-    let mut names = Vec::new();
-    for id in normalize_allowed_session_ids(
-        Some(snapshot.data.settings.ai_api_session_ids.clone()),
-        snapshot.data.settings.ai_api_session_id.clone(),
-    ) {
-        let Some(session) = existing_sessions.get(id.as_str()) else {
-            continue;
-        };
-        names.push((id.clone(), format!("{} ({})", session.name, session.host)));
-        ids.push(id);
-    }
+        .map(|session| session.id.clone())
+        .collect();
+    let names = snapshot
+        .data
+        .sessions
+        .iter()
+        .map(|session| {
+            (
+                session.id.clone(),
+                format!("{} ({})", session.name, session.host),
+            )
+        })
+        .collect();
     (ids, names)
 }
 
@@ -449,7 +379,7 @@ pub(super) async fn sync_api_server_authorization_cache(
     state: &State<'_, AppState>,
     snapshot: &ConfigSnapshot,
 ) {
-    let (allowed_session_ids, allowed_session_names) = configured_allowed_sessions(snapshot);
+    let (allowed_session_ids, allowed_session_names) = configured_api_sessions(snapshot);
     let handle_guard = state.api_server.lock().await;
     if let Some(handle) = handle_guard.as_ref() {
         handle.replace_allowed_sessions_cache(allowed_session_ids, allowed_session_names);
@@ -499,7 +429,7 @@ async fn reconcile_api_server_with_snapshot_inner(
     state: &State<'_, AppState>,
     snapshot: &ConfigSnapshot,
 ) -> AppResult<ApiServerInfo> {
-    let (allowed_session_ids, allowed_session_names) = configured_allowed_sessions(snapshot);
+    let (allowed_session_ids, allowed_session_names) = configured_api_sessions(snapshot);
     let mut handle_guard = state.api_server.lock().await;
     if handle_guard
         .as_ref()
@@ -511,19 +441,6 @@ async fn reconcile_api_server_with_snapshot_inner(
             handle.shutdown().await;
             handle_guard = state.api_server.lock().await;
         }
-    }
-    if allowed_session_ids.is_empty() {
-        let handle = handle_guard.take();
-        drop(handle_guard);
-        if let Some(handle) = handle {
-            handle.shutdown().await;
-        }
-        return Ok(ApiServerInfo {
-            running: false,
-            port: 0,
-            api_key: String::new(),
-            ..Default::default()
-        });
     }
     match handle_guard.as_ref() {
         Some(handle) => {
@@ -581,19 +498,9 @@ pub(super) async fn restore_api_server_after_config_replacement(
             return;
         }
     };
-    let Some(port) = settings.ai_api_port else {
-        return;
-    };
-    let allowed_session_ids = normalize_allowed_session_ids(
-        Some(settings.ai_api_session_ids),
-        settings.ai_api_session_id,
-    );
-    if allowed_session_ids.is_empty() {
-        return;
-    }
+    let port = settings.ai_api_listen_port();
     let _operation_guard = state.api_server_operation.lock().await;
-    if let Err(error) = start_api_server_inner(app.clone(), state, port, allowed_session_ids).await
-    {
+    if let Err(error) = start_api_server_inner(app.clone(), state, port).await {
         log::warn!("AI API restore failed after config replacement: {error}");
     }
 }
@@ -635,42 +542,26 @@ mod tests {
     }
 
     #[test]
-    fn allowed_api_sessions_are_trimmed_deduplicated_and_limited_to_twenty() {
-        let mut input = (0..25)
-            .map(|index| format!(" session-{index} "))
-            .collect::<Vec<_>>();
-        input.insert(1, "session-0".to_string());
-        input.insert(2, String::new());
-
-        let result = normalize_allowed_session_ids(Some(input), Some("session-3".to_string()));
-
-        assert_eq!(result.len(), 20);
-        assert_eq!(result.first().map(String::as_str), Some("session-0"));
-        assert_eq!(result.last().map(String::as_str), Some("session-19"));
-        assert_eq!(
-            result
-                .iter()
-                .filter(|id| id.as_str() == "session-3")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn configured_api_sessions_drop_missing_ids_and_refresh_names() {
+    fn all_saved_hosts_are_available_without_a_binding_or_count_limit() {
         let mut data = crate::config::VaultData::empty();
-        let mut session = crate::config::SessionConfig::new(session_input("节点 A", "10.0.0.1"));
-        session.id = "session-a".to_string();
-        data.sessions.push(session);
-        data.settings.ai_api_session_id = Some("missing".to_string());
-        data.settings.ai_api_session_ids = vec!["session-a".to_string(), "missing".to_string()];
-        let snapshot = ConfigSnapshot { revision: 7, data };
+        for index in 0..25 {
+            let mut session = crate::config::SessionConfig::new(session_input("节点", "10.0.0.1"));
+            session.id = format!("session-{index}");
+            data.sessions.push(session);
+        }
+        let mut snapshot = ConfigSnapshot { revision: 7, data };
+        let (ids, names) = configured_api_sessions(&snapshot);
+        assert_eq!(ids.len(), 25);
+        assert_eq!(names.len(), 25);
+        assert_eq!(ids.last().map(String::as_str), Some("session-24"));
 
-        let (ids, names) = configured_allowed_sessions(&snapshot);
-        assert_eq!(ids, vec!["session-a"]);
-        assert_eq!(
-            names,
-            vec![("session-a".to_string(), "节点 A (10.0.0.1)".to_string())]
-        );
+        snapshot.data.sessions[0].name = "已重命名".to_string();
+        snapshot.data.sessions.remove(24);
+        let (ids, names) = configured_api_sessions(&snapshot);
+        assert_eq!(ids.len(), 24);
+        assert!(!ids.contains(&"session-24".to_string()));
+        assert_eq!(names[0].1, "已重命名 (10.0.0.1)");
+        snapshot.data.sessions.clear();
+        assert_eq!(configured_api_sessions(&snapshot), (Vec::new(), Vec::new()));
     }
 }

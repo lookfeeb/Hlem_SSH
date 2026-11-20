@@ -533,7 +533,7 @@ function App() {
         loginPath: current.loginPath,
         connectionId: current.connectionId,
         connectedAt: current.connectedAt,
-        sshVersion: current.sshVersion,
+        systemInfo: current.systemInfo,
         terminalId: current.terminalId,
         sftpId: current.sftpId,
         telemetryJobId: current.telemetryJobId,
@@ -927,12 +927,10 @@ function App() {
             {settingsMounted && <SettingsModal
               open={settingsOpen}
               initialValue={currentSettings}
-              sessions={configSessions}
               onClose={() => setSettingsOpen(false)}
               onSubmit={saveSettings}
               onBackupOpen={() => setBackupOpen(true)}
               onTunnelOpen={() => setTunnelOpen(true)}
-              onCreateSession={(onCreated) => addSession(onCreated)}
               onApiServerChange={setApiServerStatus}
               onSettingsChange={applyConfigSnapshot}
               aiApiOpen={aiApiOpen}
@@ -1004,7 +1002,7 @@ function sessionForSidebar(configSession: RemoteSession, sessions: RemoteSession
     state: source.state,
     connectionId: source.connectionId,
     connectedAt: source.connectedAt,
-    sshVersion: source.sshVersion,
+    systemInfo: source.systemInfo,
     terminalId: source.terminalId,
     sftpId: source.sftpId,
     telemetryJobId: source.telemetryJobId,

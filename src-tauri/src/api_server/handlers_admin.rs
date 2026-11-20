@@ -264,9 +264,9 @@ fn verify_session_access_in_snapshot(
         return Ok(());
     }
     Err((
-        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
         Json(ApiError {
-            error: format!("无权访问会话 {}，仅允许访问指定会话", session_id),
+            error: format!("会话 {} 不存在或已删除", session_id),
         }),
     ))
 }

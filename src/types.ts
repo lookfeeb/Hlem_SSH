@@ -17,7 +17,7 @@ export interface RemoteSession {
   loginPath?: string | null;
   connectionId?: string | null;
   connectedAt?: string | null;
-  sshVersion?: string | null;
+  systemInfo?: RemoteSystemInfo | null;
   terminalId?: string | null;
   sftpId?: string | null;
   telemetryJobId?: string | null;
@@ -26,6 +26,11 @@ export interface RemoteSession {
   telemetry: ServerTelemetry;
   filesPath: string | null;
   files: RemoteFileEntry[];
+}
+
+export interface RemoteSystemInfo {
+  operatingSystem: string;
+  kernel: string;
 }
 
 export interface TerminalEntry {
@@ -115,12 +120,6 @@ export interface ConfigSnapshot {
   revision: number;
 }
 
-export interface AiApiSettings {
-  sessionIds: string[];
-  port?: number | null;
-  autoStart: boolean;
-}
-
 export interface VaultData {
   version: number;
   groups: SessionGroup[];
@@ -138,10 +137,7 @@ export interface AppSettings {
   quickCommands?: QuickCommand[];
   ignoredUpdateVersions?: string[];
   aiApiKey?: string | null;
-  aiApiSessionId?: string | null;
-  aiApiSessionIds?: string[];
   aiApiPort?: number | null;
-  aiApiAutoStart?: boolean;
   collapsedConnectionSectionIds?: string[];
 }
 

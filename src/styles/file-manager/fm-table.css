@@ -1,4 +1,5 @@
 .fileContent .ant-table-wrapper,
+.fileTableSurface > .ant-table-wrapper > .ant-spin,
 .fileContent .ant-spin-nested-loading,
 .fileContent .ant-spin-container,
 .fileContent .ant-table,
@@ -10,6 +11,48 @@
 .fileContent .ant-table-container {
   display: flex;
   flex-direction: column;
+}
+
+.fileTableSurface {
+  --file-table-scrollbar-height: 10px;
+  --file-table-scrollbar-thumb: #7484ad;
+  --file-table-scrollbar-track: #e8edf5;
+}
+
+.fileTableSurface .ant-table-header {
+  flex: 0 0 auto;
+}
+
+/* The virtual body fills the panel even when there are only a few rows. */
+.fileTableSurface .ant-table-tbody-virtual {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.fileTableSurface .ant-table-tbody-virtual-holder {
+  height: 100%;
+}
+
+.fileTableSurface .ant-table-tbody-virtual-scrollbar-horizontal {
+  bottom: 0 !important;
+  height: var(--file-table-scrollbar-height) !important;
+  background: var(--file-table-scrollbar-track);
+}
+
+.fileTableSurface .ant-table-tbody-virtual-scrollbar-horizontal .ant-table-tbody-virtual-scrollbar-thumb {
+  background: var(--file-table-scrollbar-thumb) !important;
+}
+
+.fileTableSurface .ant-table-tbody-virtual-scrollbar-horizontal .ant-table-tbody-virtual-scrollbar-thumb:hover {
+  background: #5368df !important;
+}
+
+.fileTableSurface .ant-table-tbody-virtual-scrollbar-horizontal .ant-table-tbody-virtual-scrollbar-thumb:active {
+  background: #4456bf !important;
+}
+
+.fileTableSurface .ant-table-tbody-virtual-scrollbar-vertical {
+  bottom: var(--file-table-scrollbar-height) !important;
 }
 
 .fileContent .ant-table-container::before,
@@ -26,31 +69,33 @@
 }
 
 .fileTableSurface .ant-table-body {
+  max-height: none !important;
   overflow-x: scroll !important;
   overflow-y: auto !important;
   scrollbar-width: thin;
-  scrollbar-color: rgba(99, 102, 241, .38) rgba(226, 232, 240, .72);
-  scrollbar-gutter: stable both-edges;
+  scrollbar-color: var(--file-table-scrollbar-thumb) var(--file-table-scrollbar-track);
+  /* 表头只补偿右侧滚动条，左侧占位会让整列内容错位。 */
+  scrollbar-gutter: stable;
 }
 
 .fileTableSurface .ant-table-body::-webkit-scrollbar {
   width: 8px;
-  height: 10px;
+  height: var(--file-table-scrollbar-height);
 }
 
 .fileTableSurface .ant-table-body::-webkit-scrollbar-track {
-  background: rgba(226, 232, 240, .72);
+  background: var(--file-table-scrollbar-track);
   border-radius: 999px;
 }
 
 .fileTableSurface .ant-table-body::-webkit-scrollbar-thumb {
-  border: 2px solid rgba(226, 232, 240, .72);
+  border: 2px solid var(--file-table-scrollbar-track);
   border-radius: 999px;
-  background: rgba(99, 102, 241, .45);
+  background: var(--file-table-scrollbar-thumb);
 }
 
 .fileTableSurface .ant-table-body::-webkit-scrollbar-thumb:hover {
-  background: rgba(59, 130, 246, .68);
+  background: #5368df;
 }
 
 .fileTableSurface > .ant-table-wrapper {

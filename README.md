@@ -138,7 +138,7 @@ flowchart TB
 | `remote/runtime_terminal.rs`、`terminal_stream.rs`、`terminal_bytes.rs` | PTY、终端输入输出、二进制帧与背压控制 |
 | `remote/runtime_sftp.rs`、`runtime_transfer.rs`、`transfer.rs` | SFTP 会话复用、传输通道池、队列调度与数据读写 |
 | `remote/runtime_forward.rs`、`runtime_telemetry.rs` | 端口转发与服务器指标采集 |
-| [api_server/](src-tauri/src/api_server/) | Bearer 鉴权、授权会话、命令检查、REST、长任务、SSE 与接口文档 |
+| [api_server/](src-tauri/src/api_server/) | Bearer 鉴权、主机会话、命令检查、REST、长任务、SSE 与接口文档 |
 | [vault.rs](src-tauri/src/vault.rs)、[crypto.rs](src-tauri/src/crypto.rs) | 工作区读写、自动解锁、口令迁移及密码学实现 |
 | [config.rs](src-tauri/src/config.rs)、[config_mutation.rs](src-tauri/src/config_mutation.rs)、[atomic_file.rs](src-tauri/src/atomic_file.rs) | 配置模型与校验、变更串行化、文件原子写入 |
 | [backup.rs](src-tauri/src/backup.rs)、[http_client.rs](src-tauri/src/http_client.rs) | 备份存储目标与 HTTP 客户端复用 |
@@ -282,7 +282,7 @@ flowchart TB
 
 这是提供远程操作能力的本机 REST 网关，不提供模型推理。服务随 HelM 运行，仅绑定 **`127.0.0.1`**，默认端口 **19880**。
 
-在设置的 **AI API 控制** 中选择允许访问的会话并启动服务，按需开启随应用自动启动。调用时使用面板给出的 API Key；包括接口文档在内的请求都需要 `Authorization: Bearer <api_key>`。首次 SSH 主机信任仍需在桌面端完成。
+AI API 由后端随应用默认启动，无需在前端开启自动启动；首次使用监听 `127.0.0.1:19880`，已有自定义端口继续沿用。在设置的 **AI API 控制** 中可查看状态、调整端口或临时停止服务，重启应用后会再次自动启动。API 自动提供全部已保存主机，不需要预先绑定，也没有 20 个会话的数量限制；新增、修改和删除主机会实时更新可用列表。点击主机卡片上的 **复制 AI API** 图标，可复制调用信息：第一行是接口字段库地址，第二行是 curl 鉴权头，空一行后显示该主机的会话 ID 和名称、地址。调用时使用面板给出的 API Key；包括接口文档在内的请求都需要 `Authorization: Bearer <api_key>`。首次 SSH 主机信任仍需在桌面端完成。
 
 ### 接口入口
 
@@ -290,7 +290,7 @@ flowchart TB
 | --- | --- |
 | `GET /api/auth` | 验证 API Key |
 | `GET /openapi.json`、`GET /api/fields` | OpenAPI 3.1 与动态字段 / 调用规则；支持 ETag 缓存 |
-| `GET /api/sessions` | 查询授权会话 |
+| `GET /api/sessions` | 查询全部已保存主机 |
 | `POST /api/connect`、`POST /api/disconnect` | 自动化连接生命周期 |
 | `POST /api/exec`、`POST /api/exec/batch` | 单条 / 批量执行命令 |
 | `/api/jobs`、`/api/jobs/{job_id}` | 创建、查询长任务，订阅 `/events` 或请求 `/cancel` |
@@ -305,7 +305,7 @@ flowchart TB
 $helmHeaders = @{ Authorization = "Bearer <api_key>" }
 $helmBaseUrl = "http://127.0.0.1:19880"
 
-# 先读取授权会话和接口说明
+# 先读取主机列表和接口说明
 Invoke-RestMethod -Headers $helmHeaders -Uri "$helmBaseUrl/api/sessions"
 Invoke-RestMethod -Headers $helmHeaders -Uri "$helmBaseUrl/openapi.json"
 

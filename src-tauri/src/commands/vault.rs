@@ -4,14 +4,14 @@ use tauri::{AppHandle, State};
 
 use super::{
     api_server_cmd::{
-        reconcile_api_server_with_snapshot, restore_api_server_after_config_replacement,
-        stop_api_server_for_config_replacement, sync_api_server_authorization_cache,
+        restore_api_server_after_config_replacement, spawn_api_server_autostart,
+        stop_api_server_for_config_replacement,
     },
     with_store, AppError, AppResult, AppState,
 };
 use crate::backup::build_backup_package;
 use crate::config::{AppProxyOptions, BackupSettings, ConfigSnapshot, QuickCommand, TunnelInput};
-use crate::vault::{AiApiSettingsUpdate, VaultStore, AUTO_PASSWORD};
+use crate::vault::{VaultStore, AUTO_PASSWORD};
 
 #[tauri::command]
 pub async fn vault_needs_migration(state: State<'_, AppState>) -> AppResult<bool> {
@@ -21,17 +21,23 @@ pub async fn vault_needs_migration(state: State<'_, AppState>) -> AppResult<bool
 
 #[tauri::command]
 pub async fn vault_migrate(
+    app: AppHandle,
     state: State<'_, AppState>,
     old_password: String,
 ) -> AppResult<ConfigSnapshot> {
     let _replacement_guard = state.config_mutations.begin_replacement().await;
     let snapshot = with_store(&state, |store| store.migrate(&old_password))?;
     state.clear_migration_needed();
+    drop(_replacement_guard);
+    spawn_api_server_autostart(app);
     Ok(snapshot)
 }
 
 #[tauri::command]
-pub async fn vault_skip_migration(state: State<'_, AppState>) -> AppResult<ConfigSnapshot> {
+pub async fn vault_skip_migration(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<ConfigSnapshot> {
     let _replacement_guard = state.config_mutations.begin_replacement().await;
     let mut store = state.vault.lock().map_err(super::lock_poisoned)?;
     let path = store.vault_file_path();
@@ -48,6 +54,9 @@ pub async fn vault_skip_migration(state: State<'_, AppState>) -> AppResult<Confi
     *store = VaultStore::new(path);
     let snapshot = store.create(AUTO_PASSWORD)?;
     state.clear_migration_needed();
+    drop(store);
+    drop(_replacement_guard);
+    spawn_api_server_autostart(app);
     Ok(snapshot)
 }
 
@@ -110,32 +119,6 @@ pub async fn quick_command_delete(
     let ticket = state.config_mutations.ticket();
     let _mutation_guard = state.config_mutations.lock(ticket).await?;
     with_store(&state, |store| store.quick_command_delete(&command_id))
-}
-
-#[tauri::command]
-pub async fn settings_ai_api_update(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    session_ids: Vec<String>,
-    port: Option<u16>,
-    auto_start: bool,
-) -> AppResult<ConfigSnapshot> {
-    let ticket = state.config_mutations.ticket();
-    let api_guard = state.api_server_operation.lock().await;
-    let _mutation_guard = state.config_mutations.lock(ticket).await?;
-    let snapshot = with_store(&state, |store| {
-        store.settings_ai_api_update(AiApiSettingsUpdate {
-            session_ids,
-            port,
-            auto_start,
-        })
-    })?;
-    sync_api_server_authorization_cache(&state, &snapshot).await;
-    drop(_mutation_guard);
-    drop(api_guard);
-    reconcile_api_server_with_snapshot(&app, &state).await;
-    crate::events::emit(&app, crate::events::CONFIG_CHANGED, snapshot.clone());
-    Ok(snapshot)
 }
 
 #[tauri::command]

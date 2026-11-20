@@ -208,10 +208,6 @@
   box-shadow: 0 10px 26px rgba(32, 48, 80, .055);
 }
 
-.aiApiSessionsCard {
-  grid-column: 1 / -1;
-}
-
 .aiApiSectionHeading {
   min-width: 0;
   display: flex;
@@ -433,15 +429,6 @@
   box-shadow: 0 0 0 3px rgba(190, 67, 88, .16), 0 8px 16px -9px rgba(182, 66, 84, .72) !important;
 }
 
-.aiApiAutoStartSwitch.ant-switch {
-  margin-left: auto;
-  flex: 0 0 auto;
-}
-
-.aiApiAutoStartSwitch.ant-switch.ant-switch-checked {
-  background: linear-gradient(135deg, #427cf7, #6b59ee) !important;
-}
-
 .aiApiConfigFields {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -636,128 +623,6 @@
   white-space: nowrap;
 }
 
-.aiApiSessionCount {
-  flex: 0 0 auto;
-  padding: 5px 9px;
-  border: 1px solid #dbe2f1;
-  border-radius: 999px;
-  color: #5b69c9;
-  background: #f3f5ff;
-  font-size: 10px;
-  font-weight: 800;
-}
-
-.aiApiSessionRows {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-
-.aiApiSessionSelectRow {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) 120px;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 8px;
-  border: 1px solid #e5eaf2;
-  border-radius: 13px;
-  background: #fafbfd;
-}
-
-.aiApiSessionIndex {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  color: #6d7b91;
-  background: #edf1f6;
-  font-size: 9.5px;
-  font-weight: 850;
-  letter-spacing: .3px;
-}
-
-.aiApiSessionSelect.ant-select {
-  width: 100%;
-  height: 40px !important;
-  min-width: 0;
-  border: 1px solid #dfe5ee !important;
-  border-radius: 10px !important;
-  background: #ffffff !important;
-  box-shadow: none !important;
-}
-
-.aiApiSessionSelect.ant-select:hover:not(.ant-select-disabled) {
-  border-color: #bfcbe0 !important;
-}
-
-.aiApiSessionSelect.ant-select-focused {
-  border-color: #6075ee !important;
-  box-shadow: 0 0 0 3px rgba(96, 117, 238, .12) !important;
-}
-
-.aiApiSessionSelect .ant-select-content,
-.aiApiSessionSelect .ant-select-selector {
-  min-height: 38px !important;
-  display: flex !important;
-  align-items: center !important;
-  border: 0 !important;
-  border-radius: 9px !important;
-  background: transparent !important;
-  box-shadow: none !important;
-}
-
-.aiApiSessionSelect.ant-select-disabled {
-  color: #8d98aa !important;
-  background: #f1f4f8 !important;
-}
-
-.aiApiSessionActions {
-  width: 120px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
-.aiApiSessionAction.ant-btn {
-  width: 36px !important;
-  min-width: 36px !important;
-  height: 36px !important;
-  display: inline-grid !important;
-  place-items: center;
-  padding: 0 !important;
-  border: 1px solid #dfe5ee !important;
-  border-radius: 10px !important;
-  color: #65738a !important;
-  background: #ffffff !important;
-  box-shadow: none !important;
-}
-
-.aiApiSessionAction .ant-btn-icon,
-.aiApiSessionAction .anticon,
-.aiApiSessionAction svg {
-  display: block !important;
-  line-height: 1 !important;
-}
-
-.aiApiSessionAction.ant-btn:not(:disabled):hover {
-  border-color: #bfcbe0 !important;
-  color: #5065df !important;
-  background: #f3f5ff !important;
-}
-
-.aiApiSessionAction.is-copy .anticon-check {
-  color: #15946d !important;
-}
-
-.aiApiSessionAction.ant-btn:disabled {
-  border-color: #e7ebf1 !important;
-  color: #b5bdca !important;
-  background: #f4f6f9 !important;
-}
-
 .aiApiModalFooter {
   min-height: 68px;
   flex: 0 0 68px;
@@ -857,19 +722,6 @@
 
   .aiApiContent {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .aiApiSessionsCard {
-    grid-column: auto;
-  }
-
-  .aiApiSessionSelectRow {
-    grid-template-columns: 30px minmax(0, 1fr);
-  }
-
-  .aiApiSessionActions {
-    width: auto;
-    grid-column: 2;
   }
 
   .aiApiModalFooter {

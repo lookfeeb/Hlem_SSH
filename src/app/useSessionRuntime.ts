@@ -18,6 +18,7 @@ import {
   shouldApplySshStatusToSession,
 } from "../lib/sshConnectionState";
 import { applyTelemetryEvent } from "../lib/telemetryState";
+import { parseSystemInfo, SYSTEM_INFO_COMMAND } from "../lib/systemInfo";
 import {
   formatSessionError,
   getHostKeyPayload,
@@ -42,8 +43,6 @@ type ConnectionAttempt = {
   connectionId: string | null;
 };
 
-const SSH_VERSION_COMMAND =
-  "sh -lc 'if command -v sshd >/dev/null 2>&1; then sshd -V 2>&1; elif [ -x /usr/sbin/sshd ]; then /usr/sbin/sshd -V 2>&1; elif [ -x /usr/local/sbin/sshd ]; then /usr/local/sbin/sshd -V 2>&1; else ssh -V 2>&1; fi'";
 const LOGIN_PATH_COMMAND = "sh -lc 'pwd -P 2>/dev/null || pwd'";
 const LOGIN_PATH_TIMEOUT_MS = 5000;
 const ACTIVE_TELEMETRY_INTERVAL_MS = 5000;
@@ -101,7 +100,7 @@ function createRuntimeSessionInstance(session: RemoteSession): RemoteSession {
     state: "disconnected",
     connectionId: null,
     connectedAt: null,
-    sshVersion: null,
+    systemInfo: null,
     terminalId: null,
     sftpId: null,
     telemetryJobId: null,
@@ -311,7 +310,7 @@ export function useSessionRuntime({
         state: "disconnected",
         connectionId: null,
         connectedAt: null,
-        sshVersion: null,
+        systemInfo: null,
         terminalId: null,
         sftpId: null,
         telemetryJobId: null,
@@ -410,7 +409,7 @@ export function useSessionRuntime({
           state: "disconnected",
           connectionId: null,
           connectedAt: null,
-          sshVersion: null,
+          systemInfo: null,
           terminalId: null,
           sftpId: null,
           telemetryJobId: null,
@@ -433,7 +432,7 @@ export function useSessionRuntime({
       state: "disconnected",
       connectionId: null,
       connectedAt: null,
-      sshVersion: null,
+      systemInfo: null,
       terminalId: null,
       sftpId: null,
       telemetryJobId: null,
@@ -479,7 +478,7 @@ export function useSessionRuntime({
           setSessions((current) => [...current, runtime]);
           activateSession(runtime.id);
           void backfillExternalConnection(runtime.id, payload.connectionId);
-          void fetchSshVersion(payload.connectionId, runtime.id);
+          void fetchSystemInfo(payload.connectionId, runtime.id);
           return;
         }
       } else {
@@ -508,7 +507,7 @@ export function useSessionRuntime({
             state: "disconnected",
             connectionId: null,
             connectedAt: null,
-            sshVersion: null,
+            systemInfo: null,
             terminalId: null,
             sftpId: null,
             telemetryJobId: null,
@@ -528,8 +527,8 @@ export function useSessionRuntime({
         ) {
           void backfillExternalConnection(session.id, payload.connectionId);
         }
-        if (payload.status === "connected" && !uiManaged && !session.sshVersion) {
-          void fetchSshVersion(payload.connectionId, session.id);
+        if (payload.status === "connected" && !uiManaged && !session.systemInfo) {
+          void fetchSystemInfo(payload.connectionId, session.id);
         }
         return {
           ...session,
@@ -618,7 +617,7 @@ export function useSessionRuntime({
       if (mountedRef.current && current?.connectionId === connectionId && current.state === "connected") {
         appendTerminal(sessionId, "error", `终端不可用：${getErrorMessage(error)}`);
         startTelemetry(connectionId, sessionId);
-        void fetchSshVersion(connectionId, sessionId);
+        void fetchSystemInfo(connectionId, sessionId);
       }
     } finally {
       if (externalTerminalBackfillsRef.current.get(sessionId) === connectionId) {
@@ -660,7 +659,7 @@ export function useSessionRuntime({
       state: "connecting",
       connectionId: null,
       connectedAt: null,
-      sshVersion: null,
+      systemInfo: null,
       terminalId: null,
       sftpId: null,
       telemetryJobId: null,
@@ -899,7 +898,7 @@ export function useSessionRuntime({
         const current = sessionsRef.current.find((session) => session.id === sessionId);
         if (current?.state !== "connected" || current.connectionId !== connectionId) return;
         startTelemetry(connectionId, sessionId);
-        void fetchSshVersion(connectionId, sessionId);
+        void fetchSystemInfo(connectionId, sessionId);
       }
     })();
   }
@@ -1053,24 +1052,24 @@ export function useSessionRuntime({
     });
   }
 
-  function fetchSshVersion(connectionId: string, sessionId: string) {
+  function fetchSystemInfo(connectionId: string, sessionId: string) {
     remoteApi
-      .execOnConnection(connectionId, SSH_VERSION_COMMAND, 3000)
+      .execOnConnection(connectionId, SYSTEM_INFO_COMMAND, 3000)
       .then((result) => {
         if (!mountedRef.current) return;
-        const sshVersion = normalizeSshVersion(`${result.stdout}\n${result.stderr}`);
-        if (!sshVersion) return;
+        const systemInfo = parseSystemInfo(result.stdout);
+        if (!systemInfo) return;
         updateSession(sessionId, (item) =>
           item.connectionId === connectionId
             ? {
                 ...item,
-                sshVersion,
+                systemInfo,
               }
             : item,
         );
       })
       .catch((error) => {
-        console.warn("[helm] failed to fetch ssh version:", getErrorMessage(error));
+        console.warn("[helm] failed to fetch system info:", getErrorMessage(error));
       });
   }
 
@@ -1086,20 +1085,4 @@ export function useSessionRuntime({
     handleTelemetryEvent,
     connectSession,
   };
-}
-
-function normalizeSshVersion(output: string) {
-  const line = output
-    .split(/\r?\n/)
-    .map((item) => item.trim())
-    .find((item) => item && /(OpenSSH|Dropbear|SSH)/i.test(item));
-  if (!line) return "";
-
-  const openSsh = line.match(/OpenSSH[_\s-]?([^\s,]+)/i);
-  if (openSsh) return `OpenSSH ${openSsh[1]}`;
-
-  const dropbear = line.match(/Dropbear[_\s-]?([^\s,]+)/i);
-  if (dropbear) return `Dropbear ${dropbear[1]}`;
-
-  return line.replace(/^SSH-[\d.]+-/, "").split(",")[0].replace(/_/g, " ");
 }

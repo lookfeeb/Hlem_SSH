@@ -40,12 +40,20 @@ pub async fn group_delete(
 
 #[tauri::command]
 pub async fn session_create(
+    app: AppHandle,
     state: State<'_, AppState>,
     input: SessionInput,
 ) -> AppResult<ConfigSnapshot> {
     let ticket = state.config_mutations.ticket();
+    let api_guard = state.api_server_operation.lock().await;
     let _mutation_guard = state.config_mutations.lock(ticket).await?;
-    with_store(&state, |store| store.create_session(input))
+    let snapshot = with_store(&state, |store| store.create_session(input))?;
+    sync_api_server_authorization_cache(&state, &snapshot).await;
+    drop(_mutation_guard);
+    drop(api_guard);
+    reconcile_api_server_with_snapshot(&app, &state).await;
+    crate::events::emit(&app, crate::events::CONFIG_CHANGED, snapshot.clone());
+    Ok(snapshot)
 }
 
 #[tauri::command]

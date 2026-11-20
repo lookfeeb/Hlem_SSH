@@ -67,7 +67,7 @@ pub use terminal::{
 };
 pub use vault::{
     config_snapshot, connection_section_state_update, quick_command_delete, quick_command_upsert,
-    settings_ai_api_update, settings_backup_update, settings_ignore_update_version,
+    settings_backup_update, settings_ignore_update_version,
     settings_proxy_update, tunnel_create, tunnel_delete, tunnel_update, vault_backup_export,
     vault_backup_import, vault_migrate, vault_needs_migration, vault_skip_migration,
 };

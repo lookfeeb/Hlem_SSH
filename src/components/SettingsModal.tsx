@@ -25,12 +25,10 @@ import { ReleaseNotesModal } from "./settings/ReleaseNotesModal";
 interface SettingsModalProps {
   open: boolean;
   initialValue: AppSettings;
-  sessions: { id: string; name: string; host: string; state: string }[];
   onClose: () => void;
   onSubmit: (proxy: AppProxyOptions | null) => Promise<void>;
   onBackupOpen: () => void;
   onTunnelOpen: () => void;
-  onCreateSession: (onCreated?: (sessionId: string) => void) => void;
   onApiServerChange: (info: import("../api/appApi").ApiServerInfo) => void;
   onSettingsChange: (snapshot: ConfigSnapshot) => void;
   aiApiOpen: boolean;
@@ -59,7 +57,7 @@ interface SettingsFormValues {
 }
 
 export function SettingsModal({
-  open, initialValue, sessions, onClose, onSubmit, onBackupOpen, onTunnelOpen, onCreateSession,
+  open, initialValue, onClose, onSubmit, onBackupOpen, onTunnelOpen,
   onApiServerChange, onSettingsChange, aiApiOpen, onAiApiOpenChange,
   appInfo, updateInfo, updateError, updateChecking, updateDownloading,
   downloadedUpdatePath, updateRepo, onCheckUpdate, onDownloadUpdate, onInstallUpdate,
@@ -293,8 +291,6 @@ export function SettingsModal({
         open={aiApiOpen}
         onClose={() => onAiApiOpenChange(false)}
         initialValue={initialValue}
-        sessions={sessions}
-        onCreateSession={onCreateSession}
         onApiServerChange={onApiServerChange}
         onSettingsChange={onSettingsChange}
       />
